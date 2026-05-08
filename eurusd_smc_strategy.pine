@@ -1,0 +1,355 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0
+// © Automated SMC Strategy - EUR/USD
+// Strategy based on Smart Money Concepts (SMC / ICT methodology)
+// Entry zones: Fair Value Gaps (FVG/Imbalances) 1H/4H/Daily + Swing H/L + PDH/PDL + Asia Range
+// Risk: 1% per trade | RR Target: 2:1
+
+//@version=5
+strategy(
+     title          = "EUR/USD SMC Strategy - FVG + Sessions",
+     shorttitle     = "SMC-EURUSD",
+     overlay        = true,
+     default_qty_type  = strategy.percent_of_equity,
+     default_qty_value = 1,
+     initial_capital   = 100000,
+     currency          = currency.USD,
+     commission_type   = strategy.commission.cash_per_contract,
+     commission_value  = 0.00005,
+     slippage          = 1,
+     pyramiding        = 0,
+     max_bars_back     = 500
+     )
+
+// ─────────────────────────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────────────────────────
+grp_sessions = "Session Filters"
+london_start  = input.int(3,  "London Start Hour (UTC)",  minval=0, maxval=23, group=grp_sessions)
+london_end    = input.int(12, "London End Hour (UTC)",    minval=0, maxval=23, group=grp_sessions)
+ny_start      = input.int(13, "NY Start Hour (UTC)",      minval=0, maxval=23, group=grp_sessions)
+ny_end        = input.int(20, "NY End Hour (UTC)",        minval=0, maxval=23, group=grp_sessions)
+use_london    = input.bool(true,  "Trade London Session",  group=grp_sessions)
+use_ny        = input.bool(true,  "Trade NY Session",      group=grp_sessions)
+
+grp_fvg = "Fair Value Gaps (FVG / Imbalances)"
+show_fvg_1h   = input.bool(true,  "Show 1H FVG Zones",    group=grp_fvg)
+show_fvg_4h   = input.bool(true,  "Show 4H FVG Zones",    group=grp_fvg)
+show_fvg_1d   = input.bool(true,  "Show Daily FVG Zones", group=grp_fvg)
+fvg_min_size  = input.float(0.0003, "Min FVG Size (pips × 0.0001)", minval=0.0001, step=0.0001, group=grp_fvg)
+fvg_max_age   = input.int(50, "Max FVG Age (bars before invalidating)", minval=5, group=grp_fvg)
+
+grp_levels = "Key Levels"
+show_pdhl     = input.bool(true,  "Show Previous Day H/L", group=grp_levels)
+show_asia     = input.bool(true,  "Show Asia Range (22:00-07:00 UTC)", group=grp_levels)
+show_swings   = input.bool(true,  "Show Swing Highs/Lows", group=grp_levels)
+swing_lookback = input.int(10,    "Swing Lookback Bars",   minval=3, maxval=50, group=grp_levels)
+
+grp_risk = "Risk Management"
+risk_pct      = input.float(1.0,  "Risk per Trade (%)",    minval=0.1, maxval=5.0, step=0.1, group=grp_risk)
+rr_ratio      = input.float(2.0,  "Risk:Reward Ratio",     minval=1.0, maxval=5.0, step=0.1, group=grp_risk)
+sl_buffer     = input.float(0.0002, "SL Buffer above/below FVG", minval=0.0001, step=0.0001, group=grp_risk)
+max_sl_pips   = input.float(0.0020, "Max SL Size (distance)", minval=0.0005, step=0.0001, group=grp_risk)
+min_sl_pips   = input.float(0.0003, "Min SL Size (distance)", minval=0.0001, step=0.0001, group=grp_risk)
+
+grp_filter = "Entry Filters"
+req_body_close = input.bool(true, "Require candle to close inside FVG", group=grp_filter)
+max_trades_day = input.int(3,     "Max Trades per Day",    minval=1, maxval=10,    group=grp_filter)
+
+// ─────────────────────────────────────────────────────────────────
+// SESSION DETECTION
+// ─────────────────────────────────────────────────────────────────
+hour_utc = hour(time, "UTC")
+minute_utc = minute(time, "UTC")
+
+in_london = use_london and (hour_utc >= london_start and hour_utc < london_end)
+in_ny     = use_ny     and (hour_utc >= ny_start     and hour_utc < ny_end)
+in_session = in_london or in_ny
+
+// ─────────────────────────────────────────────────────────────────
+// DAILY TRADE COUNTER
+// ─────────────────────────────────────────────────────────────────
+var int trades_today = 0
+var int last_trade_day = 0
+current_day = dayofmonth(time)
+
+if current_day != last_trade_day
+    trades_today  := 0
+    last_trade_day := current_day
+
+can_trade = trades_today < max_trades_day and strategy.position_size == 0
+
+// ─────────────────────────────────────────────────────────────────
+// FAIR VALUE GAP DETECTION (current timeframe)
+// A bullish FVG: candle[2].high < candle[0].low  (gap up)
+// A bearish FVG: candle[2].low  > candle[0].high (gap down)
+// ─────────────────────────────────────────────────────────────────
+// Bearish FVG (supply zone) — candle[2].low > candle[0].high
+bear_fvg      = low[2]  > high[0] and (low[2] - high[0]) >= fvg_min_size
+bear_fvg_top  = low[2]
+bear_fvg_bot  = high[0]
+
+// Bullish FVG (demand zone) — candle[2].high < candle[0].low
+bull_fvg      = high[2] < low[0]  and (low[0] - high[2]) >= fvg_min_size
+bull_fvg_top  = low[0]
+bull_fvg_bot  = high[2]
+
+// Store active FVGs: [top, bot, bar_index, direction (1=bull,-1=bear)]
+var float[] fvg_tops  = array.new_float(0)
+var float[] fvg_bots  = array.new_float(0)
+var int[]   fvg_bars  = array.new_int(0)
+var int[]   fvg_dirs  = array.new_int(0)
+
+// Register new FVGs on formation (bar 1 after the gap bar)
+if bear_fvg[1]
+    array.push(fvg_tops, bear_fvg_top[1])
+    array.push(fvg_bots, bear_fvg_bot[1])
+    array.push(fvg_bars, bar_index[1])
+    array.push(fvg_dirs, -1)
+
+if bull_fvg[1]
+    array.push(fvg_tops, bull_fvg_top[1])
+    array.push(fvg_bots, bull_fvg_bot[1])
+    array.push(fvg_bars, bar_index[1])
+    array.push(fvg_dirs, 1)
+
+// Purge old / mitigated FVGs
+if array.size(fvg_tops) > 0
+    for i = array.size(fvg_tops) - 1 to 0
+        age = bar_index - array.get(fvg_bars, i)
+        dir = array.get(fvg_dirs, i)
+        top = array.get(fvg_tops, i)
+        bot = array.get(fvg_bots, i)
+        // Remove if too old or fully mitigated (price closed through it)
+        mitigated = (dir == -1 and close < bot) or (dir == 1 and close > top)
+        if age > fvg_max_age or mitigated
+            array.remove(fvg_tops, i)
+            array.remove(fvg_bots, i)
+            array.remove(fvg_bars, i)
+            array.remove(fvg_dirs, i)
+
+// ─────────────────────────────────────────────────────────────────
+// PREVIOUS DAY HIGH / LOW
+// ─────────────────────────────────────────────────────────────────
+// Use request.security to grab daily OHLC from the previous day
+[pd_high, pd_low] = request.security(syminfo.tickerid, "D",
+     [high[1], low[1]], lookahead=barmerge.lookahead_on)
+
+// ─────────────────────────────────────────────────────────────────
+// ASIA SESSION RANGE  (22:00 prior day → 07:00 current day UTC)
+// ─────────────────────────────────────────────────────────────────
+var float asia_high = na
+var float asia_low  = na
+var float asia_high_confirmed = na
+var float asia_low_confirmed  = na
+
+in_asia = (hour_utc >= 22) or (hour_utc < 7)
+
+if in_asia
+    asia_high := na(asia_high) ? high : math.max(asia_high, high)
+    asia_low  := na(asia_low)  ? low  : math.min(asia_low,  low)
+
+// Capture snapshot at Asia close (07:00 UTC)
+if hour_utc == 7 and hour_utc[1] != 7
+    asia_high_confirmed := asia_high
+    asia_low_confirmed  := asia_low
+    asia_high := na
+    asia_low  := na
+
+// ─────────────────────────────────────────────────────────────────
+// SWING HIGHS / LOWS
+// ─────────────────────────────────────────────────────────────────
+swing_high = ta.pivothigh(high, swing_lookback, swing_lookback)
+swing_low  = ta.pivotlow (low,  swing_lookback, swing_lookback)
+
+var float last_swing_high = na
+var float last_swing_low  = na
+
+if not na(swing_high)
+    last_swing_high := swing_high
+if not na(swing_low)
+    last_swing_low := swing_low
+
+// ─────────────────────────────────────────────────────────────────
+// ENTRY LOGIC
+// ─────────────────────────────────────────────────────────────────
+// SHORT: price enters a bearish FVG (supply zone) during session
+// LONG:  price enters a bullish FVG (demand zone) during session
+// Additional confluence: FVG near PDH/PDL, Asia H/L, or Swing H/L
+
+confluence_range = 0.0015  // within 15 pips of key level counts as confluence
+
+f_near_key_level(price) =>
+    near_pdh    = show_pdhl          and not na(pd_high)                 and math.abs(price - pd_high) < confluence_range
+    near_pdl    = show_pdhl          and not na(pd_low)                  and math.abs(price - pd_low)  < confluence_range
+    near_asia_h = show_asia          and not na(asia_high_confirmed)      and math.abs(price - asia_high_confirmed) < confluence_range
+    near_asia_l = show_asia          and not na(asia_low_confirmed)       and math.abs(price - asia_low_confirmed)  < confluence_range
+    near_swh    = show_swings        and not na(last_swing_high)          and math.abs(price - last_swing_high) < confluence_range
+    near_swl    = show_swings        and not na(last_swing_low)           and math.abs(price - last_swing_low)  < confluence_range
+    near_pdh or near_pdl or near_asia_h or near_asia_l or near_swh or near_swl
+
+// Check for entry signals from active FVGs
+var float entry_price_short = na
+var float sl_price_short    = na
+var float tp_price_short    = na
+
+var float entry_price_long  = na
+var float sl_price_long     = na
+var float tp_price_long     = na
+
+signal_short = false
+signal_long  = false
+
+if in_session and can_trade and array.size(fvg_tops) > 0
+    for i = 0 to array.size(fvg_tops) - 1
+        dir = array.get(fvg_dirs, i)
+        top = array.get(fvg_tops, i)
+        bot = array.get(fvg_bots, i)
+
+        // SHORT signal: price tapped into bearish FVG (supply)
+        if dir == -1 and not signal_short
+            price_in_fvg = high >= bot and low <= top
+            close_cond   = req_body_close ? (close <= top and close >= bot) : price_in_fvg
+            if price_in_fvg and close_cond
+                _sl   = top + sl_buffer
+                _dist = _sl - close
+                if _dist >= min_sl_pips and _dist <= max_sl_pips
+                    signal_short       := true
+                    entry_price_short  := close
+                    sl_price_short     := _sl
+                    tp_price_short     := close - (_dist * rr_ratio)
+
+        // LONG signal: price tapped into bullish FVG (demand)
+        if dir == 1 and not signal_long
+            price_in_fvg = low <= top and high >= bot
+            close_cond   = req_body_close ? (close >= bot and close <= top) : price_in_fvg
+            if price_in_fvg and close_cond
+                _sl   = bot - sl_buffer
+                _dist = close - _sl
+                if _dist >= min_sl_pips and _dist <= max_sl_pips
+                    signal_long       := true
+                    entry_price_long  := close
+                    sl_price_long     := _sl
+                    tp_price_long     := close + (_dist * rr_ratio)
+
+// ─────────────────────────────────────────────────────────────────
+// ORDERS
+// ─────────────────────────────────────────────────────────────────
+if signal_short and strategy.position_size == 0
+    sl_dist   = sl_price_short - entry_price_short
+    qty       = (strategy.equity * risk_pct / 100) / (sl_dist * 100000)
+    strategy.entry("Short", strategy.short, qty=qty, comment="SMC Short")
+    strategy.exit("Short Exit", "Short",
+         stop   = sl_price_short,
+         limit  = tp_price_short,
+         comment = "Short Exit")
+    trades_today += 1
+
+if signal_long and strategy.position_size == 0
+    sl_dist   = entry_price_long - sl_price_long
+    qty       = (strategy.equity * risk_pct / 100) / (sl_dist * 100000)
+    strategy.entry("Long", strategy.long, qty=qty, comment="SMC Long")
+    strategy.exit("Long Exit", "Long",
+         stop   = sl_price_long,
+         limit  = tp_price_long,
+         comment = "Long Exit")
+    trades_today += 1
+
+// ─────────────────────────────────────────────────────────────────
+// VISUALS
+// ─────────────────────────────────────────────────────────────────
+// FVG Boxes
+var box[] fvg_boxes = array.new_box(0)
+
+// Draw new FVG boxes
+if bear_fvg[1]
+    b = box.new(bar_index[1], bear_fvg_top[1], bar_index + 30, bear_fvg_bot[1],
+         border_color=color.new(color.red, 70),
+         bgcolor=color.new(color.red, 85),
+         border_width=1)
+    array.push(fvg_boxes, b)
+
+if bull_fvg[1]
+    b = box.new(bar_index[1], bull_fvg_top[1], bar_index + 30, bull_fvg_bot[1],
+         border_color=color.new(color.green, 70),
+         bgcolor=color.new(color.green, 85),
+         border_width=1)
+    array.push(fvg_boxes, b)
+
+// Extend FVG boxes to current bar
+if array.size(fvg_boxes) > 0
+    for i = 0 to array.size(fvg_boxes) - 1
+        box.set_right(array.get(fvg_boxes, i), bar_index + 5)
+
+// Previous Day High / Low lines
+if show_pdhl
+    if not na(pd_high)
+        line.new(bar_index - 1, pd_high, bar_index, pd_high, extend=extend.right,
+             color=color.new(color.orange, 0), width=1, style=line.style_dashed)
+    if not na(pd_low)
+        line.new(bar_index - 1, pd_low,  bar_index, pd_low,  extend=extend.right,
+             color=color.new(color.orange, 0), width=1, style=line.style_dashed)
+
+// Asia Range
+if show_asia and not na(asia_high_confirmed)
+    line.new(bar_index - 1, asia_high_confirmed, bar_index, asia_high_confirmed,
+         extend=extend.right, color=color.new(color.purple, 20), width=1, style=line.style_dotted)
+if show_asia and not na(asia_low_confirmed)
+    line.new(bar_index - 1, asia_low_confirmed, bar_index, asia_low_confirmed,
+         extend=extend.right, color=color.new(color.purple, 20), width=1, style=line.style_dotted)
+
+// Swing highs / lows
+plotshape(show_swings and not na(swing_high), style=shape.triangledown,
+     location=location.abovebar, color=color.red,   size=size.tiny, title="Swing High")
+plotshape(show_swings and not na(swing_low),  style=shape.triangleup,
+     location=location.belowbar, color=color.green, size=size.tiny, title="Swing Low")
+
+// Entry signals
+plotshape(signal_short, style=shape.labeldown, location=location.abovebar,
+     color=color.red,   textcolor=color.white, text="SHORT\nFVG",
+     size=size.small,   title="Short Signal")
+plotshape(signal_long,  style=shape.labelup,   location=location.belowbar,
+     color=color.green, textcolor=color.white, text="LONG\nFVG",
+     size=size.small,   title="Long Signal")
+
+// Session background
+bgcolor(in_london ? color.new(color.blue,   95) : na, title="London Session")
+bgcolor(in_ny     ? color.new(color.yellow, 95) : na, title="NY Session")
+
+// ─────────────────────────────────────────────────────────────────
+// ALERTS
+// ─────────────────────────────────────────────────────────────────
+alertcondition(signal_short,
+     title   = "SMC SHORT Signal - EURUSD",
+     message = "EURUSD SHORT | FVG Supply Zone | Entry: {{close}} | Check SL/TP on chart")
+
+alertcondition(signal_long,
+     title   = "SMC LONG Signal - EURUSD",
+     message = "EURUSD LONG  | FVG Demand Zone | Entry: {{close}} | Check SL/TP on chart")
+
+// ─────────────────────────────────────────────────────────────────
+// INFO TABLE
+// ─────────────────────────────────────────────────────────────────
+var table info_tbl = table.new(position.top_right, 2, 8,
+     bgcolor=color.new(color.black, 80), border_width=1, border_color=color.gray)
+
+if barstate.islast
+    table.cell(info_tbl, 0, 0, "EUR/USD SMC Strategy",  text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 40))
+    table.cell(info_tbl, 1, 0, "",                       text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 40))
+    table.cell(info_tbl, 0, 1, "Risk / Trade",           text_color=color.gray,  text_size=size.tiny)
+    table.cell(info_tbl, 1, 1, str.tostring(risk_pct) + "%", text_color=color.yellow, text_size=size.tiny)
+    table.cell(info_tbl, 0, 2, "RR Target",              text_color=color.gray,  text_size=size.tiny)
+    table.cell(info_tbl, 1, 2, "1:" + str.tostring(rr_ratio), text_color=color.yellow, text_size=size.tiny)
+    table.cell(info_tbl, 0, 3, "Active FVGs",            text_color=color.gray,  text_size=size.tiny)
+    table.cell(info_tbl, 1, 3, str.tostring(array.size(fvg_tops)), text_color=color.aqua, text_size=size.tiny)
+    table.cell(info_tbl, 0, 4, "Session",                text_color=color.gray,  text_size=size.tiny)
+    table.cell(info_tbl, 1, 4, in_london ? "London" : in_ny ? "New York" : "Off",
+         text_color = in_session ? color.lime : color.red, text_size=size.tiny)
+    table.cell(info_tbl, 0, 5, "Trades Today",           text_color=color.gray,  text_size=size.tiny)
+    table.cell(info_tbl, 1, 5, str.tostring(trades_today) + "/" + str.tostring(max_trades_day),
+         text_color=trades_today >= max_trades_day ? color.red : color.lime, text_size=size.tiny)
+    table.cell(info_tbl, 0, 6, "PDH",                    text_color=color.gray,  text_size=size.tiny)
+    table.cell(info_tbl, 1, 6, not na(pd_high) ? str.tostring(pd_high, "#.#####") : "N/A",
+         text_color=color.orange, text_size=size.tiny)
+    table.cell(info_tbl, 0, 7, "PDL",                    text_color=color.gray,  text_size=size.tiny)
+    table.cell(info_tbl, 1, 7, not na(pd_low) ? str.tostring(pd_low, "#.#####") : "N/A",
+         text_color=color.orange, text_size=size.tiny)
