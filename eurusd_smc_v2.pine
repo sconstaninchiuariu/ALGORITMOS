@@ -1,12 +1,13 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0
-// SMC EURUSD — Quant v2  |  Sweep → 1M MSS → iFVG Entry
-// Logic: HTF FVG bias → Liquidity Sweep → 1M MSS → 3-candle FVG retest → Entry
+// SMC EURUSD — Quant v3  |  Sweep → 1M MSS → iFVG Entry
+// HTF: Daily / 4H / 1H FVG  |  Liquidity: PDH/PDL · PWH/PWL · Asia · Swings
+// Kill Zones: London 03:00-05:00 UTC · NY 08:00-10:30 UTC
 // Risk: Tiered non-compounded (0.7 % → 2.0 %)  |  SL = sweep wick extreme  |  TP = SL × RR
 
 //@version=5
 strategy(
-     title             = "SMC EURUSD — v2 [Sweep → MSS → FVG]",
-     shorttitle        = "SMC-v2",
+     title             = "SMC EURUSD — v3 [Sweep → MSS → FVG]",
+     shorttitle        = "SMC-v3",
      overlay           = true,
      default_qty_type  = strategy.fixed,
      default_qty_value = 1,
@@ -23,16 +24,19 @@ strategy(
 // INPUTS
 // ═══════════════════════════════════════════════════════════════
 var string GKZ  = "Kill Zones (UTC)"
-kz_lon_open   = input.int(3,  "London Open",  0, 23, group=GKZ, tooltip="Early London / Asia-London overlap")
-kz_lon_close  = input.int(7,  "London Close", 0, 23, group=GKZ)
-kz_ny_open    = input.int(8,  "NY Open",      0, 23, group=GKZ)
-kz_ny_close   = input.int(12, "NY Close",     0, 23, group=GKZ)
+kz_lon_open    = input.int(3,  "London Open (h)",     0, 23, group=GKZ)
+kz_lon_close   = input.int(5,  "London Close (h)",    0, 23, group=GKZ)
+kz_ny_open     = input.int(8,  "NY Open (h)",         0, 23, group=GKZ)
+kz_ny_close_h  = input.int(10, "NY Close (h)",        0, 23, group=GKZ)
+kz_ny_close_m  = input.int(30, "NY Close (min)",      0, 59, group=GKZ,
+                   tooltip="Set to 30 for 10:30 UTC cutoff")
 
 var string GLIQ = "Liquidity Levels"
-use_pdhl      = input.bool(true,   "PDH / PDL",          group=GLIQ)
-use_asia      = input.bool(true,   "Asia Range",         group=GLIQ)
-use_swings    = input.bool(true,   "Swing Highs / Lows", group=GLIQ)
-swing_len     = input.int(10,      "Swing Lookback",     2, 50, group=GLIQ)
+use_pdhl      = input.bool(true,   "PDH / PDL (Previous Day)",   group=GLIQ)
+use_pwhl      = input.bool(true,   "PWH / PWL (Previous Week)",  group=GLIQ)
+use_asia      = input.bool(true,   "Asia Range",                  group=GLIQ)
+use_swings    = input.bool(true,   "Swing Highs / Lows",          group=GLIQ)
+swing_len     = input.int(10,      "Swing Lookback",     2, 50,   group=GLIQ)
 sweep_buf     = input.float(0.0002,"Sweep Confirmation Buffer", 0.00005, 0.001, 0.00001, group=GLIQ,
                   tooltip="Wick must exceed level by this distance to count as a valid sweep")
 
@@ -47,10 +51,12 @@ fvg_max_bars  = input.int(60,      "FVG Max Age",   5, 300,         group=GFVG,
 req_close_fvg = input.bool(true,   "Entry candle must CLOSE inside FVG", group=GFVG)
 
 var string GHTF = "HTF Context Filter"
-use_htf       = input.bool(true,  "Require HTF FVG alignment (4H / Daily)", group=GHTF)
-htf_tf1       = input.timeframe("240", "HTF 1",  group=GHTF)
-htf_tf2       = input.timeframe("D",   "HTF 2",  group=GHTF)
-htf_fvg_min   = input.float(0.0005, "Min HTF FVG Size", 0.00010, 0.010, 0.00010, group=GHTF)
+use_htf       = input.bool(true,  "Require HTF FVG alignment (1H / 4H / Daily)", group=GHTF)
+htf_tf1       = input.timeframe("60",  "HTF 1 (1H)",    group=GHTF)
+htf_tf2       = input.timeframe("240", "HTF 2 (4H)",    group=GHTF)
+htf_tf3       = input.timeframe("D",   "HTF 3 (Daily)", group=GHTF)
+htf_fvg_min   = input.float(0.0003, "Min HTF FVG Size", 0.00010, 0.010, 0.00010, group=GHTF,
+                  tooltip="1H FVGs are smaller; 0.0003 = 3 pips min")
 
 var string GRSK = "Risk Management"
 rr_ratio      = input.float(2.0,   "RR Ratio",          1.0, 10.0, 0.1, group=GRSK)
@@ -68,30 +74,37 @@ r5 = input.float(1.8, "Attempt 5 (%)", 0.1, 5.0, 0.1, group=GTR) / 100
 r6 = input.float(2.0, "Attempt 6 (%)", 0.1, 5.0, 0.1, group=GTR) / 100
 
 // ═══════════════════════════════════════════════════════════════
-// HTF BIAS  —  4H / Daily FVG zones
+// HTF BIAS  —  1H / 4H / Daily FVG zones
 // lookahead=off → uses only CLOSED HTF candles → no repainting
 // ═══════════════════════════════════════════════════════════════
 [h1_h2, h1_l2, h1_h0, h1_l0] = request.security(syminfo.tickerid, htf_tf1,
      [high[2], low[2], high[0], low[0]], lookahead=barmerge.lookahead_off)
 [h2_h2, h2_l2, h2_h0, h2_l0] = request.security(syminfo.tickerid, htf_tf2,
      [high[2], low[2], high[0], low[0]], lookahead=barmerge.lookahead_off)
+[h3_h2, h3_l2, h3_h0, h3_l0] = request.security(syminfo.tickerid, htf_tf3,
+     [high[2], low[2], high[0], low[0]], lookahead=barmerge.lookahead_off)
 
-// Bearish FVG on HTF: candle[-2].low > candle[0].high  →  supply zone
-htf_bear = (h1_l2 > h1_h0 and h1_l2 - h1_h0 >= htf_fvg_min) or
-           (h2_l2 > h2_h0 and h2_l2 - h2_h0 >= htf_fvg_min)
+// Bearish FVG on any HTF: candle[-2].low > candle[0].high  →  supply zone overhead
+htf_bear = (h1_l2 > h1_h0 and h1_l2 - h1_h0 >= htf_fvg_min) or  // 1H
+           (h2_l2 > h2_h0 and h2_l2 - h2_h0 >= htf_fvg_min) or  // 4H
+           (h3_l2 > h3_h0 and h3_l2 - h3_h0 >= htf_fvg_min)     // Daily
 
-// Bullish FVG on HTF: candle[-2].high < candle[0].low  →  demand zone
-htf_bull = (h1_h2 < h1_l0 and h1_l0 - h1_h2 >= htf_fvg_min) or
-           (h2_h2 < h2_l0 and h2_l0 - h2_h2 >= htf_fvg_min)
+// Bullish FVG on any HTF: candle[-2].high < candle[0].low  →  demand zone below
+htf_bull = (h1_h2 < h1_l0 and h1_l0 - h1_h2 >= htf_fvg_min) or  // 1H
+           (h2_h2 < h2_l0 and h2_l0 - h2_h2 >= htf_fvg_min) or  // 4H
+           (h3_h2 < h3_l0 and h3_l0 - h3_h2 >= htf_fvg_min)     // Daily
 
 // ═══════════════════════════════════════════════════════════════
 // SESSION / KILL ZONE
 // ═══════════════════════════════════════════════════════════════
-h_utc       = hour(time, "UTC")
-in_kz       = (h_utc >= kz_lon_open and h_utc < kz_lon_close) or
-              (h_utc >= kz_ny_open   and h_utc < kz_ny_close)
+h_utc   = hour(time,   "UTC")
+m_utc   = minute(time, "UTC")
+
+// NY close supports half-hour precision (e.g. 10:30 UTC)
+_ny_closed = h_utc > kz_ny_close_h or (h_utc == kz_ny_close_h and m_utc > kz_ny_close_m)
 in_london   = h_utc >= kz_lon_open and h_utc < kz_lon_close
-in_ny       = h_utc >= kz_ny_open   and h_utc < kz_ny_close
+in_ny       = h_utc >= kz_ny_open  and not _ny_closed
+in_kz       = in_london or in_ny
 
 // ═══════════════════════════════════════════════════════════════
 // DAILY TRADE COUNTER
@@ -122,6 +135,24 @@ if is_new_day
 else
     cur_dh := na(cur_dh) ? high : math.max(cur_dh, high)
     cur_dl := na(cur_dl) ? low  : math.min(cur_dl, low)
+
+// ═══════════════════════════════════════════════════════════════
+// PREVIOUS WEEK HIGH / LOW
+// ═══════════════════════════════════════════════════════════════
+is_new_week = ta.change(time("W")) != 0
+var float cur_wh = na
+var float cur_wl = na
+var float pwh    = na
+var float pwl    = na
+
+if is_new_week
+    pwh    := cur_wh
+    pwl    := cur_wl
+    cur_wh := high
+    cur_wl := low
+else
+    cur_wh := na(cur_wh) ? high : math.max(cur_wh, high)
+    cur_wl := na(cur_wl) ? low  : math.min(cur_wl, low)
 
 // ═══════════════════════════════════════════════════════════════
 // ASIA RANGE  (22:00–07:00 UTC)
@@ -229,15 +260,17 @@ f_low_sweep(lvl) =>
     not na(lvl) and low < (lvl - sweep_buf) and body_lo > lvl and is_bull
 
 hs_pdh  = use_pdhl   and f_high_sweep(pdh)
+hs_pwh  = use_pwhl   and f_high_sweep(pwh)
 hs_asia = use_asia   and f_high_sweep(asia_h)
 hs_swh  = use_swings and f_high_sweep(last_swh)
 
 ls_pdl  = use_pdhl   and f_low_sweep(pdl)
+ls_pwl  = use_pwhl   and f_low_sweep(pwl)
 ls_asia = use_asia   and f_low_sweep(asia_l)
 ls_swl  = use_swings and f_low_sweep(last_swl)
 
-any_hs  = (hs_pdh or hs_asia or hs_swh) and (not use_htf or htf_bear) and can_trade
-any_ls  = (ls_pdl or ls_asia or ls_swl)  and (not use_htf or htf_bull)  and can_trade
+any_hs  = (hs_pdh or hs_pwh or hs_asia or hs_swh) and (not use_htf or htf_bear) and can_trade
+any_ls  = (ls_pdl or ls_pwl or ls_asia or ls_swl)  and (not use_htf or htf_bull)  and can_trade
 
 // ─── IDLE → SWEPT ───────────────────────────────────────────────
 if state == 0 and any_hs
@@ -367,9 +400,15 @@ bgcolor(in_ny     ? color.new(color.yellow, 94) : na, title="NY KZ")
 
 // ── PDH / PDL ──────────────────────────────────────────────────
 plot(use_pdhl and not na(pdh) ? pdh : na, "PDH",
-     color.new(color.red, 20), 1, plot.style_stepline_diamond)
+     color.new(color.red,    20), 1, plot.style_stepline_diamond)
 plot(use_pdhl and not na(pdl) ? pdl : na, "PDL",
-     color.new(color.teal,20), 1, plot.style_stepline_diamond)
+     color.new(color.teal,   20), 1, plot.style_stepline_diamond)
+
+// ── PWH / PWL ──────────────────────────────────────────────────
+plot(use_pwhl and not na(pwh) ? pwh : na, "PWH",
+     color.new(color.maroon, 30), 2, plot.style_stepline_diamond)
+plot(use_pwhl and not na(pwl) ? pwl : na, "PWL",
+     color.new(color.navy,   30), 2, plot.style_stepline_diamond)
 
 // ── Asia Range ─────────────────────────────────────────────────
 plot(use_asia and not na(asia_h) ? asia_h : na, "Asia H",
@@ -425,12 +464,12 @@ plotshape(long_signal,  "Long Entry",  shape.labelup,   location.belowbar,
      color.teal,  textcolor=color.white, text="LONG\nFVG",  size=size.small)
 
 // ── Info Table ─────────────────────────────────────────────────
-var table tbl = table.new(position.top_right, 2, 9,
+var table tbl = table.new(position.top_right, 2, 10,
      bgcolor=color.new(color.black, 75), border_width=1, border_color=color.gray)
 
 if barstate.islast
     // Header
-    table.cell(tbl, 0, 0, "SMC v2 — EURUSD",
+    table.cell(tbl, 0, 0, "SMC v3 — EURUSD",
          text_color=color.white, bgcolor=color.new(color.navy, 50), text_size=size.small)
     table.cell(tbl, 1, 0, "",
          bgcolor=color.new(color.navy, 50))
@@ -477,16 +516,16 @@ if barstate.islast
     pdhl_str = not na(pdh) ? str.tostring(pdh,"#.#####") + " / " + str.tostring(pdl,"#.#####") : "–"
     table.cell(tbl, 1, 6, pdhl_str,          text_color=color.orange,text_size=size.tiny)
 
+    // PWH / PWL
+    table.cell(tbl, 0, 7, "PWH / PWL",      text_color=color.gray,  text_size=size.tiny)
+    pwhl_str = not na(pwh) ? str.tostring(pwh,"#.#####") + " / " + str.tostring(pwl,"#.#####") : "–"
+    table.cell(tbl, 1, 7, pwhl_str,          text_color=color.maroon,text_size=size.tiny)
+
     // FVG zone
-    table.cell(tbl, 0, 7, "Active FVG",     text_color=color.gray,  text_size=size.tiny)
+    table.cell(tbl, 0, 8, "Active FVG",     text_color=color.gray,  text_size=size.tiny)
     fvg_str = (state == 3 or state == 4) and not na(fvg_top) ?
          str.tostring(fvg_top,"#.#####") + " / " + str.tostring(fvg_bot,"#.#####") : "–"
-    table.cell(tbl, 1, 7, fvg_str,           text_color=color.yellow,text_size=size.tiny)
-
-    // RR
-    table.cell(tbl, 0, 8, "RR Target",      text_color=color.gray,  text_size=size.tiny)
-    table.cell(tbl, 1, 8, "1:" + str.tostring(rr_ratio, "#.#"),
-         text_color=color.yellow, text_size=size.tiny)
+    table.cell(tbl, 1, 8, fvg_str,           text_color=color.yellow,text_size=size.tiny)
 
 // ═══════════════════════════════════════════════════════════════
 // ALERTS
