@@ -432,9 +432,7 @@ if bull_mss
          style=label.style_label_down, color=color.teal, textcolor=color.white,
          size=size.small)
 
-// ── FVG Zone (plot-based — no box timing issues) ───────────────
-// While waiting for FVG retest, draw the zone boundaries as lines.
-// linefill fills the band between the two plots automatically.
+// ── FVG Zone (fill between two plots) ─────────────────────────
 
 fvg_bear_active = state == 3 and not na(fvg_top)
 fvg_bull_active = state == 4 and not na(fvg_top)
@@ -443,13 +441,13 @@ p_fvg_bear_top = plot(fvg_bear_active ? fvg_top : na, "FVG Bear Top",
      color.new(color.red,  20), 1, plot.style_linebr)
 p_fvg_bear_bot = plot(fvg_bear_active ? fvg_bot : na, "FVG Bear Bot",
      color.new(color.red,  20), 1, plot.style_linebr)
-linefill.new(p_fvg_bear_top, p_fvg_bear_bot, color.new(color.red, 88))
+fill(p_fvg_bear_top, p_fvg_bear_bot, color.new(color.red, 88))
 
 p_fvg_bull_top = plot(fvg_bull_active ? fvg_top : na, "FVG Bull Top",
      color.new(color.teal, 20), 1, plot.style_linebr)
 p_fvg_bull_bot = plot(fvg_bull_active ? fvg_bot : na, "FVG Bull Bot",
      color.new(color.teal, 20), 1, plot.style_linebr)
-linefill.new(p_fvg_bull_top, p_fvg_bull_bot, color.new(color.teal, 88))
+fill(p_fvg_bull_top, p_fvg_bull_bot, color.new(color.teal, 88))
 
 // ── Entry Signals ───────────────────────────────────────────────
 plotshape(short_signal, "Short Entry", shape.labeldown, location.abovebar,
