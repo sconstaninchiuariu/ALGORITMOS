@@ -244,6 +244,23 @@ var bool  mss_bull_ok  = false
 var float pre_swl      = na
 var float pre_swh      = na
 
+// FVG box objects — entry FVG + HTF FVGs per timeframe
+var box fvg_entry_box = na
+var box htf_b1h_box   = na
+var box htf_u1h_box   = na
+var box htf_b4h_box   = na
+var box htf_u4h_box   = na
+var box htf_bd_box    = na
+var box htf_ud_box    = na
+
+// Previous HTF FVG states for edge detection
+var bool prev_bear_1h = false
+var bool prev_bull_1h = false
+var bool prev_bear_4h = false
+var bool prev_bull_4h = false
+var bool prev_bear_d  = false
+var bool prev_bull_d  = false
+
 if state == 0
     if not na(raw_swl)
         pre_swl := raw_swl
@@ -314,6 +331,15 @@ if mss_bear_ok[1]
         fvg_top := low[2]
         fvg_bot := high
         fvg_bar := bar_index
+        box.delete(fvg_entry_box)
+        fvg_entry_box := box.new(bar_index - 2, fvg_top, bar_index + 1, fvg_bot,
+             border_color = color.new(color.red, 10),
+             bgcolor      = color.new(color.red, 80),
+             text         = "FVG",
+             text_color   = color.new(color.red, 20),
+             text_size    = size.tiny,
+             text_halign  = text.align_left,
+             text_valign  = text.align_top)
     else
         state := 0
     mss_bear_ok := false
@@ -324,12 +350,30 @@ if mss_bull_ok[1]
         fvg_top := low
         fvg_bot := high[2]
         fvg_bar := bar_index
+        box.delete(fvg_entry_box)
+        fvg_entry_box := box.new(bar_index - 2, fvg_top, bar_index + 1, fvg_bot,
+             border_color = color.new(color.teal, 10),
+             bgcolor      = color.new(color.teal, 80),
+             text         = "FVG",
+             text_color   = color.new(color.teal, 20),
+             text_size    = size.tiny,
+             text_halign  = text.align_left,
+             text_valign  = text.align_top)
     else
         state := 0
     mss_bull_ok := false
 
-// FVG age timeout
+// Extend entry FVG box right edge while waiting for retest
+if (state == 3 or state == 4) and not na(fvg_entry_box)
+    box.set_right(fvg_entry_box, bar_index + 5)
+
+// FVG age timeout — seal box as expired (gray)
 if (state == 3 or state == 4) and (bar_index - fvg_bar) > fvg_max_bars
+    if not na(fvg_entry_box)
+        box.set_right(fvg_entry_box, bar_index)
+        box.set_bgcolor(fvg_entry_box, color.new(color.gray, 90))
+        box.set_border_color(fvg_entry_box, color.new(color.gray, 60))
+        box.set_text_color(fvg_entry_box, color.new(color.gray, 60))
     state := 0
 
 // =============================================================
@@ -363,6 +407,8 @@ if short_signal
             strategy.exit("SX", from_entry = "Short", stop = sl_price, limit = tp_price)
             trades_today += 1
             state := 0
+            if not na(fvg_entry_box)
+                box.set_right(fvg_entry_box, bar_index)
 
 if long_signal
     sl_price = sweep_lo - sweep_buf
@@ -375,6 +421,8 @@ if long_signal
             strategy.exit("LX", from_entry = "Long", stop = sl_price, limit = tp_price)
             trades_today += 1
             state := 0
+            if not na(fvg_entry_box)
+                box.set_right(fvg_entry_box, bar_index)
 
 // =============================================================
 // VISUALS
@@ -431,17 +479,101 @@ if show_mss_lbl and bear_mss
 if show_mss_lbl and bull_mss
     label.new(bar_index, high + syminfo.mintick * 20, "MSS UP", style = label.style_label_down, color = color.teal, textcolor = color.white, size = size.small)
 
-// FVG zones (always shown when active — core signal)
-fvg_bear_on = state == 3 and not na(fvg_top)
-fvg_bull_on = state == 4 and not na(fvg_top)
+// HTF FVG boxes — detect new/gone edges and draw/invalidate boxes per timeframe
+// Bear FVG: gap = low[2] > high[0] on that TF  →  top = l2, bot = h0
+// Bull FVG: gap = high[2] < low[0] on that TF  →  top = l0, bot = h2
 
-p_bear_top = plot(fvg_bear_on ? fvg_top : na, "FVG Bear Top", color.new(color.red,  20), 1, plot.style_linebr)
-p_bear_bot = plot(fvg_bear_on ? fvg_bot : na, "FVG Bear Bot", color.new(color.red,  20), 1, plot.style_linebr)
-fill(p_bear_top, p_bear_bot, color.new(color.red, 88))
+new_bear_1h  = htf_bear_1h  and not prev_bear_1h
+gone_bear_1h = not htf_bear_1h and prev_bear_1h
+new_bull_1h  = htf_bull_1h  and not prev_bull_1h
+gone_bull_1h = not htf_bull_1h and prev_bull_1h
 
-p_bull_top = plot(fvg_bull_on ? fvg_top : na, "FVG Bull Top", color.new(color.teal, 20), 1, plot.style_linebr)
-p_bull_bot = plot(fvg_bull_on ? fvg_bot : na, "FVG Bull Bot", color.new(color.teal, 20), 1, plot.style_linebr)
-fill(p_bull_top, p_bull_bot, color.new(color.teal, 88))
+new_bear_4h  = htf_bear_4h  and not prev_bear_4h
+gone_bear_4h = not htf_bear_4h and prev_bear_4h
+new_bull_4h  = htf_bull_4h  and not prev_bull_4h
+gone_bull_4h = not htf_bull_4h and prev_bull_4h
+
+new_bear_d   = htf_bear_d   and not prev_bear_d
+gone_bear_d  = not htf_bear_d  and prev_bear_d
+new_bull_d   = htf_bull_d   and not prev_bull_d
+gone_bull_d  = not htf_bull_d  and prev_bull_d
+
+prev_bear_1h := htf_bear_1h
+prev_bull_1h := htf_bull_1h
+prev_bear_4h := htf_bear_4h
+prev_bull_4h := htf_bull_4h
+prev_bear_d  := htf_bear_d
+prev_bull_d  := htf_bull_d
+
+if show_levels
+    // 1H FVGs
+    if new_bear_1h
+        box.delete(htf_b1h_box)
+        htf_b1h_box := box.new(bar_index, h1_l2, bar_index + 1, h1_h0, border_color = color.new(color.red, 30), bgcolor = color.new(color.red, 87), text = "1H", text_color = color.new(color.red, 20), text_size = size.tiny, text_halign = text.align_right, text_valign = text.align_top)
+    if gone_bear_1h and not na(htf_b1h_box)
+        box.set_right(htf_b1h_box, bar_index)
+        box.set_bgcolor(htf_b1h_box, color.new(color.gray, 92))
+        box.set_border_color(htf_b1h_box, color.new(color.gray, 70))
+        box.set_text_color(htf_b1h_box, color.new(color.gray, 60))
+    if htf_bear_1h and not na(htf_b1h_box)
+        box.set_right(htf_b1h_box, bar_index + 5)
+
+    if new_bull_1h
+        box.delete(htf_u1h_box)
+        htf_u1h_box := box.new(bar_index, h1_l0, bar_index + 1, h1_h2, border_color = color.new(color.teal, 30), bgcolor = color.new(color.teal, 87), text = "1H", text_color = color.new(color.teal, 20), text_size = size.tiny, text_halign = text.align_right, text_valign = text.align_bottom)
+    if gone_bull_1h and not na(htf_u1h_box)
+        box.set_right(htf_u1h_box, bar_index)
+        box.set_bgcolor(htf_u1h_box, color.new(color.gray, 92))
+        box.set_border_color(htf_u1h_box, color.new(color.gray, 70))
+        box.set_text_color(htf_u1h_box, color.new(color.gray, 60))
+    if htf_bull_1h and not na(htf_u1h_box)
+        box.set_right(htf_u1h_box, bar_index + 5)
+
+    // 4H FVGs
+    if new_bear_4h
+        box.delete(htf_b4h_box)
+        htf_b4h_box := box.new(bar_index, h2_l2, bar_index + 1, h2_h0, border_color = color.new(color.red, 20), bgcolor = color.new(color.red, 84), text = "4H", text_color = color.new(color.red, 10), text_size = size.tiny, text_halign = text.align_right, text_valign = text.align_top)
+    if gone_bear_4h and not na(htf_b4h_box)
+        box.set_right(htf_b4h_box, bar_index)
+        box.set_bgcolor(htf_b4h_box, color.new(color.gray, 92))
+        box.set_border_color(htf_b4h_box, color.new(color.gray, 70))
+        box.set_text_color(htf_b4h_box, color.new(color.gray, 60))
+    if htf_bear_4h and not na(htf_b4h_box)
+        box.set_right(htf_b4h_box, bar_index + 5)
+
+    if new_bull_4h
+        box.delete(htf_u4h_box)
+        htf_u4h_box := box.new(bar_index, h2_l0, bar_index + 1, h2_h2, border_color = color.new(color.teal, 20), bgcolor = color.new(color.teal, 84), text = "4H", text_color = color.new(color.teal, 10), text_size = size.tiny, text_halign = text.align_right, text_valign = text.align_bottom)
+    if gone_bull_4h and not na(htf_u4h_box)
+        box.set_right(htf_u4h_box, bar_index)
+        box.set_bgcolor(htf_u4h_box, color.new(color.gray, 92))
+        box.set_border_color(htf_u4h_box, color.new(color.gray, 70))
+        box.set_text_color(htf_u4h_box, color.new(color.gray, 60))
+    if htf_bull_4h and not na(htf_u4h_box)
+        box.set_right(htf_u4h_box, bar_index + 5)
+
+    // Daily FVGs
+    if new_bear_d
+        box.delete(htf_bd_box)
+        htf_bd_box := box.new(bar_index, h3_l2, bar_index + 1, h3_h0, border_color = color.new(color.red, 10), bgcolor = color.new(color.red, 80), text = "D", text_color = color.new(color.red, 0), text_size = size.small, text_halign = text.align_right, text_valign = text.align_top)
+    if gone_bear_d and not na(htf_bd_box)
+        box.set_right(htf_bd_box, bar_index)
+        box.set_bgcolor(htf_bd_box, color.new(color.gray, 92))
+        box.set_border_color(htf_bd_box, color.new(color.gray, 70))
+        box.set_text_color(htf_bd_box, color.new(color.gray, 60))
+    if htf_bear_d and not na(htf_bd_box)
+        box.set_right(htf_bd_box, bar_index + 5)
+
+    if new_bull_d
+        box.delete(htf_ud_box)
+        htf_ud_box := box.new(bar_index, h3_l0, bar_index + 1, h3_h2, border_color = color.new(color.teal, 10), bgcolor = color.new(color.teal, 80), text = "D", text_color = color.new(color.teal, 0), text_size = size.small, text_halign = text.align_right, text_valign = text.align_bottom)
+    if gone_bull_d and not na(htf_ud_box)
+        box.set_right(htf_ud_box, bar_index)
+        box.set_bgcolor(htf_ud_box, color.new(color.gray, 92))
+        box.set_border_color(htf_ud_box, color.new(color.gray, 70))
+        box.set_text_color(htf_ud_box, color.new(color.gray, 60))
+    if htf_bull_d and not na(htf_ud_box)
+        box.set_right(htf_ud_box, bar_index + 5)
 
 // Entry signals
 plotshape(short_signal, title = "Short Entry", style = shape.labeldown, location = location.abovebar, color = color.red,  textcolor = color.white, text = "SHORT", size = size.small)
