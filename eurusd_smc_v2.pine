@@ -84,15 +84,15 @@ r6 = input.float(2.0, "Attempt 6 (%)", 0.1, 5.0, 0.1, group=GTR) / 100
 [h3_h2, h3_l2, h3_h0, h3_l0] = request.security(syminfo.tickerid, htf_tf3,
      [high[2], low[2], high[0], low[0]], lookahead=barmerge.lookahead_off)
 
-// Bearish FVG on any HTF: candle[-2].low > candle[0].high  →  supply zone overhead
-htf_bear = (h1_l2 > h1_h0 and h1_l2 - h1_h0 >= htf_fvg_min) or  // 1H
-           (h2_l2 > h2_h0 and h2_l2 - h2_h0 >= htf_fvg_min) or  // 4H
-           (h3_l2 > h3_h0 and h3_l2 - h3_h0 >= htf_fvg_min)     // Daily
+// Bearish FVG on any HTF: candle[-2].low > candle[0].high  (supply zone overhead)
+htf_bear = (h1_l2 > h1_h0 and h1_l2 - h1_h0 >= htf_fvg_min) or
+           (h2_l2 > h2_h0 and h2_l2 - h2_h0 >= htf_fvg_min) or
+           (h3_l2 > h3_h0 and h3_l2 - h3_h0 >= htf_fvg_min)
 
-// Bullish FVG on any HTF: candle[-2].high < candle[0].low  →  demand zone below
-htf_bull = (h1_h2 < h1_l0 and h1_l0 - h1_h2 >= htf_fvg_min) or  // 1H
-           (h2_h2 < h2_l0 and h2_l0 - h2_h2 >= htf_fvg_min) or  // 4H
-           (h3_h2 < h3_l0 and h3_l0 - h3_h2 >= htf_fvg_min)     // Daily
+// Bullish FVG on any HTF: candle[-2].high < candle[0].low  (demand zone below)
+htf_bull = (h1_h2 < h1_l0 and h1_l0 - h1_h2 >= htf_fvg_min) or
+           (h2_h2 < h2_l0 and h2_l0 - h2_h2 >= htf_fvg_min) or
+           (h3_h2 < h3_l0 and h3_l0 - h3_h2 >= htf_fvg_min)
 
 // ═══════════════════════════════════════════════════════════════
 // SESSION / KILL ZONE
@@ -349,10 +349,8 @@ price_in_bear_fvg = in_bear_fvg and high >= fvg_bot and low  <= fvg_top
 price_in_bull_fvg = in_bull_fvg and low  <= fvg_top and high >= fvg_bot
 
 // Entry candle body close condition
-short_close_ok = req_close_fvg ?
-     (close >= fvg_bot and close <= fvg_top and is_bear) : is_bear
-long_close_ok  = req_close_fvg ?
-     (close >= fvg_bot and close <= fvg_top and is_bull) : is_bull
+short_close_ok = req_close_fvg ? (close >= fvg_bot and close <= fvg_top and is_bear) : is_bear
+long_close_ok  = req_close_fvg ? (close >= fvg_bot and close <= fvg_top and is_bull) : is_bull
 
 short_signal = price_in_bear_fvg and short_close_ok and in_kz and can_trade
 long_signal  = price_in_bull_fvg and long_close_ok  and in_kz and can_trade
@@ -369,9 +367,7 @@ if short_signal
         qty = f_qty(sl_dist)
         if qty > 0
             strategy.entry("Short", strategy.short, qty=qty, comment="SMC Short")
-            strategy.exit("SX", "Short", stop=sl_price, limit=tp_price,
-                 comment="SL=" + str.tostring(sl_price, "#.#####") +
-                          " TP=" + str.tostring(tp_price, "#.#####"))
+            strategy.exit("SX", "Short", stop=sl_price, limit=tp_price, comment="SMC Short Exit")
             trades_today += 1
             state := 0
 
@@ -384,9 +380,7 @@ if long_signal
         qty = f_qty(sl_dist)
         if qty > 0
             strategy.entry("Long", strategy.long, qty=qty, comment="SMC Long")
-            strategy.exit("LX", "Long", stop=sl_price, limit=tp_price,
-                 comment="SL=" + str.tostring(sl_price, "#.#####") +
-                          " TP=" + str.tostring(tp_price, "#.#####"))
+            strategy.exit("LX", "Long", stop=sl_price, limit=tp_price, comment="SMC Long Exit")
             trades_today += 1
             state := 0
 
@@ -488,8 +482,7 @@ if barstate.islast
 
     // Attempt / Risk
     table.cell(tbl, 0, 2, "Attempt",        text_color=color.gray,  text_size=size.tiny)
-    risk_str = str.tostring(attempt) + "/6  (" +
-               str.tostring(f_risk(attempt) * 100, "#.##") + "%)"
+    risk_str = str.tostring(attempt) + "/6  (" + str.tostring(f_risk(attempt) * 100, "#.##") + "%)"
     risk_col = attempt == 1 ? color.lime : attempt <= 3 ? color.yellow : color.red
     table.cell(tbl, 1, 2, risk_str,         text_color=risk_col,    text_size=size.tiny)
 
@@ -513,18 +506,18 @@ if barstate.islast
 
     // PDH / PDL
     table.cell(tbl, 0, 6, "PDH / PDL",      text_color=color.gray,  text_size=size.tiny)
-    pdhl_str = not na(pdh) ? str.tostring(pdh,"#.#####") + " / " + str.tostring(pdl,"#.#####") : "–"
+    pdhl_str = not na(pdh) ? str.tostring(pdh,"#.#####") + " / " + str.tostring(pdl,"#.#####") : "--"
     table.cell(tbl, 1, 6, pdhl_str,          text_color=color.orange,text_size=size.tiny)
 
     // PWH / PWL
     table.cell(tbl, 0, 7, "PWH / PWL",      text_color=color.gray,  text_size=size.tiny)
-    pwhl_str = not na(pwh) ? str.tostring(pwh,"#.#####") + " / " + str.tostring(pwl,"#.#####") : "–"
+    pwhl_str = not na(pwh) ? str.tostring(pwh,"#.#####") + " / " + str.tostring(pwl,"#.#####") : "--"
     table.cell(tbl, 1, 7, pwhl_str,          text_color=color.maroon,text_size=size.tiny)
 
     // FVG zone
     table.cell(tbl, 0, 8, "Active FVG",     text_color=color.gray,  text_size=size.tiny)
-    fvg_str = (state == 3 or state == 4) and not na(fvg_top) ?
-         str.tostring(fvg_top,"#.#####") + " / " + str.tostring(fvg_bot,"#.#####") : "–"
+    fvg_active = (state == 3 or state == 4) and not na(fvg_top)
+    fvg_str    = fvg_active ? str.tostring(fvg_top,"#.#####") + " / " + str.tostring(fvg_bot,"#.#####") : "--"
     table.cell(tbl, 1, 8, fvg_str,           text_color=color.yellow,text_size=size.tiny)
 
 // ═══════════════════════════════════════════════════════════════
