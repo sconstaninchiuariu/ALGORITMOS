@@ -383,13 +383,39 @@ if long_signal
 bgcolor(show_kz_bg and in_london ? color.new(color.blue,   95) : na, title = "London KZ")
 bgcolor(show_kz_bg and in_ny     ? color.new(color.yellow, 95) : na, title = "NY KZ")
 
-// HTF POI level lines
-plot(show_levels and use_pdhl and not na(pdh) ? pdh : na, "PDH", color.new(color.red,    40), 1, plot.style_stepline_diamond)
-plot(show_levels and use_pdhl and not na(pdl) ? pdl : na, "PDL", color.new(color.teal,   40), 1, plot.style_stepline_diamond)
-plot(show_levels and use_pwhl and not na(pwh) ? pwh : na, "PWH", color.new(color.maroon, 40), 1, plot.style_stepline_diamond)
-plot(show_levels and use_pwhl and not na(pwl) ? pwl : na, "PWL", color.new(color.navy,   40), 1, plot.style_stepline_diamond)
-plot(show_levels and use_asia and not na(asia_h) ? asia_h : na, "Asia H", color.new(color.purple, 40), 1, plot.style_stepline_diamond)
-plot(show_levels and use_asia and not na(asia_l) ? asia_l : na, "Asia L", color.new(color.purple, 40), 1, plot.style_stepline_diamond)
+// HTF POI level lines — flat horizontal lines, redrawn each new period
+// Uses line.new() + extend.right so no historical staircase, just one clean line per day/week/session
+var line l_pdh    = na
+var line l_pdl    = na
+var line l_pwh    = na
+var line l_pwl    = na
+var line l_asia_h = na
+var line l_asia_l = na
+
+if show_levels and use_pdhl and is_new_day
+    line.delete(l_pdh)
+    line.delete(l_pdl)
+    if not na(pdh)
+        l_pdh := line.new(bar_index, pdh, bar_index + 1, pdh, extend = extend.right, color = color.new(color.red,    30), style = line.style_dashed, width = 1)
+    if not na(pdl)
+        l_pdl := line.new(bar_index, pdl, bar_index + 1, pdl, extend = extend.right, color = color.new(color.teal,   30), style = line.style_dashed, width = 1)
+
+if show_levels and use_pwhl and is_new_week
+    line.delete(l_pwh)
+    line.delete(l_pwl)
+    if not na(pwh)
+        l_pwh := line.new(bar_index, pwh, bar_index + 1, pwh, extend = extend.right, color = color.new(color.maroon, 40), style = line.style_solid,  width = 1)
+    if not na(pwl)
+        l_pwl := line.new(bar_index, pwl, bar_index + 1, pwl, extend = extend.right, color = color.new(color.navy,   40), style = line.style_solid,  width = 1)
+
+asia_closed = not in_asia and in_asia[1]
+if show_levels and use_asia and asia_closed
+    line.delete(l_asia_h)
+    line.delete(l_asia_l)
+    if not na(asia_h)
+        l_asia_h := line.new(bar_index, asia_h, bar_index + 1, asia_h, extend = extend.right, color = color.new(color.purple, 30), style = line.style_dotted, width = 1)
+    if not na(asia_l)
+        l_asia_l := line.new(bar_index, asia_l, bar_index + 1, asia_l, extend = extend.right, color = color.new(color.purple, 30), style = line.style_dotted, width = 1)
 
 // Swing pivot markers (off by default)
 plotshape(show_sw_mark and not na(raw_swh), title = "Swing H", style = shape.triangledown, location = location.abovebar, color = color.new(color.red,  60), size = size.tiny)
