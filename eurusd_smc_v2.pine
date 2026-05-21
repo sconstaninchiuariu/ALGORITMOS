@@ -1,12 +1,12 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0
-// SMC EURUSD — Quant v3  |  Sweep → 1M MSS → iFVG Entry
+// SMC EURUSD - Quant v3  |  Sweep > 1M MSS > iFVG Entry
 // HTF: Daily / 4H / 1H FVG  |  Liquidity: PDH/PDL · PWH/PWL · Asia · Swings
 // Kill Zones: London 03:00-05:00 UTC · NY 08:00-10:30 UTC
 // Risk: Tiered non-compounded (0.7 % → 2.0 %)  |  SL = sweep wick extreme  |  TP = SL × RR
 
-//@version=5
+//@version=6
 strategy(
-     title             = "SMC EURUSD — v3 [Sweep → MSS → FVG]",
+     title             = "SMC EURUSD v3 [Sweep MSS FVG]",
      shorttitle        = "SMC-v3",
      overlay           = true,
      default_qty_type  = strategy.fixed,
@@ -424,11 +424,11 @@ plotshape(any_ls, "Low Sweep",  shape.circle, location.belowbar,
 
 // ── MSS Labels ─────────────────────────────────────────────────
 if bear_mss
-    label.new(bar_index, low - syminfo.mintick * 20, "MSS ↓",
+    label.new(bar_index, low - syminfo.mintick * 20, "MSS DN",
          style=label.style_label_up, color=color.red, textcolor=color.white,
          size=size.small)
 if bull_mss
-    label.new(bar_index, high + syminfo.mintick * 20, "MSS ↑",
+    label.new(bar_index, high + syminfo.mintick * 20, "MSS UP",
          style=label.style_label_down, color=color.teal, textcolor=color.white,
          size=size.small)
 
@@ -463,19 +463,14 @@ var table tbl = table.new(position.top_right, 2, 10,
 
 if barstate.islast
     // Header
-    table.cell(tbl, 0, 0, "SMC v3 — EURUSD",
+    table.cell(tbl, 0, 0, "SMC v3 EURUSD",
          text_color=color.white, bgcolor=color.new(color.navy, 50), text_size=size.small)
     table.cell(tbl, 1, 0, "",
          bgcolor=color.new(color.navy, 50))
 
     // State
-    state_str = state == 0 ? "IDLE" :
-                state == 1 ? "SWEPT ↓ (MSS?)" :
-                state == 2 ? "SWEPT ↑ (MSS?)" :
-                state == 3 ? "FVG SHORT WAIT" : "FVG LONG WAIT"
-    state_col = state == 0 ? color.gray :
-                state == 1 or state == 2 ? color.orange :
-                state == 3 ? color.red : color.teal
+    state_str = state == 0 ? "IDLE" : state == 1 ? "SWEPT DN (MSS?)" : state == 2 ? "SWEPT UP (MSS?)" : state == 3 ? "FVG SHORT WAIT" : "FVG LONG WAIT"
+    state_col = state == 0 ? color.gray : (state == 1 or state == 2) ? color.orange : state == 3 ? color.red : color.teal
 
     table.cell(tbl, 0, 1, "State",         text_color=color.gray,  text_size=size.tiny)
     table.cell(tbl, 1, 1, state_str,        text_color=state_col,   text_size=size.tiny)
