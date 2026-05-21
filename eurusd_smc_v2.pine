@@ -1,6 +1,6 @@
 // This Pine Script(tm) code is subject to the terms of the Mozilla Public License 2.0
 // SMC EURUSD v3 | Sweep > 1M MSS > 3-candle FVG Entry
-// HTF Bias: Daily / 4H / 1H FVG | Levels: PDH/PDL, PWH/PWL, Asia, Swings
+// HTF Bias: Daily / 4H / 1H FVG | Levels: PDH/PDL, PWH/PWL, Asia (HTF POIs only)
 // Kill Zones: London 03:00-05:00 UTC | NY 08:00-10:30 UTC
 // Risk: Tiered non-compounded (0.7% to 2.0%) | SL = sweep wick | TP = SL x RR
 
@@ -30,12 +30,11 @@ kz_ny_open    = input.int(8,  "NY Open (h)",      0, 23, group = GKZ)
 kz_ny_close_h = input.int(10, "NY Close (h)",     0, 23, group = GKZ)
 kz_ny_close_m = input.int(30, "NY Close (min)",   0, 59, group = GKZ, tooltip = "30 = 10:30 UTC cutoff")
 
-var string GLIQ = "Liquidity Levels"
+var string GLIQ = "Liquidity Levels (HTF POIs)"
 use_pdhl  = input.bool(true,    "PDH / PDL (Previous Day)",  group = GLIQ)
 use_pwhl  = input.bool(true,    "PWH / PWL (Previous Week)", group = GLIQ)
-use_asia  = input.bool(true,    "Asia Range",                 group = GLIQ)
-use_sw    = input.bool(true,    "Swing Highs / Lows",         group = GLIQ)
-sw_len    = input.int(10,       "Swing Lookback", 2, 50,      group = GLIQ)
+use_asia  = input.bool(true,    "Asia Range H/L",            group = GLIQ)
+sw_len    = input.int(10,       "Swing Lookback (MSS ref)",  2, 50, group = GLIQ, tooltip = "Used only for MSS reference level, not as sweep trigger")
 sweep_buf = input.float(0.0002, "Sweep Buffer",  0.00005, 0.001, 0.00001, group = GLIQ, tooltip = "Min wick distance beyond level to confirm sweep")
 
 var string GMSS = "MSS Settings"
@@ -67,6 +66,13 @@ r3 = input.float(1.2, "Attempt 3 (%)", 0.1, 5.0, 0.1, group = GTR) / 100
 r4 = input.float(1.5, "Attempt 4 (%)", 0.1, 5.0, 0.1, group = GTR) / 100
 r5 = input.float(1.8, "Attempt 5 (%)", 0.1, 5.0, 0.1, group = GTR) / 100
 r6 = input.float(2.0, "Attempt 6 (%)", 0.1, 5.0, 0.1, group = GTR) / 100
+
+var string GVIS = "Visuals"
+show_levels  = input.bool(true,  "Show PDH/PDL, PWH/PWL, Asia Lines", group = GVIS)
+show_sw_mark = input.bool(false, "Show Swing Pivot Markers",           group = GVIS)
+show_mss_lbl = input.bool(false, "Show MSS Labels on Chart",          group = GVIS)
+show_kz_bg   = input.bool(true,  "Show Kill Zone Background",          group = GVIS)
+show_sweep   = input.bool(true,  "Show Sweep Markers",                 group = GVIS)
 
 // =============================================================
 // HTF BIAS  (no-repainting: lookahead_off + closed bars only)
@@ -173,7 +179,7 @@ else if in_asia[1]
     asia_live_l := na
 
 // =============================================================
-// SWING HIGHS / LOWS
+// SWING HIGHS / LOWS  (MSS reference only — not sweep triggers)
 // =============================================================
 
 raw_swh = ta.pivothigh(high, sw_len, sw_len)
@@ -218,8 +224,8 @@ body_lo = math.min(open, close)
 // =============================================================
 // STATE MACHINE
 // 0 = IDLE
-// 1 = BEAR_SWEPT  (high swept, waiting for bearish MSS)
-// 2 = BULL_SWEPT  (low swept, waiting for bullish MSS)
+// 1 = BEAR_SWEPT  (HTF POI high swept, waiting for bearish MSS)
+// 2 = BULL_SWEPT  (HTF POI low swept, waiting for bullish MSS)
 // 3 = BEAR_FVG    (MSS confirmed, FVG set, waiting for retest)
 // 4 = BULL_FVG    (MSS confirmed, FVG set, waiting for retest)
 // =============================================================
@@ -251,22 +257,22 @@ f_high_sweep(float lvl) =>
 f_low_sweep(float lvl) =>
     not na(lvl) and low < (lvl - sweep_buf) and body_lo > lvl and is_bull
 
-// Individual sweep events
+// HTF POI sweep events only (PDH/PDL, PWH/PWL, Asia)
+// Swing highs/lows are NOT used as sweep triggers to avoid lower-TF noise
 hs_pdh  = use_pdhl and f_high_sweep(pdh)
 hs_pwh  = use_pwhl and f_high_sweep(pwh)
 hs_asia = use_asia and f_high_sweep(asia_h)
-hs_swh  = use_sw   and f_high_sweep(last_swh)
 
 ls_pdl  = use_pdhl and f_low_sweep(pdl)
 ls_pwl  = use_pwhl and f_low_sweep(pwl)
 ls_asia = use_asia and f_low_sweep(asia_l)
-ls_swl  = use_sw   and f_low_sweep(last_swl)
 
 htf_ok_bear = not use_htf or htf_bear
 htf_ok_bull = not use_htf or htf_bull
 
-any_hs = (hs_pdh or hs_pwh or hs_asia or hs_swh) and htf_ok_bear and can_trade
-any_ls = (ls_pdl or ls_pwl or ls_asia or ls_swl)  and htf_ok_bull and can_trade
+// Sweeps require HTF POI manipulation
+any_hs = (hs_pdh or hs_pwh or hs_asia) and htf_ok_bear and can_trade
+any_ls = (ls_pdl or ls_pwl or ls_asia)  and htf_ok_bull and can_trade
 
 // IDLE -> SWEPT
 if state == 0 and any_hs
@@ -374,26 +380,32 @@ if long_signal
 // VISUALS
 // =============================================================
 
-bgcolor(in_london ? color.new(color.blue,   94) : na, title = "London KZ")
-bgcolor(in_ny     ? color.new(color.yellow, 94) : na, title = "NY KZ")
+bgcolor(show_kz_bg and in_london ? color.new(color.blue,   95) : na, title = "London KZ")
+bgcolor(show_kz_bg and in_ny     ? color.new(color.yellow, 95) : na, title = "NY KZ")
 
-plot(use_pdhl and not na(pdh) ? pdh : na, "PDH", color.new(color.red,    20), 1, plot.style_stepline_diamond)
-plot(use_pdhl and not na(pdl) ? pdl : na, "PDL", color.new(color.teal,   20), 1, plot.style_stepline_diamond)
-plot(use_pwhl and not na(pwh) ? pwh : na, "PWH", color.new(color.maroon, 30), 2, plot.style_stepline_diamond)
-plot(use_pwhl and not na(pwl) ? pwl : na, "PWL", color.new(color.navy,   30), 2, plot.style_stepline_diamond)
-plot(use_asia and not na(asia_h) ? asia_h : na, "Asia H", color.new(color.purple, 20), 1, plot.style_stepline_diamond)
-plot(use_asia and not na(asia_l) ? asia_l : na, "Asia L", color.new(color.purple, 20), 1, plot.style_stepline_diamond)
+// HTF POI level lines
+plot(show_levels and use_pdhl and not na(pdh) ? pdh : na, "PDH", color.new(color.red,    40), 1, plot.style_stepline_diamond)
+plot(show_levels and use_pdhl and not na(pdl) ? pdl : na, "PDL", color.new(color.teal,   40), 1, plot.style_stepline_diamond)
+plot(show_levels and use_pwhl and not na(pwh) ? pwh : na, "PWH", color.new(color.maroon, 40), 1, plot.style_stepline_diamond)
+plot(show_levels and use_pwhl and not na(pwl) ? pwl : na, "PWL", color.new(color.navy,   40), 1, plot.style_stepline_diamond)
+plot(show_levels and use_asia and not na(asia_h) ? asia_h : na, "Asia H", color.new(color.purple, 40), 1, plot.style_stepline_diamond)
+plot(show_levels and use_asia and not na(asia_l) ? asia_l : na, "Asia L", color.new(color.purple, 40), 1, plot.style_stepline_diamond)
 
-plotshape(use_sw and not na(raw_swh), title = "Swing H", style = shape.triangledown, location = location.abovebar, color = color.new(color.red,  40), size = size.tiny)
-plotshape(use_sw and not na(raw_swl), title = "Swing L", style = shape.triangleup,   location = location.belowbar, color = color.new(color.teal, 40), size = size.tiny)
-plotshape(any_hs, title = "Sweep HIGH", style = shape.circle, location = location.abovebar, color = color.new(color.red,  0), size = size.small)
-plotshape(any_ls, title = "Sweep LOW",  style = shape.circle, location = location.belowbar, color = color.new(color.teal, 0), size = size.small)
+// Swing pivot markers (off by default)
+plotshape(show_sw_mark and not na(raw_swh), title = "Swing H", style = shape.triangledown, location = location.abovebar, color = color.new(color.red,  60), size = size.tiny)
+plotshape(show_sw_mark and not na(raw_swl), title = "Swing L", style = shape.triangleup,   location = location.belowbar, color = color.new(color.teal, 60), size = size.tiny)
 
-if bear_mss
+// Sweep markers on HTF POI sweeps
+plotshape(show_sweep and any_hs, title = "Sweep HIGH", style = shape.circle, location = location.abovebar, color = color.new(color.red,  0), size = size.tiny)
+plotshape(show_sweep and any_ls, title = "Sweep LOW",  style = shape.circle, location = location.belowbar, color = color.new(color.teal, 0), size = size.tiny)
+
+// MSS labels (off by default to keep chart clean)
+if show_mss_lbl and bear_mss
     label.new(bar_index, low - syminfo.mintick * 20, "MSS DN", style = label.style_label_up,   color = color.red,  textcolor = color.white, size = size.small)
-if bull_mss
+if show_mss_lbl and bull_mss
     label.new(bar_index, high + syminfo.mintick * 20, "MSS UP", style = label.style_label_down, color = color.teal, textcolor = color.white, size = size.small)
 
+// FVG zones (always shown when active — core signal)
 fvg_bear_on = state == 3 and not na(fvg_top)
 fvg_bull_on = state == 4 and not na(fvg_top)
 
@@ -405,6 +417,7 @@ p_bull_top = plot(fvg_bull_on ? fvg_top : na, "FVG Bull Top", color.new(color.te
 p_bull_bot = plot(fvg_bull_on ? fvg_bot : na, "FVG Bull Bot", color.new(color.teal, 20), 1, plot.style_linebr)
 fill(p_bull_top, p_bull_bot, color.new(color.teal, 88))
 
+// Entry signals
 plotshape(short_signal, title = "Short Entry", style = shape.labeldown, location = location.abovebar, color = color.red,  textcolor = color.white, text = "SHORT", size = size.small)
 plotshape(long_signal,  title = "Long Entry",  style = shape.labelup,   location = location.belowbar, color = color.teal, textcolor = color.white, text = "LONG",  size = size.small)
 
