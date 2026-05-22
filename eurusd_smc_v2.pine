@@ -512,12 +512,12 @@ if show_levels and use_asia and asia_closed
 if use_eql and eqh_new and not na(last_eqh)
     line.delete(l_eqh)
     l_eqh := line.new(bar_index - sw_len, last_eqh, bar_index, last_eqh, extend = extend.right, color = color.new(color.orange, 10), style = line.style_dashed, width = 2)
-    label.new(bar_index - sw_len, last_eqh, "EQH", color = color.transparent, textcolor = color.new(color.orange, 0), style = label.style_label_right, size = size.tiny, tooltip = "Equal High - liquidity pool")
+    label.new(bar_index - sw_len, last_eqh, "EQH", color = color.new(color.orange, 100), textcolor = color.new(color.orange, 0), style = label.style_label_right, size = size.tiny, tooltip = "Equal High - liquidity pool")
 
 if use_eql and eql_new and not na(last_eql)
     line.delete(l_eql)
     l_eql := line.new(bar_index - sw_len, last_eql, bar_index, last_eql, extend = extend.right, color = color.new(color.orange, 10), style = line.style_dashed, width = 2)
-    label.new(bar_index - sw_len, last_eql, "EQL", color = color.transparent, textcolor = color.new(color.orange, 0), style = label.style_label_right, size = size.tiny, tooltip = "Equal Low - liquidity pool")
+    label.new(bar_index - sw_len, last_eql, "EQL", color = color.new(color.orange, 100), textcolor = color.new(color.orange, 0), style = label.style_label_right, size = size.tiny, tooltip = "Equal Low - liquidity pool")
 
 // Swing pivot markers
 plotshape(show_sw_mark and not na(raw_swh), title = "Swing H", style = shape.triangledown, location = location.abovebar, color = color.new(color.red,  60), size = size.tiny)
