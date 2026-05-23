@@ -74,11 +74,9 @@ eql_tol      = input.float(0.0003, "Tolerance (price)",  0.00005, 0.002, 0.00001
 eql_lookback = input.int(5,        "History depth (# pivots)", 2, 20,   group = GEQL)
 
 var string GVIS = "Visuals"
-show_levels  = input.bool(true,  "Show PDH/PDL, PWH/PWL, Asia Lines", group = GVIS)
-show_sw_mark = input.bool(false, "Show Swing Pivot Markers",           group = GVIS)
-show_mss_lbl = input.bool(false, "Show MSS Labels on Chart",           group = GVIS)
-show_kz_bg   = input.bool(true,  "Show Kill Zone Background",          group = GVIS)
-show_sweep   = input.bool(true,  "Show Sweep Markers",                 group = GVIS)
+show_levels = input.bool(true, "Show POI Lines (PDH/PDL, PWH/PWL, Asia, EQH/EQL)", group = GVIS)
+show_kz_bg  = input.bool(true, "Show Kill Zone Background",                         group = GVIS)
+show_sweep  = input.bool(true, "Show Sweep Markers",                                group = GVIS)
 
 // =============================================================
 // HTF BIAS  (no-repainting)
@@ -334,8 +332,9 @@ ls_eql  = use_eql  and f_low_sweep(last_eql)
 htf_ok_bear = not use_htf or htf_bear
 htf_ok_bull = not use_htf or htf_bull
 
-any_hs = (hs_pdh or hs_pwh or hs_asia or hs_eqh) and htf_ok_bear and can_trade
-any_ls = (ls_pdl or ls_pwl or ls_asia or ls_eql)  and htf_ok_bull and can_trade
+// Sweep only triggers inside kill zone — entire cycle (sweep>MSS>FVG>entry) starts here
+any_hs = (hs_pdh or hs_pwh or hs_asia or hs_eqh) and htf_ok_bear and can_trade and in_kz
+any_ls = (ls_pdl or ls_pwl or ls_asia or ls_eql)  and htf_ok_bull and can_trade and in_kz
 
 // IDLE -> SWEPT
 if state == 0 and any_hs
@@ -508,30 +507,18 @@ if show_levels and use_asia and asia_closed
     if not na(asia_l)
         l_asia_l := line.new(bar_index, asia_l, bar_index + 1, asia_l, extend = extend.right, color = color.new(color.purple, 30), style = line.style_dotted, width = 1)
 
-// Equal Highs / Lows — orange dashed lines, drawn on detection
-if use_eql and eqh_new and not na(last_eqh)
+// Equal Highs / Lows — single orange dashed line per level, no label clutter
+if use_eql and show_levels and eqh_new and not na(last_eqh)
     line.delete(l_eqh)
     l_eqh := line.new(bar_index - sw_len, last_eqh, bar_index, last_eqh, extend = extend.right, color = color.new(color.orange, 10), style = line.style_dashed, width = 2)
-    label.new(bar_index - sw_len, last_eqh, "EQH", color = color.new(color.orange, 100), textcolor = color.new(color.orange, 0), style = label.style_label_right, size = size.tiny, tooltip = "Equal High - liquidity pool")
 
-if use_eql and eql_new and not na(last_eql)
+if use_eql and show_levels and eql_new and not na(last_eql)
     line.delete(l_eql)
     l_eql := line.new(bar_index - sw_len, last_eql, bar_index, last_eql, extend = extend.right, color = color.new(color.orange, 10), style = line.style_dashed, width = 2)
-    label.new(bar_index - sw_len, last_eql, "EQL", color = color.new(color.orange, 100), textcolor = color.new(color.orange, 0), style = label.style_label_right, size = size.tiny, tooltip = "Equal Low - liquidity pool")
 
-// Swing pivot markers
-plotshape(show_sw_mark and not na(raw_swh), title = "Swing H", style = shape.triangledown, location = location.abovebar, color = color.new(color.red,  60), size = size.tiny)
-plotshape(show_sw_mark and not na(raw_swl), title = "Swing L", style = shape.triangleup,   location = location.belowbar, color = color.new(color.teal, 60), size = size.tiny)
-
-// Sweep markers
+// Sweep markers (dot at the sweep candle — in KZ only)
 plotshape(show_sweep and any_hs, title = "Sweep HIGH", style = shape.circle, location = location.abovebar, color = color.new(color.red,  0), size = size.tiny)
 plotshape(show_sweep and any_ls, title = "Sweep LOW",  style = shape.circle, location = location.belowbar, color = color.new(color.teal, 0), size = size.tiny)
-
-// MSS labels
-if show_mss_lbl and bear_mss
-    label.new(bar_index, low  - syminfo.mintick * 20, "MSS DN", style = label.style_label_up,   color = color.red,  textcolor = color.white, size = size.small)
-if show_mss_lbl and bull_mss
-    label.new(bar_index, high + syminfo.mintick * 20, "MSS UP", style = label.style_label_down, color = color.teal, textcolor = color.white, size = size.small)
 
 // HTF FVG boxes — create on new edge, DELETE on invalidation (disappear)
 new_bear_1h  = htf_bear_1h and not prev_bear_1h
