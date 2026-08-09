@@ -481,40 +481,64 @@ var line l_asia_h = na
 var line l_asia_l = na
 var line l_eqh    = na
 var line l_eql    = na
+var label lb_pdh    = na
+var label lb_pdl    = na
+var label lb_pwh    = na
+var label lb_pwl    = na
+var label lb_asia_h = na
+var label lb_asia_l = na
+var label lb_eqh    = na
+var label lb_eql    = na
 
 if show_levels and use_pdhl and is_new_day
     line.delete(l_pdh)
     line.delete(l_pdl)
+    label.delete(lb_pdh)
+    label.delete(lb_pdl)
     if not na(pdh)
-        l_pdh := line.new(bar_index, pdh, bar_index + 1, pdh, extend = extend.right, color = color.new(color.red,    30), style = line.style_dashed, width = 1)
+        l_pdh  := line.new(bar_index, pdh, bar_index + 1, pdh, extend = extend.right, color = color.new(color.red,  30), style = line.style_dashed, width = 1)
+        lb_pdh := label.new(bar_index, pdh, "PDH", style = label.style_none, textcolor = color.new(color.red,  20), size = size.tiny)
     if not na(pdl)
-        l_pdl := line.new(bar_index, pdl, bar_index + 1, pdl, extend = extend.right, color = color.new(color.teal,   30), style = line.style_dashed, width = 1)
+        l_pdl  := line.new(bar_index, pdl, bar_index + 1, pdl, extend = extend.right, color = color.new(color.teal, 30), style = line.style_dashed, width = 1)
+        lb_pdl := label.new(bar_index, pdl, "PDL", style = label.style_none, textcolor = color.new(color.teal, 20), size = size.tiny)
 
 if show_levels and use_pwhl and is_new_week
     line.delete(l_pwh)
     line.delete(l_pwl)
+    label.delete(lb_pwh)
+    label.delete(lb_pwl)
     if not na(pwh)
-        l_pwh := line.new(bar_index, pwh, bar_index + 1, pwh, extend = extend.right, color = color.new(color.maroon, 40), style = line.style_solid, width = 1)
+        l_pwh  := line.new(bar_index, pwh, bar_index + 1, pwh, extend = extend.right, color = color.new(color.maroon, 40), style = line.style_solid, width = 1)
+        lb_pwh := label.new(bar_index, pwh, "PWH", style = label.style_none, textcolor = color.new(color.maroon, 20), size = size.tiny)
     if not na(pwl)
-        l_pwl := line.new(bar_index, pwl, bar_index + 1, pwl, extend = extend.right, color = color.new(color.navy,   40), style = line.style_solid, width = 1)
+        l_pwl  := line.new(bar_index, pwl, bar_index + 1, pwl, extend = extend.right, color = color.new(color.navy,   40), style = line.style_solid, width = 1)
+        lb_pwl := label.new(bar_index, pwl, "PWL", style = label.style_none, textcolor = color.new(color.navy,   20), size = size.tiny)
 
 asia_closed = not in_asia and in_asia[1]
 if show_levels and use_asia and asia_closed
     line.delete(l_asia_h)
     line.delete(l_asia_l)
+    label.delete(lb_asia_h)
+    label.delete(lb_asia_l)
     if not na(asia_h)
-        l_asia_h := line.new(bar_index, asia_h, bar_index + 1, asia_h, extend = extend.right, color = color.new(color.purple, 30), style = line.style_dotted, width = 1)
+        l_asia_h  := line.new(bar_index, asia_h, bar_index + 1, asia_h, extend = extend.right, color = color.new(color.purple, 30), style = line.style_dotted, width = 1)
+        lb_asia_h := label.new(bar_index, asia_h, "Asia H", style = label.style_none, textcolor = color.new(color.purple, 20), size = size.tiny)
     if not na(asia_l)
-        l_asia_l := line.new(bar_index, asia_l, bar_index + 1, asia_l, extend = extend.right, color = color.new(color.purple, 30), style = line.style_dotted, width = 1)
+        l_asia_l  := line.new(bar_index, asia_l, bar_index + 1, asia_l, extend = extend.right, color = color.new(color.purple, 30), style = line.style_dotted, width = 1)
+        lb_asia_l := label.new(bar_index, asia_l, "Asia L", style = label.style_none, textcolor = color.new(color.purple, 20), size = size.tiny)
 
-// Equal Highs / Lows — single orange dashed line per level, no label clutter
+// Equal Highs / Lows — orange dashed line with small text label
 if use_eql and show_levels and eqh_new and not na(last_eqh)
     line.delete(l_eqh)
-    l_eqh := line.new(bar_index - sw_len, last_eqh, bar_index, last_eqh, extend = extend.right, color = color.new(color.orange, 10), style = line.style_dashed, width = 2)
+    label.delete(lb_eqh)
+    l_eqh  := line.new(bar_index - sw_len, last_eqh, bar_index, last_eqh, extend = extend.right, color = color.new(color.orange, 10), style = line.style_dashed, width = 2)
+    lb_eqh := label.new(bar_index, last_eqh, "EQH", style = label.style_none, textcolor = color.new(color.orange, 10), size = size.tiny)
 
 if use_eql and show_levels and eql_new and not na(last_eql)
     line.delete(l_eql)
-    l_eql := line.new(bar_index - sw_len, last_eql, bar_index, last_eql, extend = extend.right, color = color.new(color.orange, 10), style = line.style_dashed, width = 2)
+    label.delete(lb_eql)
+    l_eql  := line.new(bar_index - sw_len, last_eql, bar_index, last_eql, extend = extend.right, color = color.new(color.orange, 10), style = line.style_dashed, width = 2)
+    lb_eql := label.new(bar_index, last_eql, "EQL", style = label.style_none, textcolor = color.new(color.orange, 10), size = size.tiny)
 
 // Sweep markers (dot at the sweep candle — in KZ only)
 plotshape(show_sweep and any_hs, title = "Sweep HIGH", style = shape.circle, location = location.abovebar, color = color.new(color.red,  0), size = size.tiny)
