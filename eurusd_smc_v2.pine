@@ -1,6 +1,6 @@
 // This Pine Script(tm) code is subject to the terms of the Mozilla Public License 2.0
 // SMC EURUSD v4 | Sweep HTF POI > 1M MSS > FVG + Engulfing Entry
-// HTF Bias: Daily/4H/1H FVG | POIs: PDH/PDL, PWH/PWL, Asia, EQH/EQL
+// HTF Bias: Monthly/Weekly/Daily/4H/1H FVG | POIs: PDH/PDL, PWH/PWL, Asia, EQH/EQL
 // Kill Zones: London 03:00-05:00 UTC | NY 08:00-10:30 UTC
 // Risk: Tiered non-compounded 0.7%-2.0% | SL=sweep wick | TP=SLxRR
 
@@ -47,10 +47,12 @@ req_close_fvg = input.bool(true,    "Entry candle must CLOSE inside FVG", group 
 req_engulf    = input.bool(true,    "Entry candle must be ENGULFING (body covers prev body)", group = GFVG)
 
 var string GHTF = "HTF Context Filter"
-use_htf     = input.bool(true,   "Require HTF FVG alignment (1H/4H/Daily)", group = GHTF)
-htf_tf1     = input.timeframe("60",  "HTF 1 (1H)",    group = GHTF)
-htf_tf2     = input.timeframe("240", "HTF 2 (4H)",    group = GHTF)
-htf_tf3     = input.timeframe("D",   "HTF 3 (Daily)", group = GHTF)
+use_htf     = input.bool(true,  "Require HTF FVG alignment (at least one active TF)", group = GHTF)
+use_htf_1h  = input.bool(true,  "1H FVG zones",      group = GHTF)
+use_htf_4h  = input.bool(true,  "4H FVG zones",      group = GHTF)
+use_htf_d   = input.bool(true,  "Daily FVG zones",   group = GHTF)
+use_htf_w   = input.bool(true,  "Weekly FVG zones",  group = GHTF)
+use_htf_m   = input.bool(false, "Monthly FVG zones", group = GHTF)
 htf_fvg_min = input.float(0.0003, "Min HTF FVG Size", 0.00010, 0.010, 0.00010, group = GHTF)
 
 var string GRSK = "Risk Management"
@@ -77,26 +79,33 @@ var string GVIS = "Visuals"
 show_levels  = input.bool(true,    "Show POI Lines (PDH/PDL, PWH/PWL, Asia, EQH/EQL)", group = GVIS)
 show_kz_bg   = input.bool(true,    "Show Kill Zone Background",                         group = GVIS)
 show_sweep   = input.bool(true,    "Show Sweep Markers",                                group = GVIS)
-max_poi_dist = input.float(0.0150, "Max POI Distance (hide far zones)",  0.0020, 0.1000, 0.0010, group = GVIS)
-show_fvg_vis = input.bool(true,    "Show FVG Imbalance Boxes (all unmitigated)",              group = GVIS)
+max_poi_dist = input.float(0.0100, "Max POI Distance (hide zones > N price)",  0.0010, 0.1000, 0.0010, group = GVIS)
+show_fvg_vis = input.bool(true,    "Show FVG Imbalance Boxes (all unmitigated)",        group = GVIS)
+merge_tol    = input.float(0.0005, "Zone Merge Tolerance",  0.00010, 0.005, 0.00010,   group = GVIS)
 
 // =============================================================
 // HTF BIAS  (no-repainting)
 // =============================================================
 
-[h1_h2, h1_l2, h1_h0, h1_l0] = request.security(syminfo.tickerid, htf_tf1, [high[2], low[2], high[0], low[0]], lookahead = barmerge.lookahead_off)
-[h2_h2, h2_l2, h2_h0, h2_l0] = request.security(syminfo.tickerid, htf_tf2, [high[2], low[2], high[0], low[0]], lookahead = barmerge.lookahead_off)
-[h3_h2, h3_l2, h3_h0, h3_l0] = request.security(syminfo.tickerid, htf_tf3, [high[2], low[2], high[0], low[0]], lookahead = barmerge.lookahead_off)
+[h1_h2, h1_l2, h1_h0, h1_l0] = request.security(syminfo.tickerid, "60",  [high[2], low[2], high[0], low[0]], lookahead = barmerge.lookahead_off)
+[h2_h2, h2_l2, h2_h0, h2_l0] = request.security(syminfo.tickerid, "240", [high[2], low[2], high[0], low[0]], lookahead = barmerge.lookahead_off)
+[h3_h2, h3_l2, h3_h0, h3_l0] = request.security(syminfo.tickerid, "D",   [high[2], low[2], high[0], low[0]], lookahead = barmerge.lookahead_off)
+[hw_h2, hw_l2, hw_h0, hw_l0] = request.security(syminfo.tickerid, "W",   [high[2], low[2], high[0], low[0]], lookahead = barmerge.lookahead_off)
+[hm_h2, hm_l2, hm_h0, hm_l0] = request.security(syminfo.tickerid, "M",   [high[2], low[2], high[0], low[0]], lookahead = barmerge.lookahead_off)
 
 htf_bear_1h = h1_l2 > h1_h0 and (h1_l2 - h1_h0) >= htf_fvg_min
 htf_bear_4h = h2_l2 > h2_h0 and (h2_l2 - h2_h0) >= htf_fvg_min
 htf_bear_d  = h3_l2 > h3_h0 and (h3_l2 - h3_h0) >= htf_fvg_min
-htf_bear    = htf_bear_1h or htf_bear_4h or htf_bear_d
+htf_bear_w  = hw_l2 > hw_h0 and (hw_l2 - hw_h0) >= htf_fvg_min
+htf_bear_m  = hm_l2 > hm_h0 and (hm_l2 - hm_h0) >= htf_fvg_min
+htf_bear    = (use_htf_1h and htf_bear_1h) or (use_htf_4h and htf_bear_4h) or (use_htf_d and htf_bear_d) or (use_htf_w and htf_bear_w) or (use_htf_m and htf_bear_m)
 
 htf_bull_1h = h1_h2 < h1_l0 and (h1_l0 - h1_h2) >= htf_fvg_min
 htf_bull_4h = h2_h2 < h2_l0 and (h2_l0 - h2_h2) >= htf_fvg_min
 htf_bull_d  = h3_h2 < h3_l0 and (h3_l0 - h3_h2) >= htf_fvg_min
-htf_bull    = htf_bull_1h or htf_bull_4h or htf_bull_d
+htf_bull_w  = hw_h2 < hw_l0 and (hw_l0 - hw_h2) >= htf_fvg_min
+htf_bull_m  = hm_h2 < hm_l0 and (hm_l0 - hm_h2) >= htf_fvg_min
+htf_bull    = (use_htf_1h and htf_bull_1h) or (use_htf_4h and htf_bull_4h) or (use_htf_d and htf_bull_d) or (use_htf_w and htf_bull_w) or (use_htf_m and htf_bull_m)
 
 // =============================================================
 // SESSION / KILL ZONE
@@ -110,7 +119,6 @@ in_london = h_utc >= kz_lon_open and h_utc < kz_lon_close
 in_ny     = h_utc >= kz_ny_open and not ny_closed
 in_kz     = in_london or in_ny
 
-// EQH/EQL detection only makes sense on 15M+ charts (too noisy below)
 eql_tf_ok = timeframe.in_seconds() >= 900
 
 // =============================================================
@@ -187,8 +195,10 @@ else if in_asia[1]
     asia_live_h := na
     asia_live_l := na
 
+asia_closed = not in_asia and in_asia[1]
+
 // =============================================================
-// SWING HIGHS / LOWS  (MSS reference — not sweep triggers)
+// SWING HIGHS / LOWS
 // =============================================================
 
 raw_swh = ta.pivothigh(high, sw_len, sw_len)
@@ -203,7 +213,7 @@ if not na(raw_swl)
     last_swl := raw_swl
 
 // =============================================================
-// EQUAL HIGHS / LOWS  (liquid highs/lows — multi-tested pivots)
+// EQUAL HIGHS / LOWS
 // =============================================================
 
 var float[] swh_hist = array.new_float(0)
@@ -257,6 +267,9 @@ if was_in_trade
 f_qty(float sl_dist) =>
     sl_dist > 0.0 ? (fixed_cap * f_risk(attempt)) / sl_dist : 0.0
 
+poi_in_rng(float px) =>
+    not na(px) and math.abs(close - px) <= max_poi_dist
+
 // =============================================================
 // CANDLE BODY + ENGULFING
 // =============================================================
@@ -274,11 +287,8 @@ bull_engulf = is_bull and body_hi > prev_body_hi and body_lo < prev_body_lo
 
 // =============================================================
 // STATE MACHINE
-// 0 = IDLE
-// 1 = BEAR_SWEPT  (HTF POI swept, waiting bearish MSS)
-// 2 = BULL_SWEPT  (HTF POI swept, waiting bullish MSS)
-// 3 = BEAR_FVG    (FVG set, waiting retest)
-// 4 = BULL_FVG    (FVG set, waiting retest)
+// 0 = IDLE | 1 = BEAR_SWEPT | 2 = BULL_SWEPT
+// 3 = BEAR_FVG | 4 = BULL_FVG
 // =============================================================
 
 var int   state        = 0
@@ -302,6 +312,10 @@ var box htf_b4h_box   = na
 var box htf_u4h_box   = na
 var box htf_bd_box    = na
 var box htf_ud_box    = na
+var box htf_bw_box    = na
+var box htf_uw_box    = na
+var box htf_bm_box    = na
+var box htf_um_box    = na
 
 var bool prev_bear_1h = false
 var bool prev_bull_1h = false
@@ -309,6 +323,10 @@ var bool prev_bear_4h = false
 var bool prev_bull_4h = false
 var bool prev_bear_d  = false
 var bool prev_bull_d  = false
+var bool prev_bear_w  = false
+var bool prev_bull_w  = false
+var bool prev_bear_m  = false
+var bool prev_bull_m  = false
 
 if state == 0
     if not na(raw_swl)
@@ -316,14 +334,12 @@ if state == 0
     if not na(raw_swh)
         pre_swh := raw_swh
 
-// Sweep functions
 f_high_sweep(float lvl) =>
     not na(lvl) and high > (lvl + sweep_buf) and body_hi < lvl and is_bear
 
 f_low_sweep(float lvl) =>
     not na(lvl) and low < (lvl - sweep_buf) and body_lo > lvl and is_bull
 
-// HTF POI sweeps: PDH/PDL, PWH/PWL, Asia, EQH/EQL
 hs_pdh  = use_pdhl and f_high_sweep(pdh)
 hs_pwh  = use_pwhl and f_high_sweep(pwh)
 hs_asia = use_asia and f_high_sweep(asia_h)
@@ -337,11 +353,9 @@ ls_eql  = use_eql  and f_low_sweep(last_eql)
 htf_ok_bear = not use_htf or htf_bear
 htf_ok_bull = not use_htf or htf_bull
 
-// Sweep only triggers inside kill zone — entire cycle (sweep>MSS>FVG>entry) starts here
 any_hs = (hs_pdh or hs_pwh or hs_asia or hs_eqh) and htf_ok_bear and can_trade and in_kz
 any_ls = (ls_pdl or ls_pwl or ls_asia or ls_eql)  and htf_ok_bull and can_trade and in_kz
 
-// IDLE -> SWEPT
 if state == 0 and any_hs
     state        := 1
     sweep_hi     := high
@@ -354,11 +368,9 @@ if state == 0 and any_ls
     mss_ref_bull := na(pre_swh) ? high : pre_swh
     state_bar    := bar_index
 
-// MSS timeout
 if (state == 1 or state == 2) and (bar_index - state_bar) > mss_max_bars
     state := 0
 
-// MSS detection
 bear_mss = state == 1 and not na(mss_ref_bear) and body_lo < mss_ref_bear and is_bear
 bull_mss = state == 2 and not na(mss_ref_bull) and body_hi > mss_ref_bull and is_bull
 
@@ -372,7 +384,6 @@ if bull_mss
     state       := 4
     state_bar   := bar_index
 
-// FVG detection (bar N+1 after MSS)
 if mss_bear_ok[1]
     bear_gap = low[2] - high
     if bear_gap >= fvg_min_gap
@@ -385,7 +396,7 @@ if mss_bear_ok[1]
              bgcolor      = color.new(color.red, 80),
              text         = "FVG",
              text_color   = color.new(color.red, 20),
-             text_size    = size.tiny,
+             text_size    = size.small,
              text_halign  = text.align_left,
              text_valign  = text.align_top)
     else
@@ -404,18 +415,16 @@ if mss_bull_ok[1]
              bgcolor      = color.new(color.teal, 80),
              text         = "FVG",
              text_color   = color.new(color.teal, 20),
-             text_size    = size.tiny,
+             text_size    = size.small,
              text_halign  = text.align_left,
              text_valign  = text.align_top)
     else
         state := 0
     mss_bull_ok := false
 
-// Extend FVG box right edge while active
 if (state == 3 or state == 4) and not na(fvg_entry_box)
     box.set_right(fvg_entry_box, bar_index + 5)
 
-// FVG timeout — delete box (disappears from chart)
 if (state == 3 or state == 4) and (bar_index - fvg_bar) > fvg_max_bars
     box.delete(fvg_entry_box)
     state := 0
@@ -477,124 +486,173 @@ if long_signal
 bgcolor(show_kz_bg and in_london ? color.new(color.blue,   95) : na, title = "London KZ")
 bgcolor(show_kz_bg and in_ny     ? color.new(color.yellow, 95) : na, title = "NY KZ")
 
-// HTF POI flat horizontal lines — recreated each period
-var line l_pdh    = na
-var line l_pdl    = na
-var line l_pwh    = na
-var line l_pwl    = na
-var line l_asia_h = na
-var line l_asia_l = na
-var line l_eqh    = na
-var line l_eql    = na
-var label lb_pdh    = na
-var label lb_pdl    = na
-var label lb_pwh    = na
-var label lb_pwl    = na
-var label lb_asia_h = na
-var label lb_asia_l = na
-var label lb_eqh    = na
-var label lb_eql    = na
-var box[] bear_fvg_arr = array.new<box>(0)
-var box[] bull_fvg_arr = array.new<box>(0)
+// =============================================================
+// POI LINE MANAGER — rebuilt every bar with merge logic
+// =============================================================
 
-if show_levels and use_pdhl and is_new_day
-    line.delete(l_pdh)
-    line.delete(l_pdl)
-    label.delete(lb_pdh)
-    label.delete(lb_pdl)
-    if not na(pdh)
-        l_pdh  := line.new(bar_index, pdh, bar_index + 1, pdh, extend = extend.right, color = color.new(color.red,  30), style = line.style_dashed, width = 1)
-        lb_pdh := label.new(bar_index, pdh, "PDH", style = label.style_none, textcolor = color.new(color.red,  20), size = size.tiny)
-    if not na(pdl)
-        l_pdl  := line.new(bar_index, pdl, bar_index + 1, pdl, extend = extend.right, color = color.new(color.teal, 30), style = line.style_dashed, width = 1)
-        lb_pdl := label.new(bar_index, pdl, "PDL", style = label.style_none, textcolor = color.new(color.teal, 20), size = size.tiny)
+var line[]  managed_poi_lines  = array.new<line>(0)
+var label[] managed_poi_labels = array.new<label>(0)
 
-if show_levels and use_pwhl and is_new_week
-    line.delete(l_pwh)
-    line.delete(l_pwl)
-    label.delete(lb_pwh)
-    label.delete(lb_pwl)
-    if not na(pwh)
-        l_pwh  := line.new(bar_index, pwh, bar_index + 1, pwh, extend = extend.right, color = color.new(color.maroon, 40), style = line.style_solid, width = 1)
-        lb_pwh := label.new(bar_index, pwh, "PWH", style = label.style_none, textcolor = color.new(color.maroon, 20), size = size.tiny)
-    if not na(pwl)
-        l_pwl  := line.new(bar_index, pwl, bar_index + 1, pwl, extend = extend.right, color = color.new(color.navy,   40), style = line.style_solid, width = 1)
-        lb_pwl := label.new(bar_index, pwl, "PWL", style = label.style_none, textcolor = color.new(color.navy,   20), size = size.tiny)
+var bool pdh_swept    = false
+var bool pdl_swept    = false
+var bool pwh_swept    = false
+var bool pwl_swept    = false
+var bool asia_h_swept = false
+var bool asia_l_swept = false
+var bool eqh_swept    = false
+var bool eql_swept    = false
 
-asia_closed = not in_asia and in_asia[1]
-if show_levels and use_asia and asia_closed
-    line.delete(l_asia_h)
-    line.delete(l_asia_l)
-    label.delete(lb_asia_h)
-    label.delete(lb_asia_l)
-    if not na(asia_h)
-        l_asia_h  := line.new(bar_index, asia_h, bar_index + 1, asia_h, extend = extend.right, color = color.new(color.purple, 30), style = line.style_dotted, width = 1)
-        lb_asia_h := label.new(bar_index, asia_h, "Asia H", style = label.style_none, textcolor = color.new(color.purple, 20), size = size.tiny)
-    if not na(asia_l)
-        l_asia_l  := line.new(bar_index, asia_l, bar_index + 1, asia_l, extend = extend.right, color = color.new(color.purple, 30), style = line.style_dotted, width = 1)
-        lb_asia_l := label.new(bar_index, asia_l, "Asia L", style = label.style_none, textcolor = color.new(color.purple, 20), size = size.tiny)
+if is_new_day
+    pdh_swept := false
+    pdl_swept := false
+if is_new_week
+    pwh_swept := false
+    pwl_swept := false
+if asia_closed
+    asia_h_swept := false
+    asia_l_swept := false
+if eqh_new
+    eqh_swept := false
+if eql_new
+    eql_swept := false
 
-// Equal Highs / Lows — orange dashed line with small text label (15M+ only)
-if use_eql and eql_tf_ok and show_levels and eqh_new and not na(last_eqh)
-    line.delete(l_eqh)
-    label.delete(lb_eqh)
-    l_eqh  := line.new(bar_index - sw_len, last_eqh, bar_index, last_eqh, extend = extend.right, color = color.new(color.orange, 10), style = line.style_dashed, width = 2)
-    lb_eqh := label.new(bar_index, last_eqh, "EQH", style = label.style_none, textcolor = color.new(color.orange, 10), size = size.tiny)
+if not na(pdh) and not pdh_swept and high >= pdh
+    pdh_swept := true
+if not na(pdl) and not pdl_swept and low <= pdl
+    pdl_swept := true
+if not na(pwh) and not pwh_swept and high >= pwh
+    pwh_swept := true
+if not na(pwl) and not pwl_swept and low <= pwl
+    pwl_swept := true
+if not na(asia_h) and not asia_h_swept and high >= asia_h
+    asia_h_swept := true
+if not na(asia_l) and not asia_l_swept and low <= asia_l
+    asia_l_swept := true
+if not na(last_eqh) and not eqh_swept and high >= last_eqh
+    eqh_swept := true
+if not na(last_eql) and not eql_swept and low <= last_eql
+    eql_swept := true
 
-if use_eql and eql_tf_ok and show_levels and eql_new and not na(last_eql)
-    line.delete(l_eql)
-    label.delete(lb_eql)
-    l_eql  := line.new(bar_index - sw_len, last_eql, bar_index, last_eql, extend = extend.right, color = color.new(color.orange, 10), style = line.style_dashed, width = 2)
-    lb_eql := label.new(bar_index, last_eql, "EQL", style = label.style_none, textcolor = color.new(color.orange, 10), size = size.tiny)
+// Delete all managed drawings from previous bar
+n_ml = array.size(managed_poi_lines)
+if n_ml > 0
+    for i = 0 to n_ml - 1
+        line.delete(array.get(managed_poi_lines, i))
+array.clear(managed_poi_lines)
+n_mlb = array.size(managed_poi_labels)
+if n_mlb > 0
+    for i = 0 to n_mlb - 1
+        label.delete(array.get(managed_poi_labels, i))
+array.clear(managed_poi_labels)
 
-// Remove POI lines when price has touched them or they are too far from current price
 if show_levels
-    if not na(l_pdh) and (high >= pdh or math.abs(close - pdh) > max_poi_dist)
-        line.delete(l_pdh)
-        label.delete(lb_pdh)
-        l_pdh  := na
-        lb_pdh := na
-    if not na(l_pdl) and (low <= pdl or math.abs(close - pdl) > max_poi_dist)
-        line.delete(l_pdl)
-        label.delete(lb_pdl)
-        l_pdl  := na
-        lb_pdl := na
-    if not na(l_pwh) and (high >= pwh or math.abs(close - pwh) > max_poi_dist)
-        line.delete(l_pwh)
-        label.delete(lb_pwh)
-        l_pwh  := na
-        lb_pwh := na
-    if not na(l_pwl) and (low <= pwl or math.abs(close - pwl) > max_poi_dist)
-        line.delete(l_pwl)
-        label.delete(lb_pwl)
-        l_pwl  := na
-        lb_pwl := na
-    if not na(l_asia_h) and (high >= asia_h or math.abs(close - asia_h) > max_poi_dist)
-        line.delete(l_asia_h)
-        label.delete(lb_asia_h)
-        l_asia_h  := na
-        lb_asia_h := na
-    if not na(l_asia_l) and (low <= asia_l or math.abs(close - asia_l) > max_poi_dist)
-        line.delete(l_asia_l)
-        label.delete(lb_asia_l)
-        l_asia_l  := na
-        lb_asia_l := na
-    if not na(l_eqh) and not na(last_eqh) and (high >= last_eqh or math.abs(close - last_eqh) > max_poi_dist)
-        line.delete(l_eqh)
-        label.delete(lb_eqh)
-        l_eqh  := na
-        lb_eqh := na
-    if not na(l_eql) and not na(last_eql) and (low <= last_eql or math.abs(close - last_eql) > max_poi_dist)
-        line.delete(l_eql)
-        label.delete(lb_eql)
-        l_eql  := na
-        lb_eql := na
+    poi_px = array.new_float(0)
+    poi_nm = array.new_string(0)
+    poi_cl = array.new<color>(0)
+    poi_st = array.new_string(0)
+    poi_pr = array.new_int(0)
 
-// Sweep markers (dot at the sweep candle — in KZ only)
+    if use_pdhl
+        if poi_in_rng(pdh) and not pdh_swept
+            array.push(poi_px, pdh)
+            array.push(poi_nm, "PDH")
+            array.push(poi_cl, color.new(color.red,    0))
+            array.push(poi_st, line.style_dashed)
+            array.push(poi_pr, 10)
+        if poi_in_rng(pdl) and not pdl_swept
+            array.push(poi_px, pdl)
+            array.push(poi_nm, "PDL")
+            array.push(poi_cl, color.new(color.teal,   0))
+            array.push(poi_st, line.style_dashed)
+            array.push(poi_pr, 11)
+    if use_pwhl
+        if poi_in_rng(pwh) and not pwh_swept
+            array.push(poi_px, pwh)
+            array.push(poi_nm, "PWH")
+            array.push(poi_cl, color.new(color.maroon, 0))
+            array.push(poi_st, line.style_solid)
+            array.push(poi_pr, 20)
+        if poi_in_rng(pwl) and not pwl_swept
+            array.push(poi_px, pwl)
+            array.push(poi_nm, "PWL")
+            array.push(poi_cl, color.new(color.navy,   0))
+            array.push(poi_st, line.style_solid)
+            array.push(poi_pr, 21)
+    if use_asia
+        if poi_in_rng(asia_h) and not asia_h_swept
+            array.push(poi_px, asia_h)
+            array.push(poi_nm, "Asia H")
+            array.push(poi_cl, color.new(color.purple, 0))
+            array.push(poi_st, line.style_dotted)
+            array.push(poi_pr, 30)
+        if poi_in_rng(asia_l) and not asia_l_swept
+            array.push(poi_px, asia_l)
+            array.push(poi_nm, "Asia L")
+            array.push(poi_cl, color.new(color.purple, 0))
+            array.push(poi_st, line.style_dotted)
+            array.push(poi_pr, 31)
+    if use_eql and eql_tf_ok
+        if poi_in_rng(last_eqh) and not eqh_swept
+            array.push(poi_px, last_eqh)
+            array.push(poi_nm, "EQH")
+            array.push(poi_cl, color.new(color.orange, 0))
+            array.push(poi_st, line.style_dashed)
+            array.push(poi_pr, 40)
+        if poi_in_rng(last_eql) and not eql_swept
+            array.push(poi_px, last_eql)
+            array.push(poi_nm, "EQL")
+            array.push(poi_cl, color.new(color.orange, 0))
+            array.push(poi_st, line.style_dashed)
+            array.push(poi_pr, 41)
+
+    n_poi = array.size(poi_px)
+    if n_poi > 0
+        sorted_idx = array.sort_indices(poi_px, order.ascending)
+        used_flags = array.new_bool(n_poi, false)
+
+        for ii = 0 to n_poi - 1
+            si = array.get(sorted_idx, ii)
+            if array.get(used_flags, si)
+                continue
+            g_px = array.get(poi_px, si)
+            g_nm = array.get(poi_nm, si)
+            g_cl = array.get(poi_cl, si)
+            g_st = array.get(poi_st, si)
+            g_pr = array.get(poi_pr, si)
+            array.set(used_flags, si, true)
+
+            for jj = ii + 1 to n_poi - 1
+                sj = array.get(sorted_idx, jj)
+                if array.get(used_flags, sj)
+                    continue
+                pj = array.get(poi_px, sj)
+                if pj - g_px > merge_tol
+                    break
+                prj = array.get(poi_pr, sj)
+                nmj = array.get(poi_nm, sj)
+                if prj < g_pr
+                    g_nm := nmj + " + " + g_nm
+                    g_cl := array.get(poi_cl, sj)
+                    g_st := array.get(poi_st, sj)
+                    g_pr := prj
+                else
+                    g_nm := g_nm + " + " + nmj
+                array.set(used_flags, sj, true)
+
+            new_l  = line.new(bar_index - 1, g_px, bar_index, g_px, extend = extend.right, color = g_cl, style = g_st, width = 1)
+            new_lb = label.new(bar_index, g_px, g_nm, style = label.style_none, textcolor = g_cl, size = size.small)
+            array.push(managed_poi_lines,  new_l)
+            array.push(managed_poi_labels, new_lb)
+
+// Sweep markers
 plotshape(show_sweep and any_hs, title = "Sweep HIGH", style = shape.circle, location = location.abovebar, color = color.new(color.red,  0), size = size.tiny)
 plotshape(show_sweep and any_ls, title = "Sweep LOW",  style = shape.circle, location = location.belowbar, color = color.new(color.teal, 0), size = size.tiny)
 
-// HTF FVG boxes — create on new edge, DELETE on invalidation (disappear)
+// =============================================================
+// HTF FVG BOXES — create on new edge, delete on invalidation
+// Distance-filtered on creation and each bar (no chart distortion)
+// =============================================================
+
 new_bear_1h  = htf_bear_1h and not prev_bear_1h
 gone_bear_1h = not htf_bear_1h and prev_bear_1h
 new_bull_1h  = htf_bull_1h and not prev_bull_1h
@@ -607,6 +665,14 @@ new_bear_d   = htf_bear_d  and not prev_bear_d
 gone_bear_d  = not htf_bear_d  and prev_bear_d
 new_bull_d   = htf_bull_d  and not prev_bull_d
 gone_bull_d  = not htf_bull_d  and prev_bull_d
+new_bear_w   = htf_bear_w  and not prev_bear_w
+gone_bear_w  = not htf_bear_w  and prev_bear_w
+new_bull_w   = htf_bull_w  and not prev_bull_w
+gone_bull_w  = not htf_bull_w  and prev_bull_w
+new_bear_m   = htf_bear_m  and not prev_bear_m
+gone_bear_m  = not htf_bear_m  and prev_bear_m
+new_bull_m   = htf_bull_m  and not prev_bull_m
+gone_bull_m  = not htf_bull_m  and prev_bull_m
 
 prev_bear_1h := htf_bear_1h
 prev_bull_1h := htf_bull_1h
@@ -614,110 +680,195 @@ prev_bear_4h := htf_bear_4h
 prev_bull_4h := htf_bull_4h
 prev_bear_d  := htf_bear_d
 prev_bull_d  := htf_bull_d
+prev_bear_w  := htf_bear_w
+prev_bull_w  := htf_bull_w
+prev_bear_m  := htf_bear_m
+prev_bull_m  := htf_bull_m
 
 if show_levels
-    if new_bear_1h
-        box.delete(htf_b1h_box)
-        htf_b1h_box := box.new(bar_index, h1_l2, bar_index + 1, h1_h0, border_color = color.new(color.red, 30), bgcolor = color.new(color.red, 87), text = "1H", text_color = color.new(color.red, 20), text_size = size.tiny, text_halign = text.align_right, text_valign = text.align_top)
-    if gone_bear_1h
-        box.delete(htf_b1h_box)
-        htf_b1h_box := na
-    if htf_bear_1h and not na(htf_b1h_box)
-        b_bot = box.get_bottom(htf_b1h_box)
-        b_mid = (box.get_top(htf_b1h_box) + b_bot) / 2
-        if high >= b_bot or math.abs(close - b_mid) > max_poi_dist
+    // --- 1H ---
+    if use_htf_1h
+        if new_bear_1h
             box.delete(htf_b1h_box)
             htf_b1h_box := na
-        else
-            box.set_right(htf_b1h_box, bar_index + 5)
-
-    if new_bull_1h
-        box.delete(htf_u1h_box)
-        htf_u1h_box := box.new(bar_index, h1_l0, bar_index + 1, h1_h2, border_color = color.new(color.teal, 30), bgcolor = color.new(color.teal, 87), text = "1H", text_color = color.new(color.teal, 20), text_size = size.tiny, text_halign = text.align_right, text_valign = text.align_bottom)
-    if gone_bull_1h
-        box.delete(htf_u1h_box)
-        htf_u1h_box := na
-    if htf_bull_1h and not na(htf_u1h_box)
-        b_top = box.get_top(htf_u1h_box)
-        b_mid = (b_top + box.get_bottom(htf_u1h_box)) / 2
-        if low <= b_top or math.abs(close - b_mid) > max_poi_dist
+            if math.abs(close - (h1_l2 + h1_h0) / 2) <= max_poi_dist
+                htf_b1h_box := box.new(bar_index, h1_l2, bar_index + 1, h1_h0, border_color = color.new(color.red, 30), bgcolor = color.new(color.red, 87), text = "1H", text_color = color.new(color.red, 20), text_size = size.small, text_halign = text.align_right, text_valign = text.align_top)
+        if gone_bear_1h
+            box.delete(htf_b1h_box)
+            htf_b1h_box := na
+        if htf_bear_1h and not na(htf_b1h_box)
+            b_bot = box.get_bottom(htf_b1h_box)
+            b_mid = (box.get_top(htf_b1h_box) + b_bot) / 2
+            if high >= b_bot or math.abs(close - b_mid) > max_poi_dist
+                box.delete(htf_b1h_box)
+                htf_b1h_box := na
+            else
+                box.set_right(htf_b1h_box, bar_index + 5)
+        if new_bull_1h
             box.delete(htf_u1h_box)
             htf_u1h_box := na
-        else
-            box.set_right(htf_u1h_box, bar_index + 5)
+            if math.abs(close - (h1_l0 + h1_h2) / 2) <= max_poi_dist
+                htf_u1h_box := box.new(bar_index, h1_l0, bar_index + 1, h1_h2, border_color = color.new(color.teal, 30), bgcolor = color.new(color.teal, 87), text = "1H", text_color = color.new(color.teal, 20), text_size = size.small, text_halign = text.align_right, text_valign = text.align_bottom)
+        if gone_bull_1h
+            box.delete(htf_u1h_box)
+            htf_u1h_box := na
+        if htf_bull_1h and not na(htf_u1h_box)
+            b_top = box.get_top(htf_u1h_box)
+            b_mid = (b_top + box.get_bottom(htf_u1h_box)) / 2
+            if low <= b_top or math.abs(close - b_mid) > max_poi_dist
+                box.delete(htf_u1h_box)
+                htf_u1h_box := na
+            else
+                box.set_right(htf_u1h_box, bar_index + 5)
 
-    if new_bear_4h
-        box.delete(htf_b4h_box)
-        htf_b4h_box := box.new(bar_index, h2_l2, bar_index + 1, h2_h0, border_color = color.new(color.red, 20), bgcolor = color.new(color.red, 84), text = "4H", text_color = color.new(color.red, 10), text_size = size.tiny, text_halign = text.align_right, text_valign = text.align_top)
-    if gone_bear_4h
-        box.delete(htf_b4h_box)
-        htf_b4h_box := na
-    if htf_bear_4h and not na(htf_b4h_box)
-        b_bot = box.get_bottom(htf_b4h_box)
-        b_mid = (box.get_top(htf_b4h_box) + b_bot) / 2
-        if high >= b_bot or math.abs(close - b_mid) > max_poi_dist
+    // --- 4H ---
+    if use_htf_4h
+        if new_bear_4h
             box.delete(htf_b4h_box)
             htf_b4h_box := na
-        else
-            box.set_right(htf_b4h_box, bar_index + 5)
-
-    if new_bull_4h
-        box.delete(htf_u4h_box)
-        htf_u4h_box := box.new(bar_index, h2_l0, bar_index + 1, h2_h2, border_color = color.new(color.teal, 20), bgcolor = color.new(color.teal, 84), text = "4H", text_color = color.new(color.teal, 10), text_size = size.tiny, text_halign = text.align_right, text_valign = text.align_bottom)
-    if gone_bull_4h
-        box.delete(htf_u4h_box)
-        htf_u4h_box := na
-    if htf_bull_4h and not na(htf_u4h_box)
-        b_top = box.get_top(htf_u4h_box)
-        b_mid = (b_top + box.get_bottom(htf_u4h_box)) / 2
-        if low <= b_top or math.abs(close - b_mid) > max_poi_dist
+            if math.abs(close - (h2_l2 + h2_h0) / 2) <= max_poi_dist
+                htf_b4h_box := box.new(bar_index, h2_l2, bar_index + 1, h2_h0, border_color = color.new(color.red, 20), bgcolor = color.new(color.red, 84), text = "4H", text_color = color.new(color.red, 10), text_size = size.small, text_halign = text.align_right, text_valign = text.align_top)
+        if gone_bear_4h
+            box.delete(htf_b4h_box)
+            htf_b4h_box := na
+        if htf_bear_4h and not na(htf_b4h_box)
+            b_bot = box.get_bottom(htf_b4h_box)
+            b_mid = (box.get_top(htf_b4h_box) + b_bot) / 2
+            if high >= b_bot or math.abs(close - b_mid) > max_poi_dist
+                box.delete(htf_b4h_box)
+                htf_b4h_box := na
+            else
+                box.set_right(htf_b4h_box, bar_index + 5)
+        if new_bull_4h
             box.delete(htf_u4h_box)
             htf_u4h_box := na
-        else
-            box.set_right(htf_u4h_box, bar_index + 5)
+            if math.abs(close - (h2_l0 + h2_h2) / 2) <= max_poi_dist
+                htf_u4h_box := box.new(bar_index, h2_l0, bar_index + 1, h2_h2, border_color = color.new(color.teal, 20), bgcolor = color.new(color.teal, 84), text = "4H", text_color = color.new(color.teal, 10), text_size = size.small, text_halign = text.align_right, text_valign = text.align_bottom)
+        if gone_bull_4h
+            box.delete(htf_u4h_box)
+            htf_u4h_box := na
+        if htf_bull_4h and not na(htf_u4h_box)
+            b_top = box.get_top(htf_u4h_box)
+            b_mid = (b_top + box.get_bottom(htf_u4h_box)) / 2
+            if low <= b_top or math.abs(close - b_mid) > max_poi_dist
+                box.delete(htf_u4h_box)
+                htf_u4h_box := na
+            else
+                box.set_right(htf_u4h_box, bar_index + 5)
 
-    if new_bear_d
-        box.delete(htf_bd_box)
-        htf_bd_box := box.new(bar_index, h3_l2, bar_index + 1, h3_h0, border_color = color.new(color.red, 10), bgcolor = color.new(color.red, 80), text = "D", text_color = color.new(color.red, 0), text_size = size.small, text_halign = text.align_right, text_valign = text.align_top)
-    if gone_bear_d
-        box.delete(htf_bd_box)
-        htf_bd_box := na
-    if htf_bear_d and not na(htf_bd_box)
-        b_bot = box.get_bottom(htf_bd_box)
-        b_mid = (box.get_top(htf_bd_box) + b_bot) / 2
-        if high >= b_bot or math.abs(close - b_mid) > max_poi_dist
+    // --- Daily ---
+    if use_htf_d
+        if new_bear_d
             box.delete(htf_bd_box)
             htf_bd_box := na
-        else
-            box.set_right(htf_bd_box, bar_index + 5)
-
-    if new_bull_d
-        box.delete(htf_ud_box)
-        htf_ud_box := box.new(bar_index, h3_l0, bar_index + 1, h3_h2, border_color = color.new(color.teal, 10), bgcolor = color.new(color.teal, 80), text = "D", text_color = color.new(color.teal, 0), text_size = size.small, text_halign = text.align_right, text_valign = text.align_bottom)
-    if gone_bull_d
-        box.delete(htf_ud_box)
-        htf_ud_box := na
-    if htf_bull_d and not na(htf_ud_box)
-        b_top = box.get_top(htf_ud_box)
-        b_mid = (b_top + box.get_bottom(htf_ud_box)) / 2
-        if low <= b_top or math.abs(close - b_mid) > max_poi_dist
+            if math.abs(close - (h3_l2 + h3_h0) / 2) <= max_poi_dist
+                htf_bd_box := box.new(bar_index, h3_l2, bar_index + 1, h3_h0, border_color = color.new(color.red, 10), bgcolor = color.new(color.red, 80), text = "D", text_color = color.new(color.red, 0), text_size = size.normal, text_halign = text.align_right, text_valign = text.align_top)
+        if gone_bear_d
+            box.delete(htf_bd_box)
+            htf_bd_box := na
+        if htf_bear_d and not na(htf_bd_box)
+            b_bot = box.get_bottom(htf_bd_box)
+            b_mid = (box.get_top(htf_bd_box) + b_bot) / 2
+            if high >= b_bot or math.abs(close - b_mid) > max_poi_dist
+                box.delete(htf_bd_box)
+                htf_bd_box := na
+            else
+                box.set_right(htf_bd_box, bar_index + 5)
+        if new_bull_d
             box.delete(htf_ud_box)
             htf_ud_box := na
-        else
-            box.set_right(htf_ud_box, bar_index + 5)
+            if math.abs(close - (h3_l0 + h3_h2) / 2) <= max_poi_dist
+                htf_ud_box := box.new(bar_index, h3_l0, bar_index + 1, h3_h2, border_color = color.new(color.teal, 10), bgcolor = color.new(color.teal, 80), text = "D", text_color = color.new(color.teal, 0), text_size = size.normal, text_halign = text.align_right, text_valign = text.align_bottom)
+        if gone_bull_d
+            box.delete(htf_ud_box)
+            htf_ud_box := na
+        if htf_bull_d and not na(htf_ud_box)
+            b_top = box.get_top(htf_ud_box)
+            b_mid = (b_top + box.get_bottom(htf_ud_box)) / 2
+            if low <= b_top or math.abs(close - b_mid) > max_poi_dist
+                box.delete(htf_ud_box)
+                htf_ud_box := na
+            else
+                box.set_right(htf_ud_box, bar_index + 5)
+
+    // --- Weekly ---
+    if use_htf_w
+        if new_bear_w
+            box.delete(htf_bw_box)
+            htf_bw_box := na
+            if math.abs(close - (hw_l2 + hw_h0) / 2) <= max_poi_dist
+                htf_bw_box := box.new(bar_index, hw_l2, bar_index + 1, hw_h0, border_color = color.new(color.red, 5), bgcolor = color.new(color.red, 75), text = "W", text_color = color.new(color.red, 0), text_size = size.normal, text_halign = text.align_right, text_valign = text.align_top)
+        if gone_bear_w
+            box.delete(htf_bw_box)
+            htf_bw_box := na
+        if htf_bear_w and not na(htf_bw_box)
+            b_bot = box.get_bottom(htf_bw_box)
+            b_mid = (box.get_top(htf_bw_box) + b_bot) / 2
+            if high >= b_bot or math.abs(close - b_mid) > max_poi_dist
+                box.delete(htf_bw_box)
+                htf_bw_box := na
+            else
+                box.set_right(htf_bw_box, bar_index + 5)
+        if new_bull_w
+            box.delete(htf_uw_box)
+            htf_uw_box := na
+            if math.abs(close - (hw_l0 + hw_h2) / 2) <= max_poi_dist
+                htf_uw_box := box.new(bar_index, hw_l0, bar_index + 1, hw_h2, border_color = color.new(color.teal, 5), bgcolor = color.new(color.teal, 75), text = "W", text_color = color.new(color.teal, 0), text_size = size.normal, text_halign = text.align_right, text_valign = text.align_bottom)
+        if gone_bull_w
+            box.delete(htf_uw_box)
+            htf_uw_box := na
+        if htf_bull_w and not na(htf_uw_box)
+            b_top = box.get_top(htf_uw_box)
+            b_mid = (b_top + box.get_bottom(htf_uw_box)) / 2
+            if low <= b_top or math.abs(close - b_mid) > max_poi_dist
+                box.delete(htf_uw_box)
+                htf_uw_box := na
+            else
+                box.set_right(htf_uw_box, bar_index + 5)
+
+    // --- Monthly ---
+    if use_htf_m
+        if new_bear_m
+            box.delete(htf_bm_box)
+            htf_bm_box := na
+            if math.abs(close - (hm_l2 + hm_h0) / 2) <= max_poi_dist
+                htf_bm_box := box.new(bar_index, hm_l2, bar_index + 1, hm_h0, border_color = color.new(color.red, 0), bgcolor = color.new(color.red, 70), text = "MN", text_color = color.new(color.red, 0), text_size = size.normal, text_halign = text.align_right, text_valign = text.align_top)
+        if gone_bear_m
+            box.delete(htf_bm_box)
+            htf_bm_box := na
+        if htf_bear_m and not na(htf_bm_box)
+            b_bot = box.get_bottom(htf_bm_box)
+            b_mid = (box.get_top(htf_bm_box) + b_bot) / 2
+            if high >= b_bot or math.abs(close - b_mid) > max_poi_dist
+                box.delete(htf_bm_box)
+                htf_bm_box := na
+            else
+                box.set_right(htf_bm_box, bar_index + 5)
+        if new_bull_m
+            box.delete(htf_um_box)
+            htf_um_box := na
+            if math.abs(close - (hm_l0 + hm_h2) / 2) <= max_poi_dist
+                htf_um_box := box.new(bar_index, hm_l0, bar_index + 1, hm_h2, border_color = color.new(color.teal, 0), bgcolor = color.new(color.teal, 70), text = "MN", text_color = color.new(color.teal, 0), text_size = size.normal, text_halign = text.align_right, text_valign = text.align_bottom)
+        if gone_bull_m
+            box.delete(htf_um_box)
+            htf_um_box := na
+        if htf_bull_m and not na(htf_um_box)
+            b_top = box.get_top(htf_um_box)
+            b_mid = (b_top + box.get_bottom(htf_um_box)) / 2
+            if low <= b_top or math.abs(close - b_mid) > max_poi_dist
+                box.delete(htf_um_box)
+                htf_um_box := na
+            else
+                box.set_right(htf_um_box, bar_index + 5)
 
 // =============================================================
 // FVG IMBALANCE VISUALIZATION
-// All unmitigated 3-candle imbalances on the current chart.
-// Bear FVG (supply): low[2] > high[0]  — red box; price deletes on entry
-// Bull FVG (demand): high[2] < low[0]  — teal box; price deletes on entry
-// Multiple stacked FVGs in a downtrend → topmost is used for entry
-// (the state machine picks the first FVG after MSS, which is highest in a
-// falling sequence). The visual boxes show all remaining unmitigated ones.
 // =============================================================
 
+var box[] bear_fvg_arr = array.new<box>(0)
+var box[] bull_fvg_arr = array.new<box>(0)
+
 if show_fvg_vis
-    // --- detect bear FVG on this bar ---
     bear_vis_gap = low[2] - high
     if bear_vis_gap >= fvg_min_gap
         nb = box.new(bar_index - 2, low[2], bar_index + 1, high,
@@ -725,14 +876,13 @@ if show_fvg_vis
              bgcolor      = color.new(color.red,  90),
              text         = "IMB",
              text_color   = color.new(color.red,  40),
-             text_size    = size.tiny,
+             text_size    = size.small,
              text_halign  = text.align_center,
              text_valign  = text.align_center)
         array.push(bear_fvg_arr, nb)
         if array.size(bear_fvg_arr) > 20
             box.delete(array.shift(bear_fvg_arr))
 
-    // --- detect bull FVG on this bar ---
     bull_vis_gap = low - high[2]
     if bull_vis_gap >= fvg_min_gap
         nb = box.new(bar_index - 2, low, bar_index + 1, high[2],
@@ -740,14 +890,13 @@ if show_fvg_vis
              bgcolor      = color.new(color.teal, 90),
              text         = "IMB",
              text_color   = color.new(color.teal, 40),
-             text_size    = size.tiny,
+             text_size    = size.small,
              text_halign  = text.align_center,
              text_valign  = text.align_center)
         array.push(bull_fvg_arr, nb)
         if array.size(bull_fvg_arr) > 20
             box.delete(array.shift(bull_fvg_arr))
 
-    // --- extend bear FVG boxes; delete when price enters ---
     n_bear = array.size(bear_fvg_arr)
     if n_bear > 0
         for j = 0 to n_bear - 1
@@ -759,7 +908,6 @@ if show_fvg_vis
             else
                 box.set_right(b, bar_index + 5)
 
-    // --- extend bull FVG boxes; delete when price enters ---
     n_bull = array.size(bull_fvg_arr)
     if n_bull > 0
         for j = 0 to n_bull - 1
@@ -782,8 +930,8 @@ plotshape(long_signal,  title = "Long Entry",  style = shape.labelup,   location
 var table tbl = table.new(position.top_right, 2, 9, bgcolor = color.new(color.black, 75), border_width = 1, border_color = color.gray)
 
 if barstate.islast
-    table.cell(tbl, 0, 0, "SMC v4 EURUSD", text_color = color.white, bgcolor = color.new(color.navy, 50), text_size = size.small)
-    table.cell(tbl, 1, 0, "",               text_color = color.white, bgcolor = color.new(color.navy, 50), text_size = size.small)
+    table.cell(tbl, 0, 0, "SMC v4 EURUSD", text_color = color.white, bgcolor = color.new(color.navy, 50), text_size = size.normal)
+    table.cell(tbl, 1, 0, "",               text_color = color.white, bgcolor = color.new(color.navy, 50), text_size = size.normal)
 
     st_str = switch state
         0 => "IDLE"
@@ -798,8 +946,8 @@ if barstate.islast
         state == 3               => color.red
         =>                          color.teal
 
-    table.cell(tbl, 0, 1, "State",   text_color = color.gray, text_size = size.tiny)
-    table.cell(tbl, 1, 1, st_str,    text_color = st_col,     text_size = size.tiny)
+    table.cell(tbl, 0, 1, "State",   text_color = color.gray, text_size = size.small)
+    table.cell(tbl, 1, 1, st_str,    text_color = st_col,     text_size = size.small)
 
     rsk_pct = str.tostring(f_risk(attempt) * 100, "#.##")
     rsk_str = str.tostring(attempt) + "/6 (" + rsk_pct + "%)"
@@ -808,21 +956,21 @@ if barstate.islast
         attempt <= 3 => color.yellow
         =>              color.red
 
-    table.cell(tbl, 0, 2, "Attempt", text_color = color.gray, text_size = size.tiny)
-    table.cell(tbl, 1, 2, rsk_str,   text_color = rsk_col,    text_size = size.tiny)
+    table.cell(tbl, 0, 2, "Attempt", text_color = color.gray, text_size = size.small)
+    table.cell(tbl, 1, 2, rsk_str,   text_color = rsk_col,    text_size = size.small)
 
     td_str = str.tostring(trades_today) + "/" + str.tostring(max_day_tr)
     td_col = trades_today >= max_day_tr ? color.red : color.lime
-    table.cell(tbl, 0, 3, "Trades Today", text_color = color.gray, text_size = size.tiny)
-    table.cell(tbl, 1, 3, td_str,         text_color = td_col,     text_size = size.tiny)
+    table.cell(tbl, 0, 3, "Trades Today", text_color = color.gray, text_size = size.small)
+    table.cell(tbl, 1, 3, td_str,         text_color = td_col,     text_size = size.small)
 
     kz_str = switch
         in_london => "London"
         in_ny     => "New York"
         =>            "OFF"
     kz_col = in_kz ? color.lime : color.red
-    table.cell(tbl, 0, 4, "Kill Zone", text_color = color.gray, text_size = size.tiny)
-    table.cell(tbl, 1, 4, kz_str,      text_color = kz_col,     text_size = size.tiny)
+    table.cell(tbl, 0, 4, "Kill Zone", text_color = color.gray, text_size = size.small)
+    table.cell(tbl, 1, 4, kz_str,      text_color = kz_col,     text_size = size.small)
 
     bias_str = switch
         htf_bear and not htf_bull => "BEAR"
@@ -832,24 +980,24 @@ if barstate.islast
         htf_bear and not htf_bull => color.red
         htf_bull and not htf_bear => color.teal
         =>                           color.gray
-    table.cell(tbl, 0, 5, "HTF Bias", text_color = color.gray, text_size = size.tiny)
-    table.cell(tbl, 1, 5, bias_str,   text_color = bias_col,   text_size = size.tiny)
+    table.cell(tbl, 0, 5, "HTF Bias", text_color = color.gray, text_size = size.small)
+    table.cell(tbl, 1, 5, bias_str,   text_color = bias_col,   text_size = size.small)
 
     pdhl_val = not na(pdh) ? str.tostring(pdh, "#.#####") + "/" + str.tostring(pdl, "#.#####") : "--"
-    table.cell(tbl, 0, 6, "PDH/PDL", text_color = color.gray,  text_size = size.tiny)
-    table.cell(tbl, 1, 6, pdhl_val,  text_color = color.orange, text_size = size.tiny)
+    table.cell(tbl, 0, 6, "PDH/PDL", text_color = color.gray,  text_size = size.small)
+    table.cell(tbl, 1, 6, pdhl_val,  text_color = color.orange, text_size = size.small)
 
     pwhl_val = not na(pwh) ? str.tostring(pwh, "#.#####") + "/" + str.tostring(pwl, "#.#####") : "--"
-    table.cell(tbl, 0, 7, "PWH/PWL", text_color = color.gray,  text_size = size.tiny)
-    table.cell(tbl, 1, 7, pwhl_val,  text_color = color.maroon, text_size = size.tiny)
+    table.cell(tbl, 0, 7, "PWH/PWL", text_color = color.gray,  text_size = size.small)
+    table.cell(tbl, 1, 7, pwhl_val,  text_color = color.maroon, text_size = size.small)
 
     fvg_active = (state == 3 or state == 4) and not na(fvg_top)
     fvg_val    = fvg_active ? str.tostring(fvg_top, "#.#####") + "/" + str.tostring(fvg_bot, "#.#####") : "--"
-    table.cell(tbl, 0, 8, "FVG Zone", text_color = color.gray,  text_size = size.tiny)
-    table.cell(tbl, 1, 8, fvg_val,    text_color = color.yellow, text_size = size.tiny)
+    table.cell(tbl, 0, 8, "FVG Zone", text_color = color.gray,  text_size = size.small)
+    table.cell(tbl, 1, 8, fvg_val,    text_color = color.yellow, text_size = size.small)
 
 // =============================================================
-// STATS TABLE  (top left — trade statistics)
+// STATS TABLE  (top left)
 // =============================================================
 
 var table stats = table.new(position.top_left, 2, 9, bgcolor = color.new(color.black, 75), border_width = 1, border_color = color.gray)
@@ -864,37 +1012,37 @@ if barstate.islast
     pf       = strategy.grossloss != 0.0 ? strategy.grossprofit / math.abs(strategy.grossloss) : 0.0
     expect   = n_closed > 0 ? (win_rate / 100.0) * (avg_win / math.max(avg_loss, 0.01)) - (1.0 - win_rate / 100.0) : 0.0
 
-    table.cell(stats, 0, 0, "STATISTICS", text_color = color.white, bgcolor = color.new(color.navy, 50), text_size = size.small)
-    table.cell(stats, 1, 0, "",           text_color = color.white, bgcolor = color.new(color.navy, 50), text_size = size.small)
+    table.cell(stats, 0, 0, "STATISTICS", text_color = color.white, bgcolor = color.new(color.navy, 50), text_size = size.normal)
+    table.cell(stats, 1, 0, "",           text_color = color.white, bgcolor = color.new(color.navy, 50), text_size = size.normal)
 
-    table.cell(stats, 0, 1, "Trades",  text_color = color.gray,  text_size = size.tiny)
-    table.cell(stats, 1, 1, str.tostring(n_closed) + "  " + str.tostring(n_wins) + "W/" + str.tostring(n_loss) + "L", text_color = color.white, text_size = size.tiny)
+    table.cell(stats, 0, 1, "Trades",  text_color = color.gray,  text_size = size.small)
+    table.cell(stats, 1, 1, str.tostring(n_closed) + "  " + str.tostring(n_wins) + "W/" + str.tostring(n_loss) + "L", text_color = color.white, text_size = size.small)
 
     wr_col = win_rate >= 50.0 ? color.lime : color.red
-    table.cell(stats, 0, 2, "Win Rate",     text_color = color.gray, text_size = size.tiny)
-    table.cell(stats, 1, 2, str.tostring(win_rate, "#.#") + "%", text_color = wr_col, text_size = size.tiny)
+    table.cell(stats, 0, 2, "Win Rate",     text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 2, str.tostring(win_rate, "#.#") + "%", text_color = wr_col, text_size = size.small)
 
     pf_col = pf >= 1.5 ? color.lime : pf >= 1.0 ? color.yellow : color.red
-    table.cell(stats, 0, 3, "Profit Factor", text_color = color.gray, text_size = size.tiny)
-    table.cell(stats, 1, 3, str.tostring(pf, "#.##"),              text_color = pf_col,    text_size = size.tiny)
+    table.cell(stats, 0, 3, "Profit Factor", text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 3, str.tostring(pf, "#.##"),              text_color = pf_col,    text_size = size.small)
 
     net_pnl = strategy.netprofit
     pnl_col = net_pnl >= 0.0 ? color.lime : color.red
-    table.cell(stats, 0, 4, "Net P&L",   text_color = color.gray, text_size = size.tiny)
-    table.cell(stats, 1, 4, str.tostring(net_pnl, "#.##"), text_color = pnl_col, text_size = size.tiny)
+    table.cell(stats, 0, 4, "Net P&L",   text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 4, str.tostring(net_pnl, "#.##"), text_color = pnl_col, text_size = size.small)
 
-    table.cell(stats, 0, 5, "Max DD",    text_color = color.gray,   text_size = size.tiny)
-    table.cell(stats, 1, 5, str.tostring(strategy.max_drawdown, "#.##"), text_color = color.orange, text_size = size.tiny)
+    table.cell(stats, 0, 5, "Max DD",    text_color = color.gray,   text_size = size.small)
+    table.cell(stats, 1, 5, str.tostring(strategy.max_drawdown, "#.##"), text_color = color.orange, text_size = size.small)
 
-    table.cell(stats, 0, 6, "Avg Win",   text_color = color.gray, text_size = size.tiny)
-    table.cell(stats, 1, 6, str.tostring(avg_win,  "#.##"), text_color = color.lime, text_size = size.tiny)
+    table.cell(stats, 0, 6, "Avg Win",   text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 6, str.tostring(avg_win,  "#.##"), text_color = color.lime, text_size = size.small)
 
-    table.cell(stats, 0, 7, "Avg Loss",  text_color = color.gray, text_size = size.tiny)
-    table.cell(stats, 1, 7, str.tostring(avg_loss, "#.##"), text_color = color.red,  text_size = size.tiny)
+    table.cell(stats, 0, 7, "Avg Loss",  text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 7, str.tostring(avg_loss, "#.##"), text_color = color.red,  text_size = size.small)
 
     exp_col = expect >= 0.0 ? color.lime : color.red
-    table.cell(stats, 0, 8, "Expectancy", text_color = color.gray, text_size = size.tiny)
-    table.cell(stats, 1, 8, str.tostring(expect, "#.###") + "R",  text_color = exp_col, text_size = size.tiny)
+    table.cell(stats, 0, 8, "Expectancy", text_color = color.gray, text_size = size.small)
+    table.cell(stats, 1, 8, str.tostring(expect, "#.###") + "R",  text_color = exp_col, text_size = size.small)
 
 // =============================================================
 // ALERTS
