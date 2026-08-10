@@ -621,24 +621,24 @@ if show_levels
             g_pr = array.get(poi_pr, si)
             array.set(used_flags, si, true)
 
-            if ii < n_poi - 1
-              for jj = ii + 1 to n_poi - 1
-                sj = array.get(sorted_idx, jj)
-                if array.get(used_flags, sj)
-                    continue
-                pj = array.get(poi_px, sj)
+            jj = ii + 1
+            while jj <= n_poi - 1
+                sj  = array.get(sorted_idx, jj)
+                pj  = array.get(poi_px, sj)
                 if pj - g_px > merge_tol
                     break
-                prj = array.get(poi_pr, sj)
-                nmj = array.get(poi_nm, sj)
-                if prj < g_pr
-                    g_nm := nmj + " + " + g_nm
-                    g_cl := array.get(poi_cl, sj)
-                    g_st := array.get(poi_st, sj)
-                    g_pr := prj
-                else
-                    g_nm := g_nm + " + " + nmj
-                array.set(used_flags, sj, true)
+                if not array.get(used_flags, sj)
+                    prj = array.get(poi_pr, sj)
+                    nmj = array.get(poi_nm, sj)
+                    if prj < g_pr
+                        g_nm := nmj + " + " + g_nm
+                        g_cl := array.get(poi_cl, sj)
+                        g_st := array.get(poi_st, sj)
+                        g_pr := prj
+                    else
+                        g_nm := g_nm + " + " + nmj
+                    array.set(used_flags, sj, true)
+                jj := jj + 1
 
             new_l  = line.new(bar_index - 1, g_px, bar_index, g_px, extend = extend.right, color = g_cl, style = g_st, width = 1)
             new_lb = label.new(bar_index, g_px, g_nm, style = label.style_none, textcolor = g_cl, size = size.small)
