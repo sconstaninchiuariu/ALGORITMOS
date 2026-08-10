@@ -87,11 +87,12 @@ merge_tol    = input.float(0.0005, "Zone Merge Tolerance",  0.00010, 0.005, 0.00
 // HTF BIAS  (no-repainting)
 // =============================================================
 
-[h1_h2, h1_l2, h1_h0, h1_l0] = request.security(syminfo.tickerid, "60",  [high[2], low[2], high[0], low[0]], lookahead = barmerge.lookahead_off)
-[h2_h2, h2_l2, h2_h0, h2_l0] = request.security(syminfo.tickerid, "240", [high[2], low[2], high[0], low[0]], lookahead = barmerge.lookahead_off)
-[h3_h2, h3_l2, h3_h0, h3_l0] = request.security(syminfo.tickerid, "D",   [high[2], low[2], high[0], low[0]], lookahead = barmerge.lookahead_off)
-[hw_h2, hw_l2, hw_h0, hw_l0] = request.security(syminfo.tickerid, "W",   [high[2], low[2], high[0], low[0]], lookahead = barmerge.lookahead_off)
-[hm_h2, hm_l2, hm_h0, hm_l0] = request.security(syminfo.tickerid, "M",   [high[2], low[2], high[0], low[0]], lookahead = barmerge.lookahead_off)
+// Use completed bars [3] and [1] so FVGs never flicker on the incomplete current bar
+[h1_h2, h1_l2, h1_h0, h1_l0] = request.security(syminfo.tickerid, "60",  [high[3], low[3], high[1], low[1]], lookahead = barmerge.lookahead_off)
+[h2_h2, h2_l2, h2_h0, h2_l0] = request.security(syminfo.tickerid, "240", [high[3], low[3], high[1], low[1]], lookahead = barmerge.lookahead_off)
+[h3_h2, h3_l2, h3_h0, h3_l0] = request.security(syminfo.tickerid, "D",   [high[3], low[3], high[1], low[1]], lookahead = barmerge.lookahead_off)
+[hw_h2, hw_l2, hw_h0, hw_l0] = request.security(syminfo.tickerid, "W",   [high[3], low[3], high[1], low[1]], lookahead = barmerge.lookahead_off)
+[hm_h2, hm_l2, hm_h0, hm_l0] = request.security(syminfo.tickerid, "M",   [high[3], low[3], high[1], low[1]], lookahead = barmerge.lookahead_off)
 
 htf_bear_1h = h1_l2 > h1_h0 and (h1_l2 - h1_h0) >= htf_fvg_min
 htf_bear_4h = h2_l2 > h2_h0 and (h2_l2 - h2_h0) >= htf_fvg_min
@@ -444,8 +445,8 @@ close_ok_bull  = req_close_fvg ? (close >= fvg_bot and close <= fvg_top and is_b
 engulf_ok_bear = not req_engulf or bear_engulf
 engulf_ok_bull = not req_engulf or bull_engulf
 
-short_signal = touched_bear and close_ok_bear and engulf_ok_bear and in_kz and can_trade
-long_signal  = touched_bull and close_ok_bull  and engulf_ok_bull and in_kz and can_trade
+short_signal = touched_bear and close_ok_bear and engulf_ok_bear and can_trade
+long_signal  = touched_bull and close_ok_bull  and engulf_ok_bull and can_trade
 
 // =============================================================
 // ORDER EXECUTION
@@ -686,21 +687,24 @@ prev_bull_w  := htf_bull_w
 prev_bear_m  := htf_bear_m
 prev_bull_m  := htf_bull_m
 
+// Distance check uses NEAREST EDGE so wide W/M boxes don't force chart to zoom out:
+// bear supply (above price): nearest edge = box bottom; delete if b_bot - close > max_poi_dist
+// bull demand (below price): nearest edge = box top;    delete if close - b_top > max_poi_dist
+
 if show_levels
     // --- 1H ---
     if use_htf_1h
         if new_bear_1h
             box.delete(htf_b1h_box)
             htf_b1h_box := na
-            if math.abs(close - (h1_l2 + h1_h0) / 2) <= max_poi_dist
+            if h1_h0 > close and h1_h0 - close <= max_poi_dist
                 htf_b1h_box := box.new(bar_index, h1_l2, bar_index + 1, h1_h0, border_color = color.new(color.red, 30), bgcolor = color.new(color.red, 87), text = "1H", text_color = color.new(color.red, 20), text_size = size.small, text_halign = text.align_right, text_valign = text.align_top)
         if gone_bear_1h
             box.delete(htf_b1h_box)
             htf_b1h_box := na
         if htf_bear_1h and not na(htf_b1h_box)
             b_bot = box.get_bottom(htf_b1h_box)
-            b_mid = (box.get_top(htf_b1h_box) + b_bot) / 2
-            if high >= b_bot or math.abs(close - b_mid) > max_poi_dist
+            if high >= b_bot or b_bot - close > max_poi_dist
                 box.delete(htf_b1h_box)
                 htf_b1h_box := na
             else
@@ -708,15 +712,14 @@ if show_levels
         if new_bull_1h
             box.delete(htf_u1h_box)
             htf_u1h_box := na
-            if math.abs(close - (h1_l0 + h1_h2) / 2) <= max_poi_dist
+            if h1_l0 < close and close - h1_l0 <= max_poi_dist
                 htf_u1h_box := box.new(bar_index, h1_l0, bar_index + 1, h1_h2, border_color = color.new(color.teal, 30), bgcolor = color.new(color.teal, 87), text = "1H", text_color = color.new(color.teal, 20), text_size = size.small, text_halign = text.align_right, text_valign = text.align_bottom)
         if gone_bull_1h
             box.delete(htf_u1h_box)
             htf_u1h_box := na
         if htf_bull_1h and not na(htf_u1h_box)
             b_top = box.get_top(htf_u1h_box)
-            b_mid = (b_top + box.get_bottom(htf_u1h_box)) / 2
-            if low <= b_top or math.abs(close - b_mid) > max_poi_dist
+            if low <= b_top or close - b_top > max_poi_dist
                 box.delete(htf_u1h_box)
                 htf_u1h_box := na
             else
@@ -727,15 +730,14 @@ if show_levels
         if new_bear_4h
             box.delete(htf_b4h_box)
             htf_b4h_box := na
-            if math.abs(close - (h2_l2 + h2_h0) / 2) <= max_poi_dist
+            if h2_h0 > close and h2_h0 - close <= max_poi_dist
                 htf_b4h_box := box.new(bar_index, h2_l2, bar_index + 1, h2_h0, border_color = color.new(color.red, 20), bgcolor = color.new(color.red, 84), text = "4H", text_color = color.new(color.red, 10), text_size = size.small, text_halign = text.align_right, text_valign = text.align_top)
         if gone_bear_4h
             box.delete(htf_b4h_box)
             htf_b4h_box := na
         if htf_bear_4h and not na(htf_b4h_box)
             b_bot = box.get_bottom(htf_b4h_box)
-            b_mid = (box.get_top(htf_b4h_box) + b_bot) / 2
-            if high >= b_bot or math.abs(close - b_mid) > max_poi_dist
+            if high >= b_bot or b_bot - close > max_poi_dist
                 box.delete(htf_b4h_box)
                 htf_b4h_box := na
             else
@@ -743,15 +745,14 @@ if show_levels
         if new_bull_4h
             box.delete(htf_u4h_box)
             htf_u4h_box := na
-            if math.abs(close - (h2_l0 + h2_h2) / 2) <= max_poi_dist
+            if h2_l0 < close and close - h2_l0 <= max_poi_dist
                 htf_u4h_box := box.new(bar_index, h2_l0, bar_index + 1, h2_h2, border_color = color.new(color.teal, 20), bgcolor = color.new(color.teal, 84), text = "4H", text_color = color.new(color.teal, 10), text_size = size.small, text_halign = text.align_right, text_valign = text.align_bottom)
         if gone_bull_4h
             box.delete(htf_u4h_box)
             htf_u4h_box := na
         if htf_bull_4h and not na(htf_u4h_box)
             b_top = box.get_top(htf_u4h_box)
-            b_mid = (b_top + box.get_bottom(htf_u4h_box)) / 2
-            if low <= b_top or math.abs(close - b_mid) > max_poi_dist
+            if low <= b_top or close - b_top > max_poi_dist
                 box.delete(htf_u4h_box)
                 htf_u4h_box := na
             else
@@ -762,15 +763,14 @@ if show_levels
         if new_bear_d
             box.delete(htf_bd_box)
             htf_bd_box := na
-            if math.abs(close - (h3_l2 + h3_h0) / 2) <= max_poi_dist
+            if h3_h0 > close and h3_h0 - close <= max_poi_dist
                 htf_bd_box := box.new(bar_index, h3_l2, bar_index + 1, h3_h0, border_color = color.new(color.red, 10), bgcolor = color.new(color.red, 80), text = "D", text_color = color.new(color.red, 0), text_size = size.normal, text_halign = text.align_right, text_valign = text.align_top)
         if gone_bear_d
             box.delete(htf_bd_box)
             htf_bd_box := na
         if htf_bear_d and not na(htf_bd_box)
             b_bot = box.get_bottom(htf_bd_box)
-            b_mid = (box.get_top(htf_bd_box) + b_bot) / 2
-            if high >= b_bot or math.abs(close - b_mid) > max_poi_dist
+            if high >= b_bot or b_bot - close > max_poi_dist
                 box.delete(htf_bd_box)
                 htf_bd_box := na
             else
@@ -778,15 +778,14 @@ if show_levels
         if new_bull_d
             box.delete(htf_ud_box)
             htf_ud_box := na
-            if math.abs(close - (h3_l0 + h3_h2) / 2) <= max_poi_dist
+            if h3_l0 < close and close - h3_l0 <= max_poi_dist
                 htf_ud_box := box.new(bar_index, h3_l0, bar_index + 1, h3_h2, border_color = color.new(color.teal, 10), bgcolor = color.new(color.teal, 80), text = "D", text_color = color.new(color.teal, 0), text_size = size.normal, text_halign = text.align_right, text_valign = text.align_bottom)
         if gone_bull_d
             box.delete(htf_ud_box)
             htf_ud_box := na
         if htf_bull_d and not na(htf_ud_box)
             b_top = box.get_top(htf_ud_box)
-            b_mid = (b_top + box.get_bottom(htf_ud_box)) / 2
-            if low <= b_top or math.abs(close - b_mid) > max_poi_dist
+            if low <= b_top or close - b_top > max_poi_dist
                 box.delete(htf_ud_box)
                 htf_ud_box := na
             else
@@ -797,15 +796,14 @@ if show_levels
         if new_bear_w
             box.delete(htf_bw_box)
             htf_bw_box := na
-            if math.abs(close - (hw_l2 + hw_h0) / 2) <= max_poi_dist
+            if hw_h0 > close and hw_h0 - close <= max_poi_dist
                 htf_bw_box := box.new(bar_index, hw_l2, bar_index + 1, hw_h0, border_color = color.new(color.red, 5), bgcolor = color.new(color.red, 75), text = "W", text_color = color.new(color.red, 0), text_size = size.normal, text_halign = text.align_right, text_valign = text.align_top)
         if gone_bear_w
             box.delete(htf_bw_box)
             htf_bw_box := na
         if htf_bear_w and not na(htf_bw_box)
             b_bot = box.get_bottom(htf_bw_box)
-            b_mid = (box.get_top(htf_bw_box) + b_bot) / 2
-            if high >= b_bot or math.abs(close - b_mid) > max_poi_dist
+            if high >= b_bot or b_bot - close > max_poi_dist
                 box.delete(htf_bw_box)
                 htf_bw_box := na
             else
@@ -813,15 +811,14 @@ if show_levels
         if new_bull_w
             box.delete(htf_uw_box)
             htf_uw_box := na
-            if math.abs(close - (hw_l0 + hw_h2) / 2) <= max_poi_dist
+            if hw_l0 < close and close - hw_l0 <= max_poi_dist
                 htf_uw_box := box.new(bar_index, hw_l0, bar_index + 1, hw_h2, border_color = color.new(color.teal, 5), bgcolor = color.new(color.teal, 75), text = "W", text_color = color.new(color.teal, 0), text_size = size.normal, text_halign = text.align_right, text_valign = text.align_bottom)
         if gone_bull_w
             box.delete(htf_uw_box)
             htf_uw_box := na
         if htf_bull_w and not na(htf_uw_box)
             b_top = box.get_top(htf_uw_box)
-            b_mid = (b_top + box.get_bottom(htf_uw_box)) / 2
-            if low <= b_top or math.abs(close - b_mid) > max_poi_dist
+            if low <= b_top or close - b_top > max_poi_dist
                 box.delete(htf_uw_box)
                 htf_uw_box := na
             else
@@ -832,15 +829,14 @@ if show_levels
         if new_bear_m
             box.delete(htf_bm_box)
             htf_bm_box := na
-            if math.abs(close - (hm_l2 + hm_h0) / 2) <= max_poi_dist
+            if hm_h0 > close and hm_h0 - close <= max_poi_dist
                 htf_bm_box := box.new(bar_index, hm_l2, bar_index + 1, hm_h0, border_color = color.new(color.red, 0), bgcolor = color.new(color.red, 70), text = "MN", text_color = color.new(color.red, 0), text_size = size.normal, text_halign = text.align_right, text_valign = text.align_top)
         if gone_bear_m
             box.delete(htf_bm_box)
             htf_bm_box := na
         if htf_bear_m and not na(htf_bm_box)
             b_bot = box.get_bottom(htf_bm_box)
-            b_mid = (box.get_top(htf_bm_box) + b_bot) / 2
-            if high >= b_bot or math.abs(close - b_mid) > max_poi_dist
+            if high >= b_bot or b_bot - close > max_poi_dist
                 box.delete(htf_bm_box)
                 htf_bm_box := na
             else
@@ -848,15 +844,14 @@ if show_levels
         if new_bull_m
             box.delete(htf_um_box)
             htf_um_box := na
-            if math.abs(close - (hm_l0 + hm_h2) / 2) <= max_poi_dist
+            if hm_l0 < close and close - hm_l0 <= max_poi_dist
                 htf_um_box := box.new(bar_index, hm_l0, bar_index + 1, hm_h2, border_color = color.new(color.teal, 0), bgcolor = color.new(color.teal, 70), text = "MN", text_color = color.new(color.teal, 0), text_size = size.normal, text_halign = text.align_right, text_valign = text.align_bottom)
         if gone_bull_m
             box.delete(htf_um_box)
             htf_um_box := na
         if htf_bull_m and not na(htf_um_box)
             b_top = box.get_top(htf_um_box)
-            b_mid = (b_top + box.get_bottom(htf_um_box)) / 2
-            if low <= b_top or math.abs(close - b_mid) > max_poi_dist
+            if low <= b_top or close - b_top > max_poi_dist
                 box.delete(htf_um_box)
                 htf_um_box := na
             else
