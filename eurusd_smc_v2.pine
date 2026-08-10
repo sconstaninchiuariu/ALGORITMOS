@@ -621,7 +621,8 @@ if show_levels
             g_pr = array.get(poi_pr, si)
             array.set(used_flags, si, true)
 
-            for jj = ii + 1 to n_poi - 1
+            if ii < n_poi - 1
+              for jj = ii + 1 to n_poi - 1
                 sj = array.get(sorted_idx, jj)
                 if array.get(used_flags, sj)
                     continue
