@@ -79,12 +79,12 @@ var string GVIS = "Visuals"
 show_levels  = input.bool(true,    "Show POI Lines (PDH/PDL, PWH/PWL, Asia, EQH/EQL)", group = GVIS)
 show_kz_bg   = input.bool(true,    "Show Kill Zone Background",                         group = GVIS)
 show_sweep   = input.bool(true,    "Show Sweep Markers",                                group = GVIS)
-poi_pct_default = syminfo.type == "futures" ? 1.00 : 0.50
-max_poi_pct  = input.float(poi_pct_default, "Max POI Distance (% of price, hide zones beyond)", 0.05, 5.0, 0.05, group = GVIS)
+max_poi_pct  = input.float(0.50,   "Max POI Distance (% of price, hide zones beyond) — forex baseline; auto x2 on futures", 0.05, 5.0, 0.05, group = GVIS)
 show_fvg_vis = input.bool(true,    "Show FVG Imbalance Boxes (all unmitigated)",        group = GVIS)
 merge_tol    = input.float(0.0005, "Zone Merge Tolerance",  0.00010, 0.005, 0.00010,   group = GVIS)
 
-max_poi_dist = close * max_poi_pct / 100.0
+poi_pct_eff  = syminfo.type == "futures" ? max_poi_pct * 2.0 : max_poi_pct
+max_poi_dist = close * poi_pct_eff / 100.0
 
 // =============================================================
 // HTF BIAS  (no-repainting)
