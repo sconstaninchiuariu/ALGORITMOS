@@ -76,6 +76,8 @@ eql_tol      = input.float(0.0003, "Tolerance (price)",  0.00005, 0.002, 0.00001
 eql_lookback = input.int(5,        "History depth (# pivots)", 2, 20,   group = GEQL)
 
 var string GVIS = "Visuals"
+show_info_tbl  = input.bool(true,  "Show Info Table (top right)", group = GVIS)
+show_stats_tbl = input.bool(true,  "Show Stats Table (top left)", group = GVIS)
 show_levels  = input.bool(true,    "Show POI Lines (PDH/PDL, PWH/PWL, Asia, EQH/EQL)", group = GVIS)
 show_kz_bg   = input.bool(true,    "Show Kill Zone Background",                         group = GVIS)
 show_sweep   = input.bool(true,    "Show Sweep Markers",                                group = GVIS)
@@ -110,9 +112,6 @@ near_reset_dist    = close * near_reset_pct_eff / 100.0
 // zooming out. Now it's simple: farther than imb_dist away → hidden, period.
 imb_pct_eff = syminfo.type == "futures" ? imb_max_pct * 2.0 : imb_max_pct
 imb_dist    = close * imb_pct_eff / 100.0
-
-f_zone_far(float top, float bottom) =>
-    (close > top ? close - top : close < bottom ? bottom - close : 0.0) > imb_dist
 
 // Formats a timeframe.period string ("1","5","60","240","D","W","M") into a
 // short human label ("1m","5m","1H","4H","D","W","MN") for imbalance labels.
@@ -398,30 +397,6 @@ var float pre_swl      = na
 var float pre_swh      = na
 
 var box fvg_entry_box = na
-
-// HTF FVG imbalances are drawn as a single line at the zone's near edge
-// (the actionable retest level) plus a label naming the exact imbalance
-// and timeframe, instead of a filled box.
-var line  htf_b1h_line = na
-var label htf_b1h_lbl  = na
-var line  htf_u1h_line = na
-var label htf_u1h_lbl  = na
-var line  htf_b4h_line = na
-var label htf_b4h_lbl  = na
-var line  htf_u4h_line = na
-var label htf_u4h_lbl  = na
-var line  htf_bd_line  = na
-var label htf_bd_lbl   = na
-var line  htf_ud_line  = na
-var label htf_ud_lbl   = na
-var line  htf_bw_line  = na
-var label htf_bw_lbl   = na
-var line  htf_uw_line  = na
-var label htf_uw_lbl   = na
-var line  htf_bm_line  = na
-var label htf_bm_lbl   = na
-var line  htf_um_line  = na
-var label htf_um_lbl   = na
 
 var bool prev_bear_1h = false
 var bool prev_bull_1h = false
@@ -749,6 +724,188 @@ if eqh_near_alert
 if eql_near_alert
     alert("Price approaching Equal Lows liquidity pool - " + str.tostring(last_eql, "#.#####"), alert.freq_once_per_bar)
 
+// =============================================================
+// FVG / IMBALANCE STATE — tracked here (before the POI arrays are
+// built below) so every imbalance can be pushed into the SAME merge
+// system as PDH/PDL/Asia/EQH-EQL: if a zone lands within merge_tol of
+// another, they collapse into one line whose label lists every name.
+// =============================================================
+
+f_imb_in_rng(float px) =>
+    not na(px) and math.abs(close - px) <= imb_dist
+
+new_bear_1h  = htf_bear_1h and not prev_bear_1h
+gone_bear_1h = not htf_bear_1h and prev_bear_1h
+new_bull_1h  = htf_bull_1h and not prev_bull_1h
+gone_bull_1h = not htf_bull_1h and prev_bull_1h
+new_bear_4h  = htf_bear_4h and not prev_bear_4h
+gone_bear_4h = not htf_bear_4h and prev_bear_4h
+new_bull_4h  = htf_bull_4h and not prev_bull_4h
+gone_bull_4h = not htf_bull_4h and prev_bull_4h
+new_bear_d   = htf_bear_d  and not prev_bear_d
+gone_bear_d  = not htf_bear_d  and prev_bear_d
+new_bull_d   = htf_bull_d  and not prev_bull_d
+gone_bull_d  = not htf_bull_d  and prev_bull_d
+new_bear_w   = htf_bear_w  and not prev_bear_w
+gone_bear_w  = not htf_bear_w  and prev_bear_w
+new_bull_w   = htf_bull_w  and not prev_bull_w
+gone_bull_w  = not htf_bull_w  and prev_bull_w
+new_bear_m   = htf_bear_m  and not prev_bear_m
+gone_bear_m  = not htf_bear_m  and prev_bear_m
+new_bull_m   = htf_bull_m  and not prev_bull_m
+gone_bull_m  = not htf_bull_m  and prev_bull_m
+
+prev_bear_1h := htf_bear_1h
+prev_bull_1h := htf_bull_1h
+prev_bear_4h := htf_bear_4h
+prev_bull_4h := htf_bull_4h
+prev_bear_d  := htf_bear_d
+prev_bull_d  := htf_bull_d
+prev_bear_w  := htf_bear_w
+prev_bull_w  := htf_bull_w
+prev_bear_m  := htf_bear_m
+prev_bull_m  := htf_bull_m
+
+// Near-edge price of each HTF zone (bear supply: zone bottom; bull demand: zone top)
+htf_b1h_px = h1_h0
+htf_u1h_px = h1_l0
+htf_b4h_px = h2_h0
+htf_u4h_px = h2_l0
+htf_bd_px  = h3_h0
+htf_ud_px  = h3_l0
+htf_bw_px  = hw_h0
+htf_uw_px  = hw_l0
+htf_bm_px  = hm_h0
+htf_um_px  = hm_l0
+
+// Mitigation (price traded back through the near edge) is sticky until the
+// next fresh edge — once mitigated a zone stays hidden, it doesn't reappear
+// just because price wandered back close to it. Origin bar is fixed at the
+// bar the zone first appeared, so the merged line anchors there, not "now".
+var bool htf_b1h_mit = false
+var bool htf_u1h_mit = false
+var bool htf_b4h_mit = false
+var bool htf_u4h_mit = false
+var bool htf_bd_mit  = false
+var bool htf_ud_mit  = false
+var bool htf_bw_mit  = false
+var bool htf_uw_mit  = false
+var bool htf_bm_mit  = false
+var bool htf_um_mit  = false
+
+var int htf_b1h_org = na
+var int htf_u1h_org = na
+var int htf_b4h_org = na
+var int htf_u4h_org = na
+var int htf_bd_org  = na
+var int htf_ud_org  = na
+var int htf_bw_org  = na
+var int htf_uw_org  = na
+var int htf_bm_org  = na
+var int htf_um_org  = na
+
+if new_bear_1h
+    htf_b1h_mit := false
+    htf_b1h_org := bar_index
+if htf_bear_1h and high >= htf_b1h_px
+    htf_b1h_mit := true
+if new_bull_1h
+    htf_u1h_mit := false
+    htf_u1h_org := bar_index
+if htf_bull_1h and low <= htf_u1h_px
+    htf_u1h_mit := true
+
+if new_bear_4h
+    htf_b4h_mit := false
+    htf_b4h_org := bar_index
+if htf_bear_4h and high >= htf_b4h_px
+    htf_b4h_mit := true
+if new_bull_4h
+    htf_u4h_mit := false
+    htf_u4h_org := bar_index
+if htf_bull_4h and low <= htf_u4h_px
+    htf_u4h_mit := true
+
+if new_bear_d
+    htf_bd_mit := false
+    htf_bd_org := bar_index
+if htf_bear_d and high >= htf_bd_px
+    htf_bd_mit := true
+if new_bull_d
+    htf_ud_mit := false
+    htf_ud_org := bar_index
+if htf_bull_d and low <= htf_ud_px
+    htf_ud_mit := true
+
+if new_bear_w
+    htf_bw_mit := false
+    htf_bw_org := bar_index
+if htf_bear_w and high >= htf_bw_px
+    htf_bw_mit := true
+if new_bull_w
+    htf_uw_mit := false
+    htf_uw_org := bar_index
+if htf_bull_w and low <= htf_uw_px
+    htf_uw_mit := true
+
+if new_bear_m
+    htf_bm_mit := false
+    htf_bm_org := bar_index
+if htf_bear_m and high >= htf_bm_px
+    htf_bm_mit := true
+if new_bull_m
+    htf_um_mit := false
+    htf_um_org := bar_index
+if htf_bull_m and low <= htf_um_px
+    htf_um_mit := true
+
+// Generic chart-native imbalances: many can be concurrently active (unlike
+// the dedicated HTF zones, which track one bear + one bull gap per TF), so
+// they're kept as a running list of [price, origin bar] pairs. Mitigation
+// (not distance) is the only removal criterion — a gap that's temporarily
+// out of range still exists and reappears in the merge render once price
+// comes back within imb_dist, instead of being forgotten.
+var float[] bear_fvg_px  = array.new_float(0)
+var int[]   bear_fvg_org = array.new_int(0)
+var float[] bull_fvg_px  = array.new_float(0)
+var int[]   bull_fvg_org = array.new_int(0)
+
+if show_fvg_vis
+    // Use fully completed bars [3] and [1] (never the still-forming bar [0])
+    // so the gap size is final and doesn't flicker as the live candle forms.
+    bear_vis_gap = low[3] - high[1]
+    if bear_vis_gap >= fvg_min_gap
+        array.push(bear_fvg_px,  high[1])
+        array.push(bear_fvg_org, bar_index - 1)
+        if array.size(bear_fvg_px) > 20
+            array.shift(bear_fvg_px)
+            array.shift(bear_fvg_org)
+
+    bull_vis_gap = low[1] - high[3]
+    if bull_vis_gap >= fvg_min_gap
+        array.push(bull_fvg_px,  low[1])
+        array.push(bull_fvg_org, bar_index - 1)
+        if array.size(bull_fvg_px) > 20
+            array.shift(bull_fvg_px)
+            array.shift(bull_fvg_org)
+
+    n_bear_fvg = array.size(bear_fvg_px)
+    if n_bear_fvg > 0
+        for j = 0 to n_bear_fvg - 1
+            i = n_bear_fvg - 1 - j
+            if high >= array.get(bear_fvg_px, i)
+                array.remove(bear_fvg_px,  i)
+                array.remove(bear_fvg_org, i)
+
+    n_bull_fvg = array.size(bull_fvg_px)
+    if n_bull_fvg > 0
+        for j = 0 to n_bull_fvg - 1
+            i = n_bull_fvg - 1 - j
+            if low <= array.get(bull_fvg_px, i)
+                array.remove(bull_fvg_px,  i)
+                array.remove(bull_fvg_org, i)
+
+
 // Delete all managed drawings from previous bar
 n_ml = array.size(managed_poi_lines)
 if n_ml > 0
@@ -761,7 +918,7 @@ if n_mlb > 0
         label.delete(array.get(managed_poi_labels, i))
 array.clear(managed_poi_labels)
 
-if show_levels
+if show_levels or show_fvg_vis
     poi_px  = array.new_float(0)
     poi_nm  = array.new_string(0)
     poi_cl  = array.new<color>(0)
@@ -769,7 +926,7 @@ if show_levels
     poi_pr  = array.new_int(0)
     poi_bar = array.new_int(0)
 
-    if use_pdhl
+    if show_levels and use_pdhl
         if poi_in_rng(pdh) and not pdh_swept
             array.push(poi_px, pdh)
             array.push(poi_nm, "PDH")
@@ -784,7 +941,7 @@ if show_levels
             array.push(poi_st, line.style_dashed)
             array.push(poi_pr, 11)
             array.push(poi_bar, nz(pdl_bar, bar_index - 1))
-    if use_pwhl
+    if show_levels and use_pwhl
         if poi_in_rng(pwh) and not pwh_swept
             array.push(poi_px, pwh)
             array.push(poi_nm, "PWH")
@@ -799,7 +956,7 @@ if show_levels
             array.push(poi_st, line.style_solid)
             array.push(poi_pr, 21)
             array.push(poi_bar, nz(pwl_bar, bar_index - 1))
-    if use_asia
+    if show_levels and use_asia
         if poi_in_rng(asia_h) and not asia_h_swept
             array.push(poi_px, asia_h)
             array.push(poi_nm, "Asia H")
@@ -814,7 +971,7 @@ if show_levels
             array.push(poi_st, line.style_dotted)
             array.push(poi_pr, 31)
             array.push(poi_bar, nz(asia_l_bar, bar_index - 1))
-    if use_eql and eql_tf_ok
+    if show_levels and use_eql and eql_tf_ok
         if poi_in_rng(last_eqh) and not eqh_swept
             array.push(poi_px, last_eqh)
             array.push(poi_nm, "EQH")
@@ -829,6 +986,108 @@ if show_levels
             array.push(poi_st, line.style_dashed)
             array.push(poi_pr, 41)
             array.push(poi_bar, nz(last_eql_bar, bar_index - 1))
+
+    // --- HTF FVG imbalance zones (1H..MN), same merge system as POI levels ---
+    if show_levels and use_htf_1h
+        if htf_bear_1h and not htf_b1h_mit and f_imb_in_rng(htf_b1h_px)
+            array.push(poi_px, htf_b1h_px)
+            array.push(poi_nm, "1H FVG Bear")
+            array.push(poi_cl, color.new(color.red, 30))
+            array.push(poi_st, line.style_dotted)
+            array.push(poi_pr, 58)
+            array.push(poi_bar, nz(htf_b1h_org, bar_index - 1))
+        if htf_bull_1h and not htf_u1h_mit and f_imb_in_rng(htf_u1h_px)
+            array.push(poi_px, htf_u1h_px)
+            array.push(poi_nm, "1H FVG Bull")
+            array.push(poi_cl, color.new(color.teal, 30))
+            array.push(poi_st, line.style_dotted)
+            array.push(poi_pr, 59)
+            array.push(poi_bar, nz(htf_u1h_org, bar_index - 1))
+    if show_levels and use_htf_4h
+        if htf_bear_4h and not htf_b4h_mit and f_imb_in_rng(htf_b4h_px)
+            array.push(poi_px, htf_b4h_px)
+            array.push(poi_nm, "4H FVG Bear")
+            array.push(poi_cl, color.new(color.red, 20))
+            array.push(poi_st, line.style_dotted)
+            array.push(poi_pr, 56)
+            array.push(poi_bar, nz(htf_b4h_org, bar_index - 1))
+        if htf_bull_4h and not htf_u4h_mit and f_imb_in_rng(htf_u4h_px)
+            array.push(poi_px, htf_u4h_px)
+            array.push(poi_nm, "4H FVG Bull")
+            array.push(poi_cl, color.new(color.teal, 20))
+            array.push(poi_st, line.style_dotted)
+            array.push(poi_pr, 57)
+            array.push(poi_bar, nz(htf_u4h_org, bar_index - 1))
+    if show_levels and use_htf_d
+        if htf_bear_d and not htf_bd_mit and f_imb_in_rng(htf_bd_px)
+            array.push(poi_px, htf_bd_px)
+            array.push(poi_nm, "D FVG Bear")
+            array.push(poi_cl, color.new(color.red, 10))
+            array.push(poi_st, line.style_dashed)
+            array.push(poi_pr, 54)
+            array.push(poi_bar, nz(htf_bd_org, bar_index - 1))
+        if htf_bull_d and not htf_ud_mit and f_imb_in_rng(htf_ud_px)
+            array.push(poi_px, htf_ud_px)
+            array.push(poi_nm, "D FVG Bull")
+            array.push(poi_cl, color.new(color.teal, 10))
+            array.push(poi_st, line.style_dashed)
+            array.push(poi_pr, 55)
+            array.push(poi_bar, nz(htf_ud_org, bar_index - 1))
+    if show_levels and use_htf_w
+        if htf_bear_w and not htf_bw_mit and f_imb_in_rng(htf_bw_px)
+            array.push(poi_px, htf_bw_px)
+            array.push(poi_nm, "W FVG Bear")
+            array.push(poi_cl, color.new(color.red, 5))
+            array.push(poi_st, line.style_dashed)
+            array.push(poi_pr, 52)
+            array.push(poi_bar, nz(htf_bw_org, bar_index - 1))
+        if htf_bull_w and not htf_uw_mit and f_imb_in_rng(htf_uw_px)
+            array.push(poi_px, htf_uw_px)
+            array.push(poi_nm, "W FVG Bull")
+            array.push(poi_cl, color.new(color.teal, 5))
+            array.push(poi_st, line.style_dashed)
+            array.push(poi_pr, 53)
+            array.push(poi_bar, nz(htf_uw_org, bar_index - 1))
+    if show_levels and use_htf_m
+        if htf_bear_m and not htf_bm_mit and f_imb_in_rng(htf_bm_px)
+            array.push(poi_px, htf_bm_px)
+            array.push(poi_nm, "MN FVG Bear")
+            array.push(poi_cl, color.new(color.red, 0))
+            array.push(poi_st, line.style_dashed)
+            array.push(poi_pr, 50)
+            array.push(poi_bar, nz(htf_bm_org, bar_index - 1))
+        if htf_bull_m and not htf_um_mit and f_imb_in_rng(htf_um_px)
+            array.push(poi_px, htf_um_px)
+            array.push(poi_nm, "MN FVG Bull")
+            array.push(poi_cl, color.new(color.teal, 0))
+            array.push(poi_st, line.style_dashed)
+            array.push(poi_pr, 51)
+            array.push(poi_bar, nz(htf_um_org, bar_index - 1))
+
+    // --- Generic chart-native imbalances (whatever timeframe the chart is on) ---
+    if show_fvg_vis
+        n_bear_push = array.size(bear_fvg_px)
+        if n_bear_push > 0
+            for k = 0 to n_bear_push - 1
+                bpx = array.get(bear_fvg_px, k)
+                if f_imb_in_rng(bpx)
+                    array.push(poi_px, bpx)
+                    array.push(poi_nm, chart_tf_lbl + " FVG Bear")
+                    array.push(poi_cl, color.new(color.red, 40))
+                    array.push(poi_st, line.style_dotted)
+                    array.push(poi_pr, 60)
+                    array.push(poi_bar, array.get(bear_fvg_org, k))
+        n_bull_push = array.size(bull_fvg_px)
+        if n_bull_push > 0
+            for k = 0 to n_bull_push - 1
+                bpx = array.get(bull_fvg_px, k)
+                if f_imb_in_rng(bpx)
+                    array.push(poi_px, bpx)
+                    array.push(poi_nm, chart_tf_lbl + " FVG Bull")
+                    array.push(poi_cl, color.new(color.teal, 40))
+                    array.push(poi_st, line.style_dotted)
+                    array.push(poi_pr, 61)
+                    array.push(poi_bar, array.get(bull_fvg_org, k))
 
     n_poi = array.size(poi_px)
     if n_poi > 0
@@ -876,216 +1135,6 @@ if show_levels
 plotshape(show_sweep and any_hs, title = "Sweep HIGH", style = shape.circle, location = location.abovebar, color = color.new(color.red,  0), size = size.tiny)
 plotshape(show_sweep and any_ls, title = "Sweep LOW",  style = shape.circle, location = location.belowbar, color = color.new(color.teal, 0), size = size.tiny)
 
-// =============================================================
-// HTF FVG BOXES — create on new edge, delete on invalidation
-// Distance-filtered on creation and each bar (no chart distortion)
-// =============================================================
-
-new_bear_1h  = htf_bear_1h and not prev_bear_1h
-gone_bear_1h = not htf_bear_1h and prev_bear_1h
-new_bull_1h  = htf_bull_1h and not prev_bull_1h
-gone_bull_1h = not htf_bull_1h and prev_bull_1h
-new_bear_4h  = htf_bear_4h and not prev_bear_4h
-gone_bear_4h = not htf_bear_4h and prev_bear_4h
-new_bull_4h  = htf_bull_4h and not prev_bull_4h
-gone_bull_4h = not htf_bull_4h and prev_bull_4h
-new_bear_d   = htf_bear_d  and not prev_bear_d
-gone_bear_d  = not htf_bear_d  and prev_bear_d
-new_bull_d   = htf_bull_d  and not prev_bull_d
-gone_bull_d  = not htf_bull_d  and prev_bull_d
-new_bear_w   = htf_bear_w  and not prev_bear_w
-gone_bear_w  = not htf_bear_w  and prev_bear_w
-new_bull_w   = htf_bull_w  and not prev_bull_w
-gone_bull_w  = not htf_bull_w  and prev_bull_w
-new_bear_m   = htf_bear_m  and not prev_bear_m
-gone_bear_m  = not htf_bear_m  and prev_bear_m
-new_bull_m   = htf_bull_m  and not prev_bull_m
-gone_bull_m  = not htf_bull_m  and prev_bull_m
-
-prev_bear_1h := htf_bear_1h
-prev_bull_1h := htf_bull_1h
-prev_bear_4h := htf_bear_4h
-prev_bull_4h := htf_bull_4h
-prev_bear_d  := htf_bear_d
-prev_bull_d  := htf_bull_d
-prev_bear_w  := htf_bear_w
-prev_bull_w  := htf_bull_w
-prev_bear_m  := htf_bear_m
-prev_bull_m  := htf_bull_m
-
-// Each zone is drawn as a single line at its NEAREST EDGE (the actionable
-// retest level) instead of a filled box, with a label spelling out the exact
-// imbalance and timeframe (e.g. "1H FVG Bear"). This is both lighter on the
-// chart and avoids the y-axis distortion boxes caused with wide zones.
-// bear supply (above price): near edge = zone bottom (the lower boundary)
-// bull demand (below price): near edge = zone top    (the upper boundary)
-
-// line.new's style= and label.new's size= arguments must be compile-time
-// constants in Pine — they can't be passed through as a plain function
-// parameter (same restriction that caused CE10123 for input.float earlier).
-// So 1H/4H (dotted/small) and D/W/M (dashed/normal) get their own function
-// variant instead of one shared function taking style/size as arguments.
-f_htf_zone_s(bool new_edge, bool gone_edge, bool active, bool mitigated, line ln_in, label lbl_in, float near_px, float dist_limit, string txt, color col) =>
-    line  ln  = ln_in
-    label lbl = lbl_in
-    if new_edge
-        line.delete(ln)
-        label.delete(lbl)
-        ln  := na
-        lbl := na
-        if not na(near_px) and math.abs(close - near_px) <= dist_limit
-            ln  := line.new(bar_index, near_px, bar_index + 1, near_px, extend = extend.right, color = col, style = line.style_dotted, width = 1)
-            lbl := label.new(bar_index, near_px, txt, style = label.style_none, textcolor = col, size = size.small)
-    if gone_edge
-        line.delete(ln)
-        label.delete(lbl)
-        ln  := na
-        lbl := na
-    if active and not na(ln)
-        if mitigated or math.abs(close - near_px) > dist_limit
-            line.delete(ln)
-            label.delete(lbl)
-            ln  := na
-            lbl := na
-    [ln, lbl]
-
-f_htf_zone_l(bool new_edge, bool gone_edge, bool active, bool mitigated, line ln_in, label lbl_in, float near_px, float dist_limit, string txt, color col) =>
-    line  ln  = ln_in
-    label lbl = lbl_in
-    if new_edge
-        line.delete(ln)
-        label.delete(lbl)
-        ln  := na
-        lbl := na
-        if not na(near_px) and math.abs(close - near_px) <= dist_limit
-            ln  := line.new(bar_index, near_px, bar_index + 1, near_px, extend = extend.right, color = col, style = line.style_dashed, width = 1)
-            lbl := label.new(bar_index, near_px, txt, style = label.style_none, textcolor = col, size = size.normal)
-    if gone_edge
-        line.delete(ln)
-        label.delete(lbl)
-        ln  := na
-        lbl := na
-    if active and not na(ln)
-        if mitigated or math.abs(close - near_px) > dist_limit
-            line.delete(ln)
-            label.delete(lbl)
-            ln  := na
-            lbl := na
-    [ln, lbl]
-
-if show_levels
-    // --- 1H ---
-    if use_htf_1h
-        [tmp_htf_b1h_line, tmp_htf_b1h_lbl] = f_htf_zone_s(new_bear_1h, gone_bear_1h, htf_bear_1h, high >= h1_h0, htf_b1h_line, htf_b1h_lbl, h1_h0, imb_dist, "1H FVG Bear", color.new(color.red, 30))
-        htf_b1h_line := tmp_htf_b1h_line
-        htf_b1h_lbl := tmp_htf_b1h_lbl
-        [tmp_htf_u1h_line, tmp_htf_u1h_lbl] = f_htf_zone_s(new_bull_1h, gone_bull_1h, htf_bull_1h, low <= h1_l0, htf_u1h_line, htf_u1h_lbl, h1_l0, imb_dist, "1H FVG Bull", color.new(color.teal, 30))
-        htf_u1h_line := tmp_htf_u1h_line
-        htf_u1h_lbl := tmp_htf_u1h_lbl
-
-    // --- 4H ---
-    if use_htf_4h
-        [tmp_htf_b4h_line, tmp_htf_b4h_lbl] = f_htf_zone_s(new_bear_4h, gone_bear_4h, htf_bear_4h, high >= h2_h0, htf_b4h_line, htf_b4h_lbl, h2_h0, imb_dist, "4H FVG Bear", color.new(color.red, 20))
-        htf_b4h_line := tmp_htf_b4h_line
-        htf_b4h_lbl := tmp_htf_b4h_lbl
-        [tmp_htf_u4h_line, tmp_htf_u4h_lbl] = f_htf_zone_s(new_bull_4h, gone_bull_4h, htf_bull_4h, low <= h2_l0, htf_u4h_line, htf_u4h_lbl, h2_l0, imb_dist, "4H FVG Bull", color.new(color.teal, 20))
-        htf_u4h_line := tmp_htf_u4h_line
-        htf_u4h_lbl := tmp_htf_u4h_lbl
-
-    // --- Daily ---
-    if use_htf_d
-        [tmp_htf_bd_line, tmp_htf_bd_lbl] = f_htf_zone_l(new_bear_d, gone_bear_d, htf_bear_d, high >= h3_h0, htf_bd_line, htf_bd_lbl, h3_h0, imb_dist, "D FVG Bear", color.new(color.red, 10))
-        htf_bd_line := tmp_htf_bd_line
-        htf_bd_lbl := tmp_htf_bd_lbl
-        [tmp_htf_ud_line, tmp_htf_ud_lbl] = f_htf_zone_l(new_bull_d, gone_bull_d, htf_bull_d, low <= h3_l0, htf_ud_line, htf_ud_lbl, h3_l0, imb_dist, "D FVG Bull", color.new(color.teal, 10))
-        htf_ud_line := tmp_htf_ud_line
-        htf_ud_lbl := tmp_htf_ud_lbl
-
-    // --- Weekly ---
-    if use_htf_w
-        [tmp_htf_bw_line, tmp_htf_bw_lbl] = f_htf_zone_l(new_bear_w, gone_bear_w, htf_bear_w, high >= hw_h0, htf_bw_line, htf_bw_lbl, hw_h0, imb_dist, "W FVG Bear", color.new(color.red, 5))
-        htf_bw_line := tmp_htf_bw_line
-        htf_bw_lbl := tmp_htf_bw_lbl
-        [tmp_htf_uw_line, tmp_htf_uw_lbl] = f_htf_zone_l(new_bull_w, gone_bull_w, htf_bull_w, low <= hw_l0, htf_uw_line, htf_uw_lbl, hw_l0, imb_dist, "W FVG Bull", color.new(color.teal, 5))
-        htf_uw_line := tmp_htf_uw_line
-        htf_uw_lbl := tmp_htf_uw_lbl
-
-    // --- Monthly ---
-    if use_htf_m
-        [tmp_htf_bm_line, tmp_htf_bm_lbl] = f_htf_zone_l(new_bear_m, gone_bear_m, htf_bear_m, high >= hm_h0, htf_bm_line, htf_bm_lbl, hm_h0, imb_dist, "MN FVG Bear", color.new(color.red, 0))
-        htf_bm_line := tmp_htf_bm_line
-        htf_bm_lbl := tmp_htf_bm_lbl
-        [tmp_htf_um_line, tmp_htf_um_lbl] = f_htf_zone_l(new_bull_m, gone_bull_m, htf_bull_m, low <= hm_l0, htf_um_line, htf_um_lbl, hm_l0, imb_dist, "MN FVG Bull", color.new(color.teal, 0))
-        htf_um_line := tmp_htf_um_line
-        htf_um_lbl := tmp_htf_um_lbl
-
-// =============================================================
-// FVG IMBALANCE VISUALIZATION
-// =============================================================
-
-// Drawn as a line at the zone's near edge + a label naming the exact
-// imbalance and chart timeframe (e.g. "5m FVG Bear"), instead of a box.
-var line[]  bear_fvg_lines = array.new<line>(0)
-var label[] bear_fvg_lbls  = array.new<label>(0)
-var float[] bear_fvg_px    = array.new_float(0)
-var line[]  bull_fvg_lines = array.new<line>(0)
-var label[] bull_fvg_lbls  = array.new<label>(0)
-var float[] bull_fvg_px    = array.new_float(0)
-
-if show_fvg_vis
-    // Use fully completed bars [3] and [1] (never the still-forming bar [0])
-    // so the gap size is final and lines don't flicker in/out of existence
-    // as the live candle's high/low keeps changing intrabar.
-    bear_vis_gap = low[3] - high[1]
-    if bear_vis_gap >= fvg_min_gap and not f_zone_far(low[3], high[1])
-        near_px = high[1]
-        nl  = line.new(bar_index - 3, near_px, bar_index - 1, near_px, extend = extend.right, color = color.new(color.red, 40), style = line.style_dotted, width = 1)
-        nlb = label.new(bar_index - 1, near_px, chart_tf_lbl + " FVG Bear", style = label.style_none, textcolor = color.new(color.red, 20), size = size.small)
-        array.push(bear_fvg_lines, nl)
-        array.push(bear_fvg_lbls,  nlb)
-        array.push(bear_fvg_px,    near_px)
-        if array.size(bear_fvg_lines) > 20
-            line.delete(array.shift(bear_fvg_lines))
-            label.delete(array.shift(bear_fvg_lbls))
-            array.shift(bear_fvg_px)
-
-    bull_vis_gap = low[1] - high[3]
-    if bull_vis_gap >= fvg_min_gap and not f_zone_far(low[1], high[3])
-        near_px = low[1]
-        nl  = line.new(bar_index - 3, near_px, bar_index - 1, near_px, extend = extend.right, color = color.new(color.teal, 40), style = line.style_dotted, width = 1)
-        nlb = label.new(bar_index - 1, near_px, chart_tf_lbl + " FVG Bull", style = label.style_none, textcolor = color.new(color.teal, 20), size = size.small)
-        array.push(bull_fvg_lines, nl)
-        array.push(bull_fvg_lbls,  nlb)
-        array.push(bull_fvg_px,    near_px)
-        if array.size(bull_fvg_lines) > 20
-            line.delete(array.shift(bull_fvg_lines))
-            label.delete(array.shift(bull_fvg_lbls))
-            array.shift(bull_fvg_px)
-
-    n_bear = array.size(bear_fvg_lines)
-    if n_bear > 0
-        for j = 0 to n_bear - 1
-            i   = n_bear - 1 - j
-            lpx = array.get(bear_fvg_px, i)
-            if high >= lpx or f_zone_far(lpx, lpx)
-                line.delete(array.get(bear_fvg_lines, i))
-                label.delete(array.get(bear_fvg_lbls, i))
-                array.remove(bear_fvg_lines, i)
-                array.remove(bear_fvg_lbls,  i)
-                array.remove(bear_fvg_px,    i)
-
-    n_bull = array.size(bull_fvg_lines)
-    if n_bull > 0
-        for j = 0 to n_bull - 1
-            i   = n_bull - 1 - j
-            lpx = array.get(bull_fvg_px, i)
-            if low <= lpx or f_zone_far(lpx, lpx)
-                line.delete(array.get(bull_fvg_lines, i))
-                label.delete(array.get(bull_fvg_lbls, i))
-                array.remove(bull_fvg_lines, i)
-                array.remove(bull_fvg_lbls,  i)
-                array.remove(bull_fvg_px,    i)
-
 // Entry signals
 plotshape(short_signal, title = "Short Entry", style = shape.labeldown, location = location.abovebar, color = color.red,  textcolor = color.white, text = "SHORT", size = size.small)
 plotshape(long_signal,  title = "Long Entry",  style = shape.labelup,   location = location.belowbar, color = color.teal, textcolor = color.white, text = "LONG",  size = size.small)
@@ -1096,7 +1145,7 @@ plotshape(long_signal,  title = "Long Entry",  style = shape.labelup,   location
 
 var table tbl = table.new(position.top_right, 2, 9, bgcolor = color.new(color.black, 75), border_width = 1, border_color = color.gray)
 
-if barstate.islast
+if barstate.islast and show_info_tbl
     table.cell(tbl, 0, 0, "SMC v4 EURUSD", text_color = color.white, bgcolor = color.new(color.navy, 50), text_size = size.normal)
     table.cell(tbl, 1, 0, "",               text_color = color.white, bgcolor = color.new(color.navy, 50), text_size = size.normal)
 
@@ -1169,7 +1218,7 @@ if barstate.islast
 
 var table stats = table.new(position.top_left, 2, 9, bgcolor = color.new(color.black, 75), border_width = 1, border_color = color.gray)
 
-if barstate.islast
+if barstate.islast and show_stats_tbl
     n_closed = strategy.closedtrades
     n_wins   = strategy.wintrades
     n_loss   = strategy.losstrades
