@@ -975,28 +975,48 @@ f_htf_zone_l(bool new_edge, bool gone_edge, bool active, bool mitigated, line ln
 if show_levels
     // --- 1H ---
     if use_htf_1h
-        [htf_b1h_line, htf_b1h_lbl] := f_htf_zone_s(new_bear_1h, gone_bear_1h, htf_bear_1h, high >= h1_h0, htf_b1h_line, htf_b1h_lbl, h1_h0, max_poi_dist, "1H FVG Bear", color.new(color.red, 30))
-        [htf_u1h_line, htf_u1h_lbl] := f_htf_zone_s(new_bull_1h, gone_bull_1h, htf_bull_1h, low <= h1_l0, htf_u1h_line, htf_u1h_lbl, h1_l0, max_poi_dist, "1H FVG Bull", color.new(color.teal, 30))
+        [_t_htf_b1h_line, _t_htf_b1h_lbl] = f_htf_zone_s(new_bear_1h, gone_bear_1h, htf_bear_1h, high >= h1_h0, htf_b1h_line, htf_b1h_lbl, h1_h0, max_poi_dist, "1H FVG Bear", color.new(color.red, 30))
+        htf_b1h_line := _t_htf_b1h_line
+        htf_b1h_lbl := _t_htf_b1h_lbl
+        [_t_htf_u1h_line, _t_htf_u1h_lbl] = f_htf_zone_s(new_bull_1h, gone_bull_1h, htf_bull_1h, low <= h1_l0, htf_u1h_line, htf_u1h_lbl, h1_l0, max_poi_dist, "1H FVG Bull", color.new(color.teal, 30))
+        htf_u1h_line := _t_htf_u1h_line
+        htf_u1h_lbl := _t_htf_u1h_lbl
 
     // --- 4H ---
     if use_htf_4h
-        [htf_b4h_line, htf_b4h_lbl] := f_htf_zone_s(new_bear_4h, gone_bear_4h, htf_bear_4h, high >= h2_h0, htf_b4h_line, htf_b4h_lbl, h2_h0, max_poi_dist, "4H FVG Bear", color.new(color.red, 20))
-        [htf_u4h_line, htf_u4h_lbl] := f_htf_zone_s(new_bull_4h, gone_bull_4h, htf_bull_4h, low <= h2_l0, htf_u4h_line, htf_u4h_lbl, h2_l0, max_poi_dist, "4H FVG Bull", color.new(color.teal, 20))
+        [_t_htf_b4h_line, _t_htf_b4h_lbl] = f_htf_zone_s(new_bear_4h, gone_bear_4h, htf_bear_4h, high >= h2_h0, htf_b4h_line, htf_b4h_lbl, h2_h0, max_poi_dist, "4H FVG Bear", color.new(color.red, 20))
+        htf_b4h_line := _t_htf_b4h_line
+        htf_b4h_lbl := _t_htf_b4h_lbl
+        [_t_htf_u4h_line, _t_htf_u4h_lbl] = f_htf_zone_s(new_bull_4h, gone_bull_4h, htf_bull_4h, low <= h2_l0, htf_u4h_line, htf_u4h_lbl, h2_l0, max_poi_dist, "4H FVG Bull", color.new(color.teal, 20))
+        htf_u4h_line := _t_htf_u4h_line
+        htf_u4h_lbl := _t_htf_u4h_lbl
 
     // --- Daily ---
     if use_htf_d
-        [htf_bd_line, htf_bd_lbl] := f_htf_zone_l(new_bear_d, gone_bear_d, htf_bear_d, high >= h3_h0, htf_bd_line, htf_bd_lbl, h3_h0, max_poi_dist_dwm, "D FVG Bear", color.new(color.red, 10))
-        [htf_ud_line, htf_ud_lbl] := f_htf_zone_l(new_bull_d, gone_bull_d, htf_bull_d, low <= h3_l0, htf_ud_line, htf_ud_lbl, h3_l0, max_poi_dist_dwm, "D FVG Bull", color.new(color.teal, 10))
+        [_t_htf_bd_line, _t_htf_bd_lbl] = f_htf_zone_l(new_bear_d, gone_bear_d, htf_bear_d, high >= h3_h0, htf_bd_line, htf_bd_lbl, h3_h0, max_poi_dist_dwm, "D FVG Bear", color.new(color.red, 10))
+        htf_bd_line := _t_htf_bd_line
+        htf_bd_lbl := _t_htf_bd_lbl
+        [_t_htf_ud_line, _t_htf_ud_lbl] = f_htf_zone_l(new_bull_d, gone_bull_d, htf_bull_d, low <= h3_l0, htf_ud_line, htf_ud_lbl, h3_l0, max_poi_dist_dwm, "D FVG Bull", color.new(color.teal, 10))
+        htf_ud_line := _t_htf_ud_line
+        htf_ud_lbl := _t_htf_ud_lbl
 
     // --- Weekly ---
     if use_htf_w
-        [htf_bw_line, htf_bw_lbl] := f_htf_zone_l(new_bear_w, gone_bear_w, htf_bear_w, high >= hw_h0, htf_bw_line, htf_bw_lbl, hw_h0, max_poi_dist_dwm, "W FVG Bear", color.new(color.red, 5))
-        [htf_uw_line, htf_uw_lbl] := f_htf_zone_l(new_bull_w, gone_bull_w, htf_bull_w, low <= hw_l0, htf_uw_line, htf_uw_lbl, hw_l0, max_poi_dist_dwm, "W FVG Bull", color.new(color.teal, 5))
+        [_t_htf_bw_line, _t_htf_bw_lbl] = f_htf_zone_l(new_bear_w, gone_bear_w, htf_bear_w, high >= hw_h0, htf_bw_line, htf_bw_lbl, hw_h0, max_poi_dist_dwm, "W FVG Bear", color.new(color.red, 5))
+        htf_bw_line := _t_htf_bw_line
+        htf_bw_lbl := _t_htf_bw_lbl
+        [_t_htf_uw_line, _t_htf_uw_lbl] = f_htf_zone_l(new_bull_w, gone_bull_w, htf_bull_w, low <= hw_l0, htf_uw_line, htf_uw_lbl, hw_l0, max_poi_dist_dwm, "W FVG Bull", color.new(color.teal, 5))
+        htf_uw_line := _t_htf_uw_line
+        htf_uw_lbl := _t_htf_uw_lbl
 
     // --- Monthly ---
     if use_htf_m
-        [htf_bm_line, htf_bm_lbl] := f_htf_zone_l(new_bear_m, gone_bear_m, htf_bear_m, high >= hm_h0, htf_bm_line, htf_bm_lbl, hm_h0, max_poi_dist_dwm, "MN FVG Bear", color.new(color.red, 0))
-        [htf_um_line, htf_um_lbl] := f_htf_zone_l(new_bull_m, gone_bull_m, htf_bull_m, low <= hm_l0, htf_um_line, htf_um_lbl, hm_l0, max_poi_dist_dwm, "MN FVG Bull", color.new(color.teal, 0))
+        [_t_htf_bm_line, _t_htf_bm_lbl] = f_htf_zone_l(new_bear_m, gone_bear_m, htf_bear_m, high >= hm_h0, htf_bm_line, htf_bm_lbl, hm_h0, max_poi_dist_dwm, "MN FVG Bear", color.new(color.red, 0))
+        htf_bm_line := _t_htf_bm_line
+        htf_bm_lbl := _t_htf_bm_lbl
+        [_t_htf_um_line, _t_htf_um_lbl] = f_htf_zone_l(new_bull_m, gone_bull_m, htf_bull_m, low <= hm_l0, htf_um_line, htf_um_lbl, hm_l0, max_poi_dist_dwm, "MN FVG Bull", color.new(color.teal, 0))
+        htf_um_line := _t_htf_um_line
+        htf_um_lbl := _t_htf_um_lbl
 
 // =============================================================
 // FVG IMBALANCE VISUALIZATION
