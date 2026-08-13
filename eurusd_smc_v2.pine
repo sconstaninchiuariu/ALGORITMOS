@@ -83,7 +83,13 @@ max_poi_pct  = input.float(0.50,   "Max POI Distance (% of price, hide zones bey
 show_fvg_vis = input.bool(true,    "Show FVG Imbalance Boxes (all unmitigated)",        group = GVIS)
 merge_tol    = input.float(0.0005, "Zone Merge Tolerance",  0.00010, 0.005, 0.00010,   group = GVIS)
 
-poi_pct_eff  = syminfo.type == "futures" ? max_poi_pct * 2.0 : max_poi_pct
+// Scale the visible distance down on lower chart timeframes (e.g. 1m) so wide
+// HTF boxes (Weekly/Monthly) don't force the visible price range to stretch and
+// shrink the candles. At 1H+ the full % applies; below that it shrinks toward
+// a 15% floor as the chart timeframe gets smaller.
+tf_sec       = timeframe.in_seconds(timeframe.period)
+tf_scale     = math.min(1.0, math.max(0.15, tf_sec / 3600.0))
+poi_pct_eff  = (syminfo.type == "futures" ? max_poi_pct * 2.0 : max_poi_pct) * tf_scale
 max_poi_dist = close * poi_pct_eff / 100.0
 
 // =============================================================
