@@ -83,6 +83,10 @@ max_poi_pct  = input.float(0.50,   "Max POI Distance (% of price, hide zones bey
 show_fvg_vis = input.bool(true,    "Show FVG Imbalance Boxes (all unmitigated)",        group = GVIS)
 merge_tol    = input.float(0.0005, "Zone Merge Tolerance",  0.00010, 0.005, 0.00010,   group = GVIS)
 
+var string GALR = "Proximity Alerts"
+use_near_alert = input.bool(true, "Alert when price nears a POI zone", group = GALR)
+near_alert_pct = input.float(0.10, "Proximity Distance (% of price) — forex baseline; auto x2 on futures", 0.02, 2.0, 0.01, group = GALR)
+
 // Scale the visible distance down on lower chart timeframes (e.g. 1m) so wide
 // HTF boxes (Weekly/Monthly) don't force the visible price range to stretch and
 // shrink the candles. At 1H+ the full % applies; below that it shrinks toward
@@ -91,6 +95,9 @@ tf_sec       = timeframe.in_seconds(timeframe.period)
 tf_scale     = math.min(1.0, math.max(0.15, tf_sec / 3600.0))
 poi_pct_eff  = (syminfo.type == "futures" ? max_poi_pct * 2.0 : max_poi_pct) * tf_scale
 max_poi_dist = close * poi_pct_eff / 100.0
+
+near_pct_eff = syminfo.type == "futures" ? near_alert_pct * 2.0 : near_alert_pct
+near_dist    = close * near_pct_eff / 100.0
 
 // =============================================================
 // HTF BIAS  (no-repainting)
@@ -543,6 +550,65 @@ if not na(last_eqh) and not eqh_swept and high >= last_eqh
 if not na(last_eql) and not eql_swept and low <= last_eql
     eql_swept := true
 
+// =============================================================
+// PROXIMITY ALERTS — fire once when price first enters near_dist of a
+// zone (not every bar it stays close), reset when the zone is swept or
+// its underlying level refreshes at the next period.
+// =============================================================
+
+f_near(float px) =>
+    not na(px) and math.abs(close - px) <= near_dist
+
+var bool pdh_was_near    = false
+var bool pdl_was_near    = false
+var bool pwh_was_near    = false
+var bool pwl_was_near    = false
+var bool asiah_was_near  = false
+var bool asial_was_near  = false
+var bool eqh_was_near    = false
+var bool eql_was_near    = false
+
+if is_new_day
+    pdh_was_near   := false
+    pdl_was_near   := false
+if is_new_week
+    pwh_was_near   := false
+    pwl_was_near   := false
+if asia_closed
+    asiah_was_near := false
+    asial_was_near := false
+if eqh_new
+    eqh_was_near   := false
+if eql_new
+    eql_was_near   := false
+
+pdh_near_now   = use_near_alert and use_pdhl and not pdh_swept    and f_near(pdh)
+pdl_near_now   = use_near_alert and use_pdhl and not pdl_swept    and f_near(pdl)
+pwh_near_now   = use_near_alert and use_pwhl and not pwh_swept    and f_near(pwh)
+pwl_near_now   = use_near_alert and use_pwhl and not pwl_swept    and f_near(pwl)
+asiah_near_now = use_near_alert and use_asia and not asia_h_swept and f_near(asia_h)
+asial_near_now = use_near_alert and use_asia and not asia_l_swept and f_near(asia_l)
+eqh_near_now   = use_near_alert and use_eql  and eql_tf_ok and not eqh_swept and f_near(last_eqh)
+eql_near_now   = use_near_alert and use_eql  and eql_tf_ok and not eql_swept and f_near(last_eql)
+
+pdh_near_alert   = pdh_near_now   and not pdh_was_near
+pdl_near_alert   = pdl_near_now   and not pdl_was_near
+pwh_near_alert   = pwh_near_now   and not pwh_was_near
+pwl_near_alert   = pwl_near_now   and not pwl_was_near
+asiah_near_alert = asiah_near_now and not asiah_was_near
+asial_near_alert = asial_near_now and not asial_was_near
+eqh_near_alert   = eqh_near_now   and not eqh_was_near
+eql_near_alert   = eql_near_now   and not eql_was_near
+
+pdh_was_near   := pdh_near_now
+pdl_was_near   := pdl_near_now
+pwh_was_near   := pwh_near_now
+pwl_was_near   := pwl_near_now
+asiah_was_near := asiah_near_now
+asial_was_near := asial_near_now
+eqh_was_near   := eqh_near_now
+eql_was_near   := eql_near_now
+
 // Delete all managed drawings from previous bar
 n_ml = array.size(managed_poi_lines)
 if n_ml > 0
@@ -874,9 +940,12 @@ var box[] bear_fvg_arr = array.new<box>(0)
 var box[] bull_fvg_arr = array.new<box>(0)
 
 if show_fvg_vis
-    bear_vis_gap = low[2] - high
+    // Use fully completed bars [3] and [1] (never the still-forming bar [0])
+    // so the gap size is final and boxes don't flicker in/out of existence
+    // as the live candle's high/low keeps changing intrabar.
+    bear_vis_gap = low[3] - high[1]
     if bear_vis_gap >= fvg_min_gap
-        nb = box.new(bar_index - 2, low[2], bar_index + 1, high,
+        nb = box.new(bar_index - 3, low[3], bar_index - 1, high[1],
              border_color = color.new(color.red,  65),
              bgcolor      = color.new(color.red,  90),
              text         = "IMB",
@@ -888,9 +957,9 @@ if show_fvg_vis
         if array.size(bear_fvg_arr) > 20
             box.delete(array.shift(bear_fvg_arr))
 
-    bull_vis_gap = low - high[2]
+    bull_vis_gap = low[1] - high[3]
     if bull_vis_gap >= fvg_min_gap
-        nb = box.new(bar_index - 2, low, bar_index + 1, high[2],
+        nb = box.new(bar_index - 3, low[1], bar_index - 1, high[3],
              border_color = color.new(color.teal, 65),
              bgcolor      = color.new(color.teal, 90),
              text         = "IMB",
@@ -1061,3 +1130,13 @@ alertcondition(short_signal, title = "SHORT Entry",        message = "SMC SHORT 
 alertcondition(long_signal,  title = "LONG Entry",         message = "SMC LONG  | Engulfing FVG retest | Entry: {{close}}")
 alertcondition(eqh_new,      title = "EQH Formed",         message = "Equal High detected - liquidity pool above")
 alertcondition(eql_new,      title = "EQL Formed",         message = "Equal Low detected - liquidity pool below")
+
+// Proximity alerts - price approaching a POI zone (fires once on entry)
+alertcondition(pdh_near_alert,   title = "Price near PDH",     message = "Price approaching PDH (Previous Day High)")
+alertcondition(pdl_near_alert,   title = "Price near PDL",     message = "Price approaching PDL (Previous Day Low)")
+alertcondition(pwh_near_alert,   title = "Price near PWH",     message = "Price approaching PWH (Previous Week High)")
+alertcondition(pwl_near_alert,   title = "Price near PWL",     message = "Price approaching PWL (Previous Week Low)")
+alertcondition(asiah_near_alert, title = "Price near Asia H",  message = "Price approaching Asia Range High")
+alertcondition(asial_near_alert, title = "Price near Asia L",  message = "Price approaching Asia Range Low")
+alertcondition(eqh_near_alert,   title = "Price near EQH",     message = "Price approaching Equal Highs liquidity pool")
+alertcondition(eql_near_alert,   title = "Price near EQL",     message = "Price approaching Equal Lows liquidity pool")
