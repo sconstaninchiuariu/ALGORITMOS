@@ -79,9 +79,11 @@ var string GVIS = "Visuals"
 show_levels  = input.bool(true,    "Show POI Lines (PDH/PDL, PWH/PWL, Asia, EQH/EQL)", group = GVIS)
 show_kz_bg   = input.bool(true,    "Show Kill Zone Background",                         group = GVIS)
 show_sweep   = input.bool(true,    "Show Sweep Markers",                                group = GVIS)
-max_poi_dist = input.float(0.0100, "Max POI Distance (hide zones > N price)",  0.0010, 0.1000, 0.0010, group = GVIS)
+max_poi_pct  = input.float(0.25,   "Max POI Distance (% of price, hide zones beyond)", 0.05, 5.0, 0.05, group = GVIS)
 show_fvg_vis = input.bool(true,    "Show FVG Imbalance Boxes (all unmitigated)",        group = GVIS)
 merge_tol    = input.float(0.0005, "Zone Merge Tolerance",  0.00010, 0.005, 0.00010,   group = GVIS)
+
+max_poi_dist = close * max_poi_pct / 100.0
 
 // =============================================================
 // HTF BIAS  (no-repainting)
