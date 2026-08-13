@@ -113,6 +113,24 @@ chart_is_dwm      = timeframe.isdaily or timeframe.isweekly or timeframe.ismonth
 f_zone_far(float top, float bottom) =>
     not chart_is_dwm and (close > top ? close - top : close < bottom ? bottom - close : 0.0) > max_poi_dist
 
+// Formats a timeframe.period string ("1","5","60","240","D","W","M") into a
+// short human label ("1m","5m","1H","4H","D","W","MN") for imbalance labels.
+f_tf_label(string tf) =>
+    string lbl = tf
+    if tf == "D"
+        lbl := "D"
+    else if tf == "W"
+        lbl := "W"
+    else if tf == "M"
+        lbl := "MN"
+    else
+        mins = str.tonumber(tf)
+        if not na(mins)
+            lbl := mins >= 60 and mins % 60 == 0 ? str.tostring(mins / 60) + "H" : str.tostring(mins) + "m"
+    lbl
+
+chart_tf_lbl = f_tf_label(timeframe.period)
+
 // =============================================================
 // HTF BIAS  (no-repainting)
 // =============================================================
@@ -379,16 +397,30 @@ var float pre_swl      = na
 var float pre_swh      = na
 
 var box fvg_entry_box = na
-var box htf_b1h_box   = na
-var box htf_u1h_box   = na
-var box htf_b4h_box   = na
-var box htf_u4h_box   = na
-var box htf_bd_box    = na
-var box htf_ud_box    = na
-var box htf_bw_box    = na
-var box htf_uw_box    = na
-var box htf_bm_box    = na
-var box htf_um_box    = na
+
+// HTF FVG imbalances are drawn as a single line at the zone's near edge
+// (the actionable retest level) plus a label naming the exact imbalance
+// and timeframe, instead of a filled box.
+var line  htf_b1h_line = na
+var label htf_b1h_lbl  = na
+var line  htf_u1h_line = na
+var label htf_u1h_lbl  = na
+var line  htf_b4h_line = na
+var label htf_b4h_lbl  = na
+var line  htf_u4h_line = na
+var label htf_u4h_lbl  = na
+var line  htf_bd_line  = na
+var label htf_bd_lbl   = na
+var line  htf_ud_line  = na
+var label htf_ud_lbl   = na
+var line  htf_bw_line  = na
+var label htf_bw_lbl   = na
+var line  htf_uw_line  = na
+var label htf_uw_lbl   = na
+var line  htf_bm_line  = na
+var label htf_bm_lbl   = na
+var line  htf_um_line  = na
+var label htf_um_lbl   = na
 
 var bool prev_bear_1h = false
 var bool prev_bull_1h = false
@@ -880,236 +912,158 @@ prev_bull_w  := htf_bull_w
 prev_bear_m  := htf_bear_m
 prev_bull_m  := htf_bull_m
 
-// Distance check uses NEAREST EDGE so wide W/M boxes don't force chart to zoom out:
-// bear supply (above price): nearest edge = box bottom; delete if b_bot - close > max_poi_dist
-// bull demand (below price): nearest edge = box top;    delete if close - b_top > max_poi_dist
+// Each zone is drawn as a single line at its NEAREST EDGE (the actionable
+// retest level) instead of a filled box, with a label spelling out the exact
+// imbalance and timeframe (e.g. "1H FVG Bear"). This is both lighter on the
+// chart and avoids the y-axis distortion boxes caused with wide zones.
+// bear supply (above price): near edge = zone bottom (the lower boundary)
+// bull demand (below price): near edge = zone top    (the upper boundary)
+
+// line.new's style= and label.new's size= arguments must be compile-time
+// constants in Pine — they can't be passed through as a plain function
+// parameter (same restriction that caused CE10123 for input.float earlier).
+// So 1H/4H (dotted/small) and D/W/M (dashed/normal) get their own function
+// variant instead of one shared function taking style/size as arguments.
+f_htf_zone_s(bool new_edge, bool gone_edge, bool active, bool mitigated, line ln_in, label lbl_in, float near_px, float dist_limit, string txt, color col) =>
+    line  ln  = ln_in
+    label lbl = lbl_in
+    if new_edge
+        line.delete(ln)
+        label.delete(lbl)
+        ln  := na
+        lbl := na
+        if not na(near_px) and math.abs(close - near_px) <= dist_limit
+            ln  := line.new(bar_index, near_px, bar_index + 1, near_px, extend = extend.right, color = col, style = line.style_dotted, width = 1)
+            lbl := label.new(bar_index, near_px, txt, style = label.style_none, textcolor = col, size = size.small)
+    if gone_edge
+        line.delete(ln)
+        label.delete(lbl)
+        ln  := na
+        lbl := na
+    if active and not na(ln)
+        if mitigated or math.abs(close - near_px) > dist_limit
+            line.delete(ln)
+            label.delete(lbl)
+            ln  := na
+            lbl := na
+    [ln, lbl]
+
+f_htf_zone_l(bool new_edge, bool gone_edge, bool active, bool mitigated, line ln_in, label lbl_in, float near_px, float dist_limit, string txt, color col) =>
+    line  ln  = ln_in
+    label lbl = lbl_in
+    if new_edge
+        line.delete(ln)
+        label.delete(lbl)
+        ln  := na
+        lbl := na
+        if not na(near_px) and math.abs(close - near_px) <= dist_limit
+            ln  := line.new(bar_index, near_px, bar_index + 1, near_px, extend = extend.right, color = col, style = line.style_dashed, width = 1)
+            lbl := label.new(bar_index, near_px, txt, style = label.style_none, textcolor = col, size = size.normal)
+    if gone_edge
+        line.delete(ln)
+        label.delete(lbl)
+        ln  := na
+        lbl := na
+    if active and not na(ln)
+        if mitigated or math.abs(close - near_px) > dist_limit
+            line.delete(ln)
+            label.delete(lbl)
+            ln  := na
+            lbl := na
+    [ln, lbl]
 
 if show_levels
     // --- 1H ---
     if use_htf_1h
-        if new_bear_1h
-            box.delete(htf_b1h_box)
-            htf_b1h_box := na
-            if h1_h0 > close and h1_h0 - close <= max_poi_dist
-                htf_b1h_box := box.new(bar_index, h1_l2, bar_index + 1, h1_h0, border_color = color.new(color.red, 30), bgcolor = color.new(color.red, 87), text = "1H", text_color = color.new(color.red, 20), text_size = size.small, text_halign = text.align_right, text_valign = text.align_top)
-        if gone_bear_1h
-            box.delete(htf_b1h_box)
-            htf_b1h_box := na
-        if htf_bear_1h and not na(htf_b1h_box)
-            b_bot = box.get_bottom(htf_b1h_box)
-            if high >= b_bot or b_bot - close > max_poi_dist
-                box.delete(htf_b1h_box)
-                htf_b1h_box := na
-            else
-                box.set_right(htf_b1h_box, bar_index + 5)
-        if new_bull_1h
-            box.delete(htf_u1h_box)
-            htf_u1h_box := na
-            if h1_l0 < close and close - h1_l0 <= max_poi_dist
-                htf_u1h_box := box.new(bar_index, h1_l0, bar_index + 1, h1_h2, border_color = color.new(color.teal, 30), bgcolor = color.new(color.teal, 87), text = "1H", text_color = color.new(color.teal, 20), text_size = size.small, text_halign = text.align_right, text_valign = text.align_bottom)
-        if gone_bull_1h
-            box.delete(htf_u1h_box)
-            htf_u1h_box := na
-        if htf_bull_1h and not na(htf_u1h_box)
-            b_top = box.get_top(htf_u1h_box)
-            if low <= b_top or close - b_top > max_poi_dist
-                box.delete(htf_u1h_box)
-                htf_u1h_box := na
-            else
-                box.set_right(htf_u1h_box, bar_index + 5)
+        [htf_b1h_line, htf_b1h_lbl] := f_htf_zone_s(new_bear_1h, gone_bear_1h, htf_bear_1h, high >= h1_h0, htf_b1h_line, htf_b1h_lbl, h1_h0, max_poi_dist, "1H FVG Bear", color.new(color.red, 30))
+        [htf_u1h_line, htf_u1h_lbl] := f_htf_zone_s(new_bull_1h, gone_bull_1h, htf_bull_1h, low <= h1_l0, htf_u1h_line, htf_u1h_lbl, h1_l0, max_poi_dist, "1H FVG Bull", color.new(color.teal, 30))
 
     // --- 4H ---
     if use_htf_4h
-        if new_bear_4h
-            box.delete(htf_b4h_box)
-            htf_b4h_box := na
-            if h2_h0 > close and h2_h0 - close <= max_poi_dist
-                htf_b4h_box := box.new(bar_index, h2_l2, bar_index + 1, h2_h0, border_color = color.new(color.red, 20), bgcolor = color.new(color.red, 84), text = "4H", text_color = color.new(color.red, 10), text_size = size.small, text_halign = text.align_right, text_valign = text.align_top)
-        if gone_bear_4h
-            box.delete(htf_b4h_box)
-            htf_b4h_box := na
-        if htf_bear_4h and not na(htf_b4h_box)
-            b_bot = box.get_bottom(htf_b4h_box)
-            if high >= b_bot or b_bot - close > max_poi_dist
-                box.delete(htf_b4h_box)
-                htf_b4h_box := na
-            else
-                box.set_right(htf_b4h_box, bar_index + 5)
-        if new_bull_4h
-            box.delete(htf_u4h_box)
-            htf_u4h_box := na
-            if h2_l0 < close and close - h2_l0 <= max_poi_dist
-                htf_u4h_box := box.new(bar_index, h2_l0, bar_index + 1, h2_h2, border_color = color.new(color.teal, 20), bgcolor = color.new(color.teal, 84), text = "4H", text_color = color.new(color.teal, 10), text_size = size.small, text_halign = text.align_right, text_valign = text.align_bottom)
-        if gone_bull_4h
-            box.delete(htf_u4h_box)
-            htf_u4h_box := na
-        if htf_bull_4h and not na(htf_u4h_box)
-            b_top = box.get_top(htf_u4h_box)
-            if low <= b_top or close - b_top > max_poi_dist
-                box.delete(htf_u4h_box)
-                htf_u4h_box := na
-            else
-                box.set_right(htf_u4h_box, bar_index + 5)
+        [htf_b4h_line, htf_b4h_lbl] := f_htf_zone_s(new_bear_4h, gone_bear_4h, htf_bear_4h, high >= h2_h0, htf_b4h_line, htf_b4h_lbl, h2_h0, max_poi_dist, "4H FVG Bear", color.new(color.red, 20))
+        [htf_u4h_line, htf_u4h_lbl] := f_htf_zone_s(new_bull_4h, gone_bull_4h, htf_bull_4h, low <= h2_l0, htf_u4h_line, htf_u4h_lbl, h2_l0, max_poi_dist, "4H FVG Bull", color.new(color.teal, 20))
 
     // --- Daily ---
     if use_htf_d
-        if new_bear_d
-            box.delete(htf_bd_box)
-            htf_bd_box := na
-            if h3_h0 > close and h3_h0 - close <= max_poi_dist_dwm
-                htf_bd_box := box.new(bar_index, h3_l2, bar_index + 1, h3_h0, border_color = color.new(color.red, 10), bgcolor = color.new(color.red, 80), text = "D", text_color = color.new(color.red, 0), text_size = size.normal, text_halign = text.align_right, text_valign = text.align_top)
-        if gone_bear_d
-            box.delete(htf_bd_box)
-            htf_bd_box := na
-        if htf_bear_d and not na(htf_bd_box)
-            b_bot = box.get_bottom(htf_bd_box)
-            if high >= b_bot or b_bot - close > max_poi_dist_dwm
-                box.delete(htf_bd_box)
-                htf_bd_box := na
-            else
-                box.set_right(htf_bd_box, bar_index + 5)
-        if new_bull_d
-            box.delete(htf_ud_box)
-            htf_ud_box := na
-            if h3_l0 < close and close - h3_l0 <= max_poi_dist_dwm
-                htf_ud_box := box.new(bar_index, h3_l0, bar_index + 1, h3_h2, border_color = color.new(color.teal, 10), bgcolor = color.new(color.teal, 80), text = "D", text_color = color.new(color.teal, 0), text_size = size.normal, text_halign = text.align_right, text_valign = text.align_bottom)
-        if gone_bull_d
-            box.delete(htf_ud_box)
-            htf_ud_box := na
-        if htf_bull_d and not na(htf_ud_box)
-            b_top = box.get_top(htf_ud_box)
-            if low <= b_top or close - b_top > max_poi_dist_dwm
-                box.delete(htf_ud_box)
-                htf_ud_box := na
-            else
-                box.set_right(htf_ud_box, bar_index + 5)
+        [htf_bd_line, htf_bd_lbl] := f_htf_zone_l(new_bear_d, gone_bear_d, htf_bear_d, high >= h3_h0, htf_bd_line, htf_bd_lbl, h3_h0, max_poi_dist_dwm, "D FVG Bear", color.new(color.red, 10))
+        [htf_ud_line, htf_ud_lbl] := f_htf_zone_l(new_bull_d, gone_bull_d, htf_bull_d, low <= h3_l0, htf_ud_line, htf_ud_lbl, h3_l0, max_poi_dist_dwm, "D FVG Bull", color.new(color.teal, 10))
 
     // --- Weekly ---
     if use_htf_w
-        if new_bear_w
-            box.delete(htf_bw_box)
-            htf_bw_box := na
-            if hw_h0 > close and hw_h0 - close <= max_poi_dist_dwm
-                htf_bw_box := box.new(bar_index, hw_l2, bar_index + 1, hw_h0, border_color = color.new(color.red, 5), bgcolor = color.new(color.red, 75), text = "W", text_color = color.new(color.red, 0), text_size = size.normal, text_halign = text.align_right, text_valign = text.align_top)
-        if gone_bear_w
-            box.delete(htf_bw_box)
-            htf_bw_box := na
-        if htf_bear_w and not na(htf_bw_box)
-            b_bot = box.get_bottom(htf_bw_box)
-            if high >= b_bot or b_bot - close > max_poi_dist_dwm
-                box.delete(htf_bw_box)
-                htf_bw_box := na
-            else
-                box.set_right(htf_bw_box, bar_index + 5)
-        if new_bull_w
-            box.delete(htf_uw_box)
-            htf_uw_box := na
-            if hw_l0 < close and close - hw_l0 <= max_poi_dist_dwm
-                htf_uw_box := box.new(bar_index, hw_l0, bar_index + 1, hw_h2, border_color = color.new(color.teal, 5), bgcolor = color.new(color.teal, 75), text = "W", text_color = color.new(color.teal, 0), text_size = size.normal, text_halign = text.align_right, text_valign = text.align_bottom)
-        if gone_bull_w
-            box.delete(htf_uw_box)
-            htf_uw_box := na
-        if htf_bull_w and not na(htf_uw_box)
-            b_top = box.get_top(htf_uw_box)
-            if low <= b_top or close - b_top > max_poi_dist_dwm
-                box.delete(htf_uw_box)
-                htf_uw_box := na
-            else
-                box.set_right(htf_uw_box, bar_index + 5)
+        [htf_bw_line, htf_bw_lbl] := f_htf_zone_l(new_bear_w, gone_bear_w, htf_bear_w, high >= hw_h0, htf_bw_line, htf_bw_lbl, hw_h0, max_poi_dist_dwm, "W FVG Bear", color.new(color.red, 5))
+        [htf_uw_line, htf_uw_lbl] := f_htf_zone_l(new_bull_w, gone_bull_w, htf_bull_w, low <= hw_l0, htf_uw_line, htf_uw_lbl, hw_l0, max_poi_dist_dwm, "W FVG Bull", color.new(color.teal, 5))
 
     // --- Monthly ---
     if use_htf_m
-        if new_bear_m
-            box.delete(htf_bm_box)
-            htf_bm_box := na
-            if hm_h0 > close and hm_h0 - close <= max_poi_dist_dwm
-                htf_bm_box := box.new(bar_index, hm_l2, bar_index + 1, hm_h0, border_color = color.new(color.red, 0), bgcolor = color.new(color.red, 70), text = "MN", text_color = color.new(color.red, 0), text_size = size.normal, text_halign = text.align_right, text_valign = text.align_top)
-        if gone_bear_m
-            box.delete(htf_bm_box)
-            htf_bm_box := na
-        if htf_bear_m and not na(htf_bm_box)
-            b_bot = box.get_bottom(htf_bm_box)
-            if high >= b_bot or b_bot - close > max_poi_dist_dwm
-                box.delete(htf_bm_box)
-                htf_bm_box := na
-            else
-                box.set_right(htf_bm_box, bar_index + 5)
-        if new_bull_m
-            box.delete(htf_um_box)
-            htf_um_box := na
-            if hm_l0 < close and close - hm_l0 <= max_poi_dist_dwm
-                htf_um_box := box.new(bar_index, hm_l0, bar_index + 1, hm_h2, border_color = color.new(color.teal, 0), bgcolor = color.new(color.teal, 70), text = "MN", text_color = color.new(color.teal, 0), text_size = size.normal, text_halign = text.align_right, text_valign = text.align_bottom)
-        if gone_bull_m
-            box.delete(htf_um_box)
-            htf_um_box := na
-        if htf_bull_m and not na(htf_um_box)
-            b_top = box.get_top(htf_um_box)
-            if low <= b_top or close - b_top > max_poi_dist_dwm
-                box.delete(htf_um_box)
-                htf_um_box := na
-            else
-                box.set_right(htf_um_box, bar_index + 5)
+        [htf_bm_line, htf_bm_lbl] := f_htf_zone_l(new_bear_m, gone_bear_m, htf_bear_m, high >= hm_h0, htf_bm_line, htf_bm_lbl, hm_h0, max_poi_dist_dwm, "MN FVG Bear", color.new(color.red, 0))
+        [htf_um_line, htf_um_lbl] := f_htf_zone_l(new_bull_m, gone_bull_m, htf_bull_m, low <= hm_l0, htf_um_line, htf_um_lbl, hm_l0, max_poi_dist_dwm, "MN FVG Bull", color.new(color.teal, 0))
 
 // =============================================================
 // FVG IMBALANCE VISUALIZATION
 // =============================================================
 
-var box[] bear_fvg_arr = array.new<box>(0)
-var box[] bull_fvg_arr = array.new<box>(0)
+// Drawn as a line at the zone's near edge + a label naming the exact
+// imbalance and chart timeframe (e.g. "5m FVG Bear"), instead of a box.
+var line[]  bear_fvg_lines = array.new<line>(0)
+var label[] bear_fvg_lbls  = array.new<label>(0)
+var float[] bear_fvg_px    = array.new_float(0)
+var line[]  bull_fvg_lines = array.new<line>(0)
+var label[] bull_fvg_lbls  = array.new<label>(0)
+var float[] bull_fvg_px    = array.new_float(0)
 
 if show_fvg_vis
     // Use fully completed bars [3] and [1] (never the still-forming bar [0])
-    // so the gap size is final and boxes don't flicker in/out of existence
+    // so the gap size is final and lines don't flicker in/out of existence
     // as the live candle's high/low keeps changing intrabar.
     bear_vis_gap = low[3] - high[1]
     if bear_vis_gap >= fvg_min_gap and not f_zone_far(low[3], high[1])
-        nb = box.new(bar_index - 3, low[3], bar_index - 1, high[1],
-             border_color = color.new(color.red,  65),
-             bgcolor      = color.new(color.red,  90),
-             text         = "IMB",
-             text_color   = color.new(color.red,  40),
-             text_size    = size.small,
-             text_halign  = text.align_center,
-             text_valign  = text.align_center)
-        array.push(bear_fvg_arr, nb)
-        if array.size(bear_fvg_arr) > 20
-            box.delete(array.shift(bear_fvg_arr))
+        near_px = high[1]
+        nl  = line.new(bar_index - 3, near_px, bar_index - 1, near_px, extend = extend.right, color = color.new(color.red, 40), style = line.style_dotted, width = 1)
+        nlb = label.new(bar_index - 1, near_px, chart_tf_lbl + " FVG Bear", style = label.style_none, textcolor = color.new(color.red, 20), size = size.small)
+        array.push(bear_fvg_lines, nl)
+        array.push(bear_fvg_lbls,  nlb)
+        array.push(bear_fvg_px,    near_px)
+        if array.size(bear_fvg_lines) > 20
+            line.delete(array.shift(bear_fvg_lines))
+            label.delete(array.shift(bear_fvg_lbls))
+            array.shift(bear_fvg_px)
 
     bull_vis_gap = low[1] - high[3]
     if bull_vis_gap >= fvg_min_gap and not f_zone_far(low[1], high[3])
-        nb = box.new(bar_index - 3, low[1], bar_index - 1, high[3],
-             border_color = color.new(color.teal, 65),
-             bgcolor      = color.new(color.teal, 90),
-             text         = "IMB",
-             text_color   = color.new(color.teal, 40),
-             text_size    = size.small,
-             text_halign  = text.align_center,
-             text_valign  = text.align_center)
-        array.push(bull_fvg_arr, nb)
-        if array.size(bull_fvg_arr) > 20
-            box.delete(array.shift(bull_fvg_arr))
+        near_px = low[1]
+        nl  = line.new(bar_index - 3, near_px, bar_index - 1, near_px, extend = extend.right, color = color.new(color.teal, 40), style = line.style_dotted, width = 1)
+        nlb = label.new(bar_index - 1, near_px, chart_tf_lbl + " FVG Bull", style = label.style_none, textcolor = color.new(color.teal, 20), size = size.small)
+        array.push(bull_fvg_lines, nl)
+        array.push(bull_fvg_lbls,  nlb)
+        array.push(bull_fvg_px,    near_px)
+        if array.size(bull_fvg_lines) > 20
+            line.delete(array.shift(bull_fvg_lines))
+            label.delete(array.shift(bull_fvg_lbls))
+            array.shift(bull_fvg_px)
 
-    n_bear = array.size(bear_fvg_arr)
+    n_bear = array.size(bear_fvg_lines)
     if n_bear > 0
         for j = 0 to n_bear - 1
-            i = n_bear - 1 - j
-            b = array.get(bear_fvg_arr, i)
-            if high >= box.get_bottom(b) or f_zone_far(box.get_top(b), box.get_bottom(b))
-                box.delete(b)
-                array.remove(bear_fvg_arr, i)
-            else
-                box.set_right(b, bar_index + 5)
+            i   = n_bear - 1 - j
+            lpx = array.get(bear_fvg_px, i)
+            if high >= lpx or f_zone_far(lpx, lpx)
+                line.delete(array.get(bear_fvg_lines, i))
+                label.delete(array.get(bear_fvg_lbls, i))
+                array.remove(bear_fvg_lines, i)
+                array.remove(bear_fvg_lbls,  i)
+                array.remove(bear_fvg_px,    i)
 
-    n_bull = array.size(bull_fvg_arr)
+    n_bull = array.size(bull_fvg_lines)
     if n_bull > 0
         for j = 0 to n_bull - 1
-            i = n_bull - 1 - j
-            b = array.get(bull_fvg_arr, i)
-            if low <= box.get_top(b) or f_zone_far(box.get_top(b), box.get_bottom(b))
-                box.delete(b)
-                array.remove(bull_fvg_arr, i)
-            else
-                box.set_right(b, bar_index + 5)
+            i   = n_bull - 1 - j
+            lpx = array.get(bull_fvg_px, i)
+            if low <= lpx or f_zone_far(lpx, lpx)
+                line.delete(array.get(bull_fvg_lines, i))
+                label.delete(array.get(bull_fvg_lbls, i))
+                array.remove(bull_fvg_lines, i)
+                array.remove(bull_fvg_lbls,  i)
+                array.remove(bull_fvg_px,    i)
 
 // Entry signals
 plotshape(short_signal, title = "Short Entry", style = shape.labeldown, location = location.abovebar, color = color.red,  textcolor = color.white, text = "SHORT", size = size.small)
