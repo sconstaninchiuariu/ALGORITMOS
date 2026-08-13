@@ -859,51 +859,150 @@ if new_bull_m
 if htf_bull_m and low <= htf_um_px
     htf_um_mit := true
 
+// --- Proximity alerts for the 10 dedicated HTF FVG zones ---
+// Same hysteresis armed/disarmed idea as the 8 structural POI alerts above:
+// fires once on approach, re-arms once price moves back beyond
+// near_reset_dist, and also re-arms on a fresh new-edge (a new imbalance
+// instance even if it reuses the same zone slot).
+f_zone_alert(bool cond_near, bool cond_far, bool new_edge, bool armed_in) =>
+    bool armed = armed_in
+    if new_edge
+        armed := true
+    fire = false
+    if cond_near and armed
+        fire  := true
+        armed := false
+    if cond_far
+        armed := true
+    [armed, fire]
+
+var bool htf_b1h_armed = true
+var bool htf_u1h_armed = true
+var bool htf_b4h_armed = true
+var bool htf_u4h_armed = true
+var bool htf_bd_armed  = true
+var bool htf_ud_armed  = true
+var bool htf_bw_armed  = true
+var bool htf_uw_armed  = true
+var bool htf_bm_armed  = true
+var bool htf_um_armed  = true
+
+[tmp_b1h_armed, fire_b1h] = f_zone_alert(use_near_alert and htf_bear_1h and not htf_b1h_mit and f_near(htf_b1h_px), f_far(htf_b1h_px), new_bear_1h, htf_b1h_armed)
+htf_b1h_armed := tmp_b1h_armed
+[tmp_u1h_armed, fire_u1h] = f_zone_alert(use_near_alert and htf_bull_1h and not htf_u1h_mit and f_near(htf_u1h_px), f_far(htf_u1h_px), new_bull_1h, htf_u1h_armed)
+htf_u1h_armed := tmp_u1h_armed
+[tmp_b4h_armed, fire_b4h] = f_zone_alert(use_near_alert and htf_bear_4h and not htf_b4h_mit and f_near(htf_b4h_px), f_far(htf_b4h_px), new_bear_4h, htf_b4h_armed)
+htf_b4h_armed := tmp_b4h_armed
+[tmp_u4h_armed, fire_u4h] = f_zone_alert(use_near_alert and htf_bull_4h and not htf_u4h_mit and f_near(htf_u4h_px), f_far(htf_u4h_px), new_bull_4h, htf_u4h_armed)
+htf_u4h_armed := tmp_u4h_armed
+[tmp_bd_armed, fire_bd] = f_zone_alert(use_near_alert and htf_bear_d and not htf_bd_mit and f_near(htf_bd_px), f_far(htf_bd_px), new_bear_d, htf_bd_armed)
+htf_bd_armed := tmp_bd_armed
+[tmp_ud_armed, fire_ud] = f_zone_alert(use_near_alert and htf_bull_d and not htf_ud_mit and f_near(htf_ud_px), f_far(htf_ud_px), new_bull_d, htf_ud_armed)
+htf_ud_armed := tmp_ud_armed
+[tmp_bw_armed, fire_bw] = f_zone_alert(use_near_alert and htf_bear_w and not htf_bw_mit and f_near(htf_bw_px), f_far(htf_bw_px), new_bear_w, htf_bw_armed)
+htf_bw_armed := tmp_bw_armed
+[tmp_uw_armed, fire_uw] = f_zone_alert(use_near_alert and htf_bull_w and not htf_uw_mit and f_near(htf_uw_px), f_far(htf_uw_px), new_bull_w, htf_uw_armed)
+htf_uw_armed := tmp_uw_armed
+[tmp_bm_armed, fire_bm] = f_zone_alert(use_near_alert and htf_bear_m and not htf_bm_mit and f_near(htf_bm_px), f_far(htf_bm_px), new_bear_m, htf_bm_armed)
+htf_bm_armed := tmp_bm_armed
+[tmp_um_armed, fire_um] = f_zone_alert(use_near_alert and htf_bull_m and not htf_um_mit and f_near(htf_um_px), f_far(htf_um_px), new_bull_m, htf_um_armed)
+htf_um_armed := tmp_um_armed
+
+if fire_b1h
+    alert("Price approaching 1H FVG Bear - " + str.tostring(htf_b1h_px, "#.#####"), alert.freq_once_per_bar)
+if fire_u1h
+    alert("Price approaching 1H FVG Bull - " + str.tostring(htf_u1h_px, "#.#####"), alert.freq_once_per_bar)
+if fire_b4h
+    alert("Price approaching 4H FVG Bear - " + str.tostring(htf_b4h_px, "#.#####"), alert.freq_once_per_bar)
+if fire_u4h
+    alert("Price approaching 4H FVG Bull - " + str.tostring(htf_u4h_px, "#.#####"), alert.freq_once_per_bar)
+if fire_bd
+    alert("Price approaching D FVG Bear - " + str.tostring(htf_bd_px, "#.#####"), alert.freq_once_per_bar)
+if fire_ud
+    alert("Price approaching D FVG Bull - " + str.tostring(htf_ud_px, "#.#####"), alert.freq_once_per_bar)
+if fire_bw
+    alert("Price approaching W FVG Bear - " + str.tostring(htf_bw_px, "#.#####"), alert.freq_once_per_bar)
+if fire_uw
+    alert("Price approaching W FVG Bull - " + str.tostring(htf_uw_px, "#.#####"), alert.freq_once_per_bar)
+if fire_bm
+    alert("Price approaching MN FVG Bear - " + str.tostring(htf_bm_px, "#.#####"), alert.freq_once_per_bar)
+if fire_um
+    alert("Price approaching MN FVG Bull - " + str.tostring(htf_um_px, "#.#####"), alert.freq_once_per_bar)
+
 // Generic chart-native imbalances: many can be concurrently active (unlike
 // the dedicated HTF zones, which track one bear + one bull gap per TF), so
 // they're kept as a running list of [price, origin bar] pairs. Mitigation
 // (not distance) is the only removal criterion — a gap that's temporarily
 // out of range still exists and reappears in the merge render once price
 // comes back within imb_dist, instead of being forgotten.
-var float[] bear_fvg_px  = array.new_float(0)
-var int[]   bear_fvg_org = array.new_int(0)
-var float[] bull_fvg_px  = array.new_float(0)
-var int[]   bull_fvg_org = array.new_int(0)
+var float[] bear_fvg_px    = array.new_float(0)
+var int[]   bear_fvg_org   = array.new_int(0)
+var bool[]  bear_fvg_armed = array.new_bool(0)
+var float[] bull_fvg_px    = array.new_float(0)
+var int[]   bull_fvg_org   = array.new_int(0)
+var bool[]  bull_fvg_armed = array.new_bool(0)
 
 if show_fvg_vis
     // Use fully completed bars [3] and [1] (never the still-forming bar [0])
     // so the gap size is final and doesn't flicker as the live candle forms.
     bear_vis_gap = low[3] - high[1]
     if bear_vis_gap >= fvg_min_gap
-        array.push(bear_fvg_px,  high[1])
-        array.push(bear_fvg_org, bar_index - 1)
+        array.push(bear_fvg_px,    high[1])
+        array.push(bear_fvg_org,   bar_index - 1)
+        array.push(bear_fvg_armed, true)
         if array.size(bear_fvg_px) > 20
             array.shift(bear_fvg_px)
             array.shift(bear_fvg_org)
+            array.shift(bear_fvg_armed)
 
     bull_vis_gap = low[1] - high[3]
     if bull_vis_gap >= fvg_min_gap
-        array.push(bull_fvg_px,  low[1])
-        array.push(bull_fvg_org, bar_index - 1)
+        array.push(bull_fvg_px,    low[1])
+        array.push(bull_fvg_org,   bar_index - 1)
+        array.push(bull_fvg_armed, true)
         if array.size(bull_fvg_px) > 20
             array.shift(bull_fvg_px)
             array.shift(bull_fvg_org)
+            array.shift(bull_fvg_armed)
 
     n_bear_fvg = array.size(bear_fvg_px)
     if n_bear_fvg > 0
         for j = 0 to n_bear_fvg - 1
             i = n_bear_fvg - 1 - j
             if high >= array.get(bear_fvg_px, i)
-                array.remove(bear_fvg_px,  i)
-                array.remove(bear_fvg_org, i)
+                array.remove(bear_fvg_px,    i)
+                array.remove(bear_fvg_org,   i)
+                array.remove(bear_fvg_armed, i)
 
     n_bull_fvg = array.size(bull_fvg_px)
     if n_bull_fvg > 0
         for j = 0 to n_bull_fvg - 1
             i = n_bull_fvg - 1 - j
             if low <= array.get(bull_fvg_px, i)
-                array.remove(bull_fvg_px,  i)
-                array.remove(bull_fvg_org, i)
+                array.remove(bull_fvg_px,    i)
+                array.remove(bull_fvg_org,   i)
+                array.remove(bull_fvg_armed, i)
+
+    // Proximity alerts for each still-active generic imbalance
+    if use_near_alert
+        n_bear_al = array.size(bear_fvg_px)
+        if n_bear_al > 0
+            for k = 0 to n_bear_al - 1
+                bpx = array.get(bear_fvg_px, k)
+                if f_near(bpx) and array.get(bear_fvg_armed, k)
+                    alert("Price approaching " + chart_tf_lbl + " FVG Bear - " + str.tostring(bpx, "#.#####"), alert.freq_once_per_bar)
+                    array.set(bear_fvg_armed, k, false)
+                if f_far(bpx)
+                    array.set(bear_fvg_armed, k, true)
+        n_bull_al = array.size(bull_fvg_px)
+        if n_bull_al > 0
+            for k = 0 to n_bull_al - 1
+                bpx = array.get(bull_fvg_px, k)
+                if f_near(bpx) and array.get(bull_fvg_armed, k)
+                    alert("Price approaching " + chart_tf_lbl + " FVG Bull - " + str.tostring(bpx, "#.#####"), alert.freq_once_per_bar)
+                    array.set(bull_fvg_armed, k, false)
+                if f_far(bpx)
+                    array.set(bull_fvg_armed, k, true)
 
 
 // Delete all managed drawings from previous bar
