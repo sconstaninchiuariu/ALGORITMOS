@@ -84,8 +84,9 @@ show_fvg_vis = input.bool(true,    "Show FVG Imbalance Boxes (all unmitigated)",
 merge_tol    = input.float(0.0005, "Zone Merge Tolerance",  0.00010, 0.005, 0.00010,   group = GVIS)
 
 var string GALR = "Proximity Alerts"
-use_near_alert = input.bool(true, "Alert when price nears a POI zone", group = GALR)
-near_alert_pct = input.float(0.10, "Proximity Distance (% of price) — forex baseline; auto x2 on futures", 0.02, 2.0, 0.01, group = GALR)
+use_near_alert       = input.bool(true, "Alert when price nears a POI zone", group = GALR)
+near_alert_pct       = input.float(0.20, "Create Alert at Distance (% of price) — forex baseline; auto x2 on futures", 0.02, 2.0, 0.01, group = GALR)
+near_alert_reset_pct = input.float(1.00, "Remove Alert Beyond Distance (% of price)", 0.10, 5.0, 0.10, group = GALR)
 
 // Scale the visible distance down on lower chart timeframes (e.g. 1m) so wide
 // HTF boxes (Weekly/Monthly) don't force the visible price range to stretch and
@@ -96,8 +97,10 @@ tf_scale     = math.min(1.0, math.max(0.15, tf_sec / 3600.0))
 poi_pct_eff  = (syminfo.type == "futures" ? max_poi_pct * 2.0 : max_poi_pct) * tf_scale
 max_poi_dist = close * poi_pct_eff / 100.0
 
-near_pct_eff = syminfo.type == "futures" ? near_alert_pct * 2.0 : near_alert_pct
-near_dist    = close * near_pct_eff / 100.0
+near_pct_eff       = syminfo.type == "futures" ? near_alert_pct * 2.0 : near_alert_pct
+near_dist          = close * near_pct_eff / 100.0
+near_reset_pct_eff = syminfo.type == "futures" ? near_alert_reset_pct * 2.0 : near_alert_reset_pct
+near_reset_dist    = close * near_reset_pct_eff / 100.0
 
 // Daily/Weekly/Monthly imbalances are always shown regardless of distance —
 // only 1H/4H zones and the chart-native IMB boxes get hidden when far away.
@@ -166,19 +169,31 @@ can_trade = trades_today < max_day_tr and strategy.position_size == 0
 
 is_new_day = ta.change(time("D")) != 0
 
-var float cur_dh = na
-var float cur_dl = na
-var float pdh    = na
-var float pdl    = na
+var float cur_dh     = na
+var float cur_dl     = na
+var int   cur_dh_bar = na
+var int   cur_dl_bar = na
+var float pdh        = na
+var float pdl        = na
+var int   pdh_bar     = na
+var int   pdl_bar     = na
 
 if is_new_day
-    pdh    := cur_dh
-    pdl    := cur_dl
-    cur_dh := high
-    cur_dl := low
+    pdh        := cur_dh
+    pdl        := cur_dl
+    pdh_bar    := cur_dh_bar
+    pdl_bar    := cur_dl_bar
+    cur_dh     := high
+    cur_dl     := low
+    cur_dh_bar := bar_index
+    cur_dl_bar := bar_index
 else
-    cur_dh := na(cur_dh) ? high : math.max(cur_dh, high)
-    cur_dl := na(cur_dl) ? low  : math.min(cur_dl, low)
+    if na(cur_dh) or high > cur_dh
+        cur_dh     := high
+        cur_dh_bar := bar_index
+    if na(cur_dl) or low < cur_dl
+        cur_dl     := low
+        cur_dl_bar := bar_index
 
 // =============================================================
 // PREVIOUS WEEK HIGH / LOW
@@ -186,19 +201,31 @@ else
 
 is_new_week = ta.change(time("W")) != 0
 
-var float cur_wh = na
-var float cur_wl = na
-var float pwh    = na
-var float pwl    = na
+var float cur_wh     = na
+var float cur_wl     = na
+var int   cur_wh_bar = na
+var int   cur_wl_bar = na
+var float pwh        = na
+var float pwl        = na
+var int   pwh_bar     = na
+var int   pwl_bar     = na
 
 if is_new_week
-    pwh    := cur_wh
-    pwl    := cur_wl
-    cur_wh := high
-    cur_wl := low
+    pwh        := cur_wh
+    pwl        := cur_wl
+    pwh_bar    := cur_wh_bar
+    pwl_bar    := cur_wl_bar
+    cur_wh     := high
+    cur_wl     := low
+    cur_wh_bar := bar_index
+    cur_wl_bar := bar_index
 else
-    cur_wh := na(cur_wh) ? high : math.max(cur_wh, high)
-    cur_wl := na(cur_wl) ? low  : math.min(cur_wl, low)
+    if na(cur_wh) or high > cur_wh
+        cur_wh     := high
+        cur_wh_bar := bar_index
+    if na(cur_wl) or low < cur_wl
+        cur_wl     := low
+        cur_wl_bar := bar_index
 
 // =============================================================
 // ASIA RANGE  (22:00 - 07:00 UTC)
@@ -206,19 +233,31 @@ else
 
 in_asia = h_utc >= 22 or h_utc < 7
 
-var float asia_live_h = na
-var float asia_live_l = na
-var float asia_h      = na
-var float asia_l      = na
+var float asia_live_h     = na
+var float asia_live_l     = na
+var int   asia_live_h_bar = na
+var int   asia_live_l_bar = na
+var float asia_h          = na
+var float asia_l          = na
+var int   asia_h_bar      = na
+var int   asia_l_bar      = na
 
 if in_asia
-    asia_live_h := na(asia_live_h) ? high : math.max(asia_live_h, high)
-    asia_live_l := na(asia_live_l) ? low  : math.min(asia_live_l, low)
+    if na(asia_live_h) or high > asia_live_h
+        asia_live_h     := high
+        asia_live_h_bar := bar_index
+    if na(asia_live_l) or low < asia_live_l
+        asia_live_l     := low
+        asia_live_l_bar := bar_index
 else if in_asia[1]
-    asia_h      := asia_live_h
-    asia_l      := asia_live_l
-    asia_live_h := na
-    asia_live_l := na
+    asia_h          := asia_live_h
+    asia_l          := asia_live_l
+    asia_h_bar      := asia_live_h_bar
+    asia_l_bar      := asia_live_l_bar
+    asia_live_h     := na
+    asia_live_l     := na
+    asia_live_h_bar := na
+    asia_live_l_bar := na
 
 asia_closed = not in_asia and in_asia[1]
 
@@ -245,17 +284,22 @@ var float[] swh_hist = array.new_float(0)
 var float[] swl_hist = array.new_float(0)
 var float   last_eqh = na
 var float   last_eql = na
+var int     last_eqh_bar = na
+var int     last_eql_bar = na
 
 eqh_new = false
 eql_new = false
 
+// ta.pivothigh/pivotlow(src, sw_len, sw_len) confirms the pivot sw_len bars
+// after it printed, so the actual pivot bar is bar_index - sw_len.
 if use_eql and eql_tf_ok and not na(raw_swh)
     sz = array.size(swh_hist)
     if sz > 0
         for i = 0 to sz - 1
             if math.abs(raw_swh - array.get(swh_hist, i)) <= eql_tol
-                eqh_new  := true
-                last_eqh := raw_swh
+                eqh_new      := true
+                last_eqh     := raw_swh
+                last_eqh_bar := bar_index - sw_len
                 break
     if array.size(swh_hist) >= eql_lookback
         array.shift(swh_hist)
@@ -266,8 +310,9 @@ if use_eql and eql_tf_ok and not na(raw_swl)
     if sz > 0
         for i = 0 to sz - 1
             if math.abs(raw_swl - array.get(swl_hist, i)) <= eql_tol
-                eql_new  := true
-                last_eql := raw_swl
+                eql_new      := true
+                last_eql     := raw_swl
+                last_eql_bar := bar_index - sw_len
                 break
     if array.size(swl_hist) >= eql_lookback
         array.shift(swl_hist)
@@ -559,63 +604,114 @@ if not na(last_eql) and not eql_swept and low <= last_eql
     eql_swept := true
 
 // =============================================================
-// PROXIMITY ALERTS — fire once when price first enters near_dist of a
-// zone (not every bar it stays close), reset when the zone is swept or
-// its underlying level refreshes at the next period.
+// PROXIMITY ALERTS — hysteresis armed/disarmed per zone:
+//   - "armed" zone whose distance drops to <= near_dist (0.2%) fires
+//     once and disarms, so it doesn't re-fire every bar while price
+//     lingers close.
+//   - it only re-arms once price moves away beyond near_reset_dist
+//     (1%), so a small wiggle around the 0.2% line can't spam alerts.
+//   - also re-arms whenever the underlying level itself refreshes
+//     (new day/week/Asia session/EQH-EQL) since that's effectively a
+//     brand new zone.
 // =============================================================
 
 f_near(float px) =>
     not na(px) and math.abs(close - px) <= near_dist
 
-var bool pdh_was_near    = false
-var bool pdl_was_near    = false
-var bool pwh_was_near    = false
-var bool pwl_was_near    = false
-var bool asiah_was_near  = false
-var bool asial_was_near  = false
-var bool eqh_was_near    = false
-var bool eql_was_near    = false
+f_far(float px) =>
+    na(px) or math.abs(close - px) > near_reset_dist
+
+var bool pdh_armed   = true
+var bool pdl_armed   = true
+var bool pwh_armed   = true
+var bool pwl_armed   = true
+var bool asiah_armed = true
+var bool asial_armed = true
+var bool eqh_armed   = true
+var bool eql_armed   = true
 
 if is_new_day
-    pdh_was_near   := false
-    pdl_was_near   := false
+    pdh_armed   := true
+    pdl_armed   := true
 if is_new_week
-    pwh_was_near   := false
-    pwl_was_near   := false
+    pwh_armed   := true
+    pwl_armed   := true
 if asia_closed
-    asiah_was_near := false
-    asial_was_near := false
+    asiah_armed := true
+    asial_armed := true
 if eqh_new
-    eqh_was_near   := false
+    eqh_armed   := true
 if eql_new
-    eql_was_near   := false
+    eql_armed   := true
 
-pdh_near_now   = use_near_alert and use_pdhl and not pdh_swept    and f_near(pdh)
-pdl_near_now   = use_near_alert and use_pdhl and not pdl_swept    and f_near(pdl)
-pwh_near_now   = use_near_alert and use_pwhl and not pwh_swept    and f_near(pwh)
-pwl_near_now   = use_near_alert and use_pwhl and not pwl_swept    and f_near(pwl)
-asiah_near_now = use_near_alert and use_asia and not asia_h_swept and f_near(asia_h)
-asial_near_now = use_near_alert and use_asia and not asia_l_swept and f_near(asia_l)
-eqh_near_now   = use_near_alert and use_eql  and eql_tf_ok and not eqh_swept and f_near(last_eqh)
-eql_near_now   = use_near_alert and use_eql  and eql_tf_ok and not eql_swept and f_near(last_eql)
+pdh_cond   = use_near_alert and use_pdhl and not pdh_swept    and f_near(pdh)
+pdl_cond   = use_near_alert and use_pdhl and not pdl_swept    and f_near(pdl)
+pwh_cond   = use_near_alert and use_pwhl and not pwh_swept    and f_near(pwh)
+pwl_cond   = use_near_alert and use_pwhl and not pwl_swept    and f_near(pwl)
+asiah_cond = use_near_alert and use_asia and not asia_h_swept and f_near(asia_h)
+asial_cond = use_near_alert and use_asia and not asia_l_swept and f_near(asia_l)
+eqh_cond   = use_near_alert and use_eql  and eql_tf_ok and not eqh_swept and f_near(last_eqh)
+eql_cond   = use_near_alert and use_eql  and eql_tf_ok and not eql_swept and f_near(last_eql)
 
-pdh_near_alert   = pdh_near_now   and not pdh_was_near
-pdl_near_alert   = pdl_near_now   and not pdl_was_near
-pwh_near_alert   = pwh_near_now   and not pwh_was_near
-pwl_near_alert   = pwl_near_now   and not pwl_was_near
-asiah_near_alert = asiah_near_now and not asiah_was_near
-asial_near_alert = asial_near_now and not asial_was_near
-eqh_near_alert   = eqh_near_now   and not eqh_was_near
-eql_near_alert   = eql_near_now   and not eql_was_near
+pdh_near_alert   = pdh_armed   and pdh_cond
+pdl_near_alert   = pdl_armed   and pdl_cond
+pwh_near_alert   = pwh_armed   and pwh_cond
+pwl_near_alert   = pwl_armed   and pwl_cond
+asiah_near_alert = asiah_armed and asiah_cond
+asial_near_alert = asial_armed and asial_cond
+eqh_near_alert   = eqh_armed   and eqh_cond
+eql_near_alert   = eql_armed   and eql_cond
 
-pdh_was_near   := pdh_near_now
-pdl_was_near   := pdl_near_now
-pwh_was_near   := pwh_near_now
-pwl_was_near   := pwl_near_now
-asiah_was_near := asiah_near_now
-asial_was_near := asial_near_now
-eqh_was_near   := eqh_near_now
-eql_was_near   := eql_near_now
+if pdh_near_alert
+    pdh_armed   := false
+if pdl_near_alert
+    pdl_armed   := false
+if pwh_near_alert
+    pwh_armed   := false
+if pwl_near_alert
+    pwl_armed   := false
+if asiah_near_alert
+    asiah_armed := false
+if asial_near_alert
+    asial_armed := false
+if eqh_near_alert
+    eqh_armed   := false
+if eql_near_alert
+    eql_armed   := false
+
+if f_far(pdh)
+    pdh_armed   := true
+if f_far(pdl)
+    pdl_armed   := true
+if f_far(pwh)
+    pwh_armed   := true
+if f_far(pwl)
+    pwl_armed   := true
+if f_far(asia_h)
+    asiah_armed := true
+if f_far(asia_l)
+    asial_armed := true
+if f_far(last_eqh)
+    eqh_armed   := true
+if f_far(last_eql)
+    eql_armed   := true
+
+if pdh_near_alert
+    alert("Price approaching PDH (Previous Day High) - " + str.tostring(pdh, "#.#####"), alert.freq_once_per_bar)
+if pdl_near_alert
+    alert("Price approaching PDL (Previous Day Low) - " + str.tostring(pdl, "#.#####"), alert.freq_once_per_bar)
+if pwh_near_alert
+    alert("Price approaching PWH (Previous Week High) - " + str.tostring(pwh, "#.#####"), alert.freq_once_per_bar)
+if pwl_near_alert
+    alert("Price approaching PWL (Previous Week Low) - " + str.tostring(pwl, "#.#####"), alert.freq_once_per_bar)
+if asiah_near_alert
+    alert("Price approaching Asia Range High - " + str.tostring(asia_h, "#.#####"), alert.freq_once_per_bar)
+if asial_near_alert
+    alert("Price approaching Asia Range Low - " + str.tostring(asia_l, "#.#####"), alert.freq_once_per_bar)
+if eqh_near_alert
+    alert("Price approaching Equal Highs liquidity pool - " + str.tostring(last_eqh, "#.#####"), alert.freq_once_per_bar)
+if eql_near_alert
+    alert("Price approaching Equal Lows liquidity pool - " + str.tostring(last_eql, "#.#####"), alert.freq_once_per_bar)
 
 // Delete all managed drawings from previous bar
 n_ml = array.size(managed_poi_lines)
@@ -630,11 +726,12 @@ if n_mlb > 0
 array.clear(managed_poi_labels)
 
 if show_levels
-    poi_px = array.new_float(0)
-    poi_nm = array.new_string(0)
-    poi_cl = array.new<color>(0)
-    poi_st = array.new_string(0)
-    poi_pr = array.new_int(0)
+    poi_px  = array.new_float(0)
+    poi_nm  = array.new_string(0)
+    poi_cl  = array.new<color>(0)
+    poi_st  = array.new_string(0)
+    poi_pr  = array.new_int(0)
+    poi_bar = array.new_int(0)
 
     if use_pdhl
         if poi_in_rng(pdh) and not pdh_swept
@@ -643,12 +740,14 @@ if show_levels
             array.push(poi_cl, color.new(color.red,    0))
             array.push(poi_st, line.style_dashed)
             array.push(poi_pr, 10)
+            array.push(poi_bar, nz(pdh_bar, bar_index - 1))
         if poi_in_rng(pdl) and not pdl_swept
             array.push(poi_px, pdl)
             array.push(poi_nm, "PDL")
             array.push(poi_cl, color.new(color.teal,   0))
             array.push(poi_st, line.style_dashed)
             array.push(poi_pr, 11)
+            array.push(poi_bar, nz(pdl_bar, bar_index - 1))
     if use_pwhl
         if poi_in_rng(pwh) and not pwh_swept
             array.push(poi_px, pwh)
@@ -656,12 +755,14 @@ if show_levels
             array.push(poi_cl, color.new(color.maroon, 0))
             array.push(poi_st, line.style_solid)
             array.push(poi_pr, 20)
+            array.push(poi_bar, nz(pwh_bar, bar_index - 1))
         if poi_in_rng(pwl) and not pwl_swept
             array.push(poi_px, pwl)
             array.push(poi_nm, "PWL")
             array.push(poi_cl, color.new(color.navy,   0))
             array.push(poi_st, line.style_solid)
             array.push(poi_pr, 21)
+            array.push(poi_bar, nz(pwl_bar, bar_index - 1))
     if use_asia
         if poi_in_rng(asia_h) and not asia_h_swept
             array.push(poi_px, asia_h)
@@ -669,12 +770,14 @@ if show_levels
             array.push(poi_cl, color.new(color.purple, 0))
             array.push(poi_st, line.style_dotted)
             array.push(poi_pr, 30)
+            array.push(poi_bar, nz(asia_h_bar, bar_index - 1))
         if poi_in_rng(asia_l) and not asia_l_swept
             array.push(poi_px, asia_l)
             array.push(poi_nm, "Asia L")
             array.push(poi_cl, color.new(color.purple, 0))
             array.push(poi_st, line.style_dotted)
             array.push(poi_pr, 31)
+            array.push(poi_bar, nz(asia_l_bar, bar_index - 1))
     if use_eql and eql_tf_ok
         if poi_in_rng(last_eqh) and not eqh_swept
             array.push(poi_px, last_eqh)
@@ -682,12 +785,14 @@ if show_levels
             array.push(poi_cl, color.new(color.orange, 0))
             array.push(poi_st, line.style_dashed)
             array.push(poi_pr, 40)
+            array.push(poi_bar, nz(last_eqh_bar, bar_index - 1))
         if poi_in_rng(last_eql) and not eql_swept
             array.push(poi_px, last_eql)
             array.push(poi_nm, "EQL")
             array.push(poi_cl, color.new(color.orange, 0))
             array.push(poi_st, line.style_dashed)
             array.push(poi_pr, 41)
+            array.push(poi_bar, nz(last_eql_bar, bar_index - 1))
 
     n_poi = array.size(poi_px)
     if n_poi > 0
@@ -698,11 +803,12 @@ if show_levels
             si = array.get(sorted_idx, ii)
             if array.get(used_flags, si)
                 continue
-            g_px = array.get(poi_px, si)
-            g_nm = array.get(poi_nm, si)
-            g_cl = array.get(poi_cl, si)
-            g_st = array.get(poi_st, si)
-            g_pr = array.get(poi_pr, si)
+            g_px  = array.get(poi_px, si)
+            g_nm  = array.get(poi_nm, si)
+            g_cl  = array.get(poi_cl, si)
+            g_st  = array.get(poi_st, si)
+            g_pr  = array.get(poi_pr, si)
+            g_bar = array.get(poi_bar, si)
             array.set(used_flags, si, true)
 
             jj = ii + 1
@@ -715,16 +821,17 @@ if show_levels
                     prj = array.get(poi_pr, sj)
                     nmj = array.get(poi_nm, sj)
                     if prj < g_pr
-                        g_nm := nmj + " + " + g_nm
-                        g_cl := array.get(poi_cl, sj)
-                        g_st := array.get(poi_st, sj)
-                        g_pr := prj
+                        g_nm  := nmj + " + " + g_nm
+                        g_cl  := array.get(poi_cl, sj)
+                        g_st  := array.get(poi_st, sj)
+                        g_pr  := prj
+                        g_bar := array.get(poi_bar, sj)
                     else
                         g_nm := g_nm + " + " + nmj
                     array.set(used_flags, sj, true)
                 jj := jj + 1
 
-            new_l  = line.new(bar_index - 1, g_px, bar_index, g_px, extend = extend.right, color = g_cl, style = g_st, width = 1)
+            new_l  = line.new(g_bar, g_px, bar_index, g_px, extend = extend.right, color = g_cl, style = g_st, width = 1)
             new_lb = label.new(bar_index, g_px, g_nm, style = label.style_none, textcolor = g_cl, size = size.small)
             array.push(managed_poi_lines,  new_l)
             array.push(managed_poi_labels, new_lb)
