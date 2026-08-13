@@ -80,6 +80,7 @@ show_levels  = input.bool(true,    "Show POI Lines (PDH/PDL, PWH/PWL, Asia, EQH/
 show_kz_bg   = input.bool(true,    "Show Kill Zone Background",                         group = GVIS)
 show_sweep   = input.bool(true,    "Show Sweep Markers",                                group = GVIS)
 max_poi_pct  = input.float(0.50,   "Max POI Distance (% of price, hide zones beyond) — forex baseline; auto x2 on futures", 0.05, 5.0, 0.05, group = GVIS)
+dwm_poi_mult = input.float(3.0,    "D/W/M Distance Multiplier (x Max POI Distance) — wider leash, still bounded", 1.0, 10.0, 0.5, group = GVIS)
 show_fvg_vis = input.bool(true,    "Show FVG Imbalance Boxes (all unmitigated)",        group = GVIS)
 merge_tol    = input.float(0.0005, "Zone Merge Tolerance",  0.00010, 0.005, 0.00010,   group = GVIS)
 
@@ -102,9 +103,11 @@ near_dist          = close * near_pct_eff / 100.0
 near_reset_pct_eff = syminfo.type == "futures" ? near_alert_reset_pct * 2.0 : near_alert_reset_pct
 near_reset_dist    = close * near_reset_pct_eff / 100.0
 
-// Daily/Weekly/Monthly imbalances are always shown regardless of distance —
-// only 1H/4H zones and the chart-native IMB boxes get hidden when far away.
-max_poi_dist_dwm = 1e9
+// Daily/Weekly/Monthly imbalances get a wider leash than 1H/4H (they carry
+// more context) but are still bounded — an unconditional "always show" was
+// forcing the y-axis to stretch to include far-away MN/W boxes and collapsing
+// the chart exactly like the 1H/4H zones used to before the distance filter.
+max_poi_dist_dwm = max_poi_dist * dwm_poi_mult
 chart_is_dwm      = timeframe.isdaily or timeframe.isweekly or timeframe.ismonthly
 
 f_zone_far(float top, float bottom) =>
