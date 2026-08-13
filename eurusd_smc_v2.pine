@@ -80,8 +80,8 @@ show_levels  = input.bool(true,    "Show POI Lines (PDH/PDL, PWH/PWL, Asia, EQH/
 show_kz_bg   = input.bool(true,    "Show Kill Zone Background",                         group = GVIS)
 show_sweep   = input.bool(true,    "Show Sweep Markers",                                group = GVIS)
 max_poi_pct  = input.float(0.50,   "Max POI Distance (% of price, hide zones beyond) — forex baseline; auto x2 on futures", 0.05, 5.0, 0.05, group = GVIS)
-dwm_poi_mult = input.float(3.0,    "D/W/M Distance Multiplier (x Max POI Distance) — wider leash, still bounded", 1.0, 10.0, 0.5, group = GVIS)
 show_fvg_vis = input.bool(true,    "Show FVG Imbalance Boxes (all unmitigated)",        group = GVIS)
+imb_max_pct  = input.float(1.00,   "Max Imbalance Distance (% of price) — same rule on every timeframe, forex baseline; auto x2 on futures", 0.10, 5.0, 0.10, group = GVIS)
 merge_tol    = input.float(0.0005, "Zone Merge Tolerance",  0.00010, 0.005, 0.00010,   group = GVIS)
 
 var string GALR = "Proximity Alerts"
@@ -103,15 +103,16 @@ near_dist          = close * near_pct_eff / 100.0
 near_reset_pct_eff = syminfo.type == "futures" ? near_alert_reset_pct * 2.0 : near_alert_reset_pct
 near_reset_dist    = close * near_reset_pct_eff / 100.0
 
-// Daily/Weekly/Monthly imbalances get a wider leash than 1H/4H (they carry
-// more context) but are still bounded — an unconditional "always show" was
-// forcing the y-axis to stretch to include far-away MN/W boxes and collapsing
-// the chart exactly like the 1H/4H zones used to before the distance filter.
-max_poi_dist_dwm = max_poi_dist * dwm_poi_mult
-chart_is_dwm      = timeframe.isdaily or timeframe.isweekly or timeframe.ismonthly
+// Imbalances (FVG) use ONE flat distance rule on every timeframe and every
+// chart TF — 1% of price by default. Earlier versions gave D/W/M a wider or
+// unlimited leash and skipped the filter entirely on Daily/Weekly/Monthly
+// charts; both caused a flood of unmitigated imbalances to stay visible when
+// zooming out. Now it's simple: farther than imb_dist away → hidden, period.
+imb_pct_eff = syminfo.type == "futures" ? imb_max_pct * 2.0 : imb_max_pct
+imb_dist    = close * imb_pct_eff / 100.0
 
 f_zone_far(float top, float bottom) =>
-    not chart_is_dwm and (close > top ? close - top : close < bottom ? bottom - close : 0.0) > max_poi_dist
+    (close > top ? close - top : close < bottom ? bottom - close : 0.0) > imb_dist
 
 // Formats a timeframe.period string ("1","5","60","240","D","W","M") into a
 // short human label ("1m","5m","1H","4H","D","W","MN") for imbalance labels.
@@ -975,46 +976,46 @@ f_htf_zone_l(bool new_edge, bool gone_edge, bool active, bool mitigated, line ln
 if show_levels
     // --- 1H ---
     if use_htf_1h
-        [tmp_htf_b1h_line, tmp_htf_b1h_lbl] = f_htf_zone_s(new_bear_1h, gone_bear_1h, htf_bear_1h, high >= h1_h0, htf_b1h_line, htf_b1h_lbl, h1_h0, max_poi_dist, "1H FVG Bear", color.new(color.red, 30))
+        [tmp_htf_b1h_line, tmp_htf_b1h_lbl] = f_htf_zone_s(new_bear_1h, gone_bear_1h, htf_bear_1h, high >= h1_h0, htf_b1h_line, htf_b1h_lbl, h1_h0, imb_dist, "1H FVG Bear", color.new(color.red, 30))
         htf_b1h_line := tmp_htf_b1h_line
         htf_b1h_lbl := tmp_htf_b1h_lbl
-        [tmp_htf_u1h_line, tmp_htf_u1h_lbl] = f_htf_zone_s(new_bull_1h, gone_bull_1h, htf_bull_1h, low <= h1_l0, htf_u1h_line, htf_u1h_lbl, h1_l0, max_poi_dist, "1H FVG Bull", color.new(color.teal, 30))
+        [tmp_htf_u1h_line, tmp_htf_u1h_lbl] = f_htf_zone_s(new_bull_1h, gone_bull_1h, htf_bull_1h, low <= h1_l0, htf_u1h_line, htf_u1h_lbl, h1_l0, imb_dist, "1H FVG Bull", color.new(color.teal, 30))
         htf_u1h_line := tmp_htf_u1h_line
         htf_u1h_lbl := tmp_htf_u1h_lbl
 
     // --- 4H ---
     if use_htf_4h
-        [tmp_htf_b4h_line, tmp_htf_b4h_lbl] = f_htf_zone_s(new_bear_4h, gone_bear_4h, htf_bear_4h, high >= h2_h0, htf_b4h_line, htf_b4h_lbl, h2_h0, max_poi_dist, "4H FVG Bear", color.new(color.red, 20))
+        [tmp_htf_b4h_line, tmp_htf_b4h_lbl] = f_htf_zone_s(new_bear_4h, gone_bear_4h, htf_bear_4h, high >= h2_h0, htf_b4h_line, htf_b4h_lbl, h2_h0, imb_dist, "4H FVG Bear", color.new(color.red, 20))
         htf_b4h_line := tmp_htf_b4h_line
         htf_b4h_lbl := tmp_htf_b4h_lbl
-        [tmp_htf_u4h_line, tmp_htf_u4h_lbl] = f_htf_zone_s(new_bull_4h, gone_bull_4h, htf_bull_4h, low <= h2_l0, htf_u4h_line, htf_u4h_lbl, h2_l0, max_poi_dist, "4H FVG Bull", color.new(color.teal, 20))
+        [tmp_htf_u4h_line, tmp_htf_u4h_lbl] = f_htf_zone_s(new_bull_4h, gone_bull_4h, htf_bull_4h, low <= h2_l0, htf_u4h_line, htf_u4h_lbl, h2_l0, imb_dist, "4H FVG Bull", color.new(color.teal, 20))
         htf_u4h_line := tmp_htf_u4h_line
         htf_u4h_lbl := tmp_htf_u4h_lbl
 
     // --- Daily ---
     if use_htf_d
-        [tmp_htf_bd_line, tmp_htf_bd_lbl] = f_htf_zone_l(new_bear_d, gone_bear_d, htf_bear_d, high >= h3_h0, htf_bd_line, htf_bd_lbl, h3_h0, max_poi_dist_dwm, "D FVG Bear", color.new(color.red, 10))
+        [tmp_htf_bd_line, tmp_htf_bd_lbl] = f_htf_zone_l(new_bear_d, gone_bear_d, htf_bear_d, high >= h3_h0, htf_bd_line, htf_bd_lbl, h3_h0, imb_dist, "D FVG Bear", color.new(color.red, 10))
         htf_bd_line := tmp_htf_bd_line
         htf_bd_lbl := tmp_htf_bd_lbl
-        [tmp_htf_ud_line, tmp_htf_ud_lbl] = f_htf_zone_l(new_bull_d, gone_bull_d, htf_bull_d, low <= h3_l0, htf_ud_line, htf_ud_lbl, h3_l0, max_poi_dist_dwm, "D FVG Bull", color.new(color.teal, 10))
+        [tmp_htf_ud_line, tmp_htf_ud_lbl] = f_htf_zone_l(new_bull_d, gone_bull_d, htf_bull_d, low <= h3_l0, htf_ud_line, htf_ud_lbl, h3_l0, imb_dist, "D FVG Bull", color.new(color.teal, 10))
         htf_ud_line := tmp_htf_ud_line
         htf_ud_lbl := tmp_htf_ud_lbl
 
     // --- Weekly ---
     if use_htf_w
-        [tmp_htf_bw_line, tmp_htf_bw_lbl] = f_htf_zone_l(new_bear_w, gone_bear_w, htf_bear_w, high >= hw_h0, htf_bw_line, htf_bw_lbl, hw_h0, max_poi_dist_dwm, "W FVG Bear", color.new(color.red, 5))
+        [tmp_htf_bw_line, tmp_htf_bw_lbl] = f_htf_zone_l(new_bear_w, gone_bear_w, htf_bear_w, high >= hw_h0, htf_bw_line, htf_bw_lbl, hw_h0, imb_dist, "W FVG Bear", color.new(color.red, 5))
         htf_bw_line := tmp_htf_bw_line
         htf_bw_lbl := tmp_htf_bw_lbl
-        [tmp_htf_uw_line, tmp_htf_uw_lbl] = f_htf_zone_l(new_bull_w, gone_bull_w, htf_bull_w, low <= hw_l0, htf_uw_line, htf_uw_lbl, hw_l0, max_poi_dist_dwm, "W FVG Bull", color.new(color.teal, 5))
+        [tmp_htf_uw_line, tmp_htf_uw_lbl] = f_htf_zone_l(new_bull_w, gone_bull_w, htf_bull_w, low <= hw_l0, htf_uw_line, htf_uw_lbl, hw_l0, imb_dist, "W FVG Bull", color.new(color.teal, 5))
         htf_uw_line := tmp_htf_uw_line
         htf_uw_lbl := tmp_htf_uw_lbl
 
     // --- Monthly ---
     if use_htf_m
-        [tmp_htf_bm_line, tmp_htf_bm_lbl] = f_htf_zone_l(new_bear_m, gone_bear_m, htf_bear_m, high >= hm_h0, htf_bm_line, htf_bm_lbl, hm_h0, max_poi_dist_dwm, "MN FVG Bear", color.new(color.red, 0))
+        [tmp_htf_bm_line, tmp_htf_bm_lbl] = f_htf_zone_l(new_bear_m, gone_bear_m, htf_bear_m, high >= hm_h0, htf_bm_line, htf_bm_lbl, hm_h0, imb_dist, "MN FVG Bear", color.new(color.red, 0))
         htf_bm_line := tmp_htf_bm_line
         htf_bm_lbl := tmp_htf_bm_lbl
-        [tmp_htf_um_line, tmp_htf_um_lbl] = f_htf_zone_l(new_bull_m, gone_bull_m, htf_bull_m, low <= hm_l0, htf_um_line, htf_um_lbl, hm_l0, max_poi_dist_dwm, "MN FVG Bull", color.new(color.teal, 0))
+        [tmp_htf_um_line, tmp_htf_um_lbl] = f_htf_zone_l(new_bull_m, gone_bull_m, htf_bull_m, low <= hm_l0, htf_um_line, htf_um_lbl, hm_l0, imb_dist, "MN FVG Bull", color.new(color.teal, 0))
         htf_um_line := tmp_htf_um_line
         htf_um_lbl := tmp_htf_um_lbl
 
