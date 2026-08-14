@@ -1070,6 +1070,16 @@ if n_mlb > 0
         label.delete(array.get(managed_poi_labels, i))
 array.clear(managed_poi_labels)
 
+// A swept level that triggered the CURRENT active sweep->MSS->entry cycle
+// turns green with a "✓" instead of just disappearing, and stays visible
+// regardless of distance (it's part of the active setup, not just a
+// passive structural level) until the cycle resets to state 0.
+f_poi_entry(float lvl, bool swept, string nm) =>
+    is_active = swept and lvl == active_sweep_px and state != 0
+    show = (poi_in_rng(lvl) and not swept) or is_active
+    nm2  = is_active ? nm + " ✓" : nm
+    [show, nm2, is_active]
+
 if show_levels or show_fvg_vis
     poi_px  = array.new_float(0)
     poi_nm  = array.new_string(0)
@@ -1077,16 +1087,6 @@ if show_levels or show_fvg_vis
     poi_st  = array.new_string(0)
     poi_pr  = array.new_int(0)
     poi_bar = array.new_int(0)
-
-    // A swept level that triggered the CURRENT active sweep->MSS->entry cycle
-    // turns green with a "✓" instead of just disappearing, and stays visible
-    // regardless of distance (it's part of the active setup, not just a
-    // passive structural level) until the cycle resets to state 0.
-    f_poi_entry(float lvl, bool swept, string nm) =>
-        is_active = swept and lvl == active_sweep_px and state != 0
-        show = (poi_in_rng(lvl) and not swept) or is_active
-        nm2  = is_active ? nm + " ✓" : nm
-        [show, nm2, is_active]
 
     if show_levels and use_pdhl
         [show_pdh, nm_pdh, act_pdh] = f_poi_entry(pdh, pdh_swept, "PDH")
