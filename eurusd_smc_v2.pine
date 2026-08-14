@@ -45,6 +45,8 @@ fvg_min_gap   = input.float(0.0002, "Min FVG Gap",  0.00005, 0.002, 0.00001, gro
 fvg_max_bars  = input.int(60,       "FVG Max Age",  5, 300,          group = GFVG)
 req_close_fvg = input.bool(true,    "Entry candle must CLOSE inside FVG", group = GFVG)
 req_engulf    = input.bool(true,    "Entry candle must be ENGULFING (body covers prev body)", group = GFVG)
+fvg_tf_min    = input.int(1,   "Show Chart Imbalances: Min Timeframe (minutes)", 1, 1440, group = GFVG)
+fvg_tf_max    = input.int(5,   "Show Chart Imbalances: Max Timeframe (minutes)", 1, 1440, group = GFVG)
 
 var string GHTF = "HTF Context Filter"
 use_htf     = input.bool(true,  "Require HTF FVG alignment (at least one active TF)", group = GHTF)
@@ -130,6 +132,12 @@ f_tf_label(string tf) =>
     lbl
 
 chart_tf_lbl = f_tf_label(timeframe.period)
+
+// Lets the user restrict generic chart-native imbalances to a chosen
+// timeframe range (e.g. only 1m-5m, skip 15m) instead of an all-or-nothing
+// toggle tied to whatever the chart happens to be showing.
+chart_tf_minutes = timeframe.in_seconds(timeframe.period) / 60.0
+fvg_tf_ok         = chart_tf_minutes >= fvg_tf_min and chart_tf_minutes <= fvg_tf_max
 
 // =============================================================
 // HTF BIAS  (no-repainting)
@@ -396,11 +404,16 @@ var bool  mss_bull_ok  = false
 var float pre_swl      = na
 var float pre_swh      = na
 
+// Which POI level triggered the current active sweep cycle (if any), so its
+// own line can turn green with a check instead of just disappearing once
+// swept — it stays green through the whole sweep -> MSS -> entry cycle.
+var float active_sweep_px = na
+
 var box fvg_entry_box = na
 
-// Phase visuals: sweep confirmed (green check) -> waiting for structure break
-// (orange MSS level line) -> structure broken, entry FVG marked (below).
-var label sweep_check_lbl = na
+// Phase visuals: sweep confirmed (the swept POI line itself turns green with
+// a check, see f_poi_entry below) -> waiting for structure break (orange MSS
+// level line) -> structure broken, entry FVG marked (below).
 var line  mss_ref_line    = na
 var label mss_ref_lbl     = na
 
@@ -448,10 +461,10 @@ if state == 0 and any_hs
     sweep_hi     := high
     mss_ref_bear := na(pre_swl) ? low : pre_swl
     state_bar    := bar_index
-    // Phase 1: zone liquidated -> green check, then show the level price
-    // must break through to confirm a bearish structure shift.
-    label.delete(sweep_check_lbl)
-    sweep_check_lbl := label.new(bar_index, high, "✓ Liquidado", style = label.style_label_down, color = color.new(color.lime, 10), textcolor = color.white, size = size.normal)
+    active_sweep_px := hs_pdh ? pdh : hs_pwh ? pwh : hs_asia ? asia_h : last_eqh
+    // Phase 1: zone liquidated (its own line turns green with a check via
+    // f_poi_entry), then show the level price must break through to confirm
+    // a bearish structure shift.
     line.delete(mss_ref_line)
     label.delete(mss_ref_lbl)
     mss_ref_line := line.new(bar_index, mss_ref_bear, bar_index + 1, mss_ref_bear, extend = extend.right, color = color.orange, style = line.style_dashed, width = 2)
@@ -462,8 +475,7 @@ if state == 0 and any_ls
     sweep_lo     := low
     mss_ref_bull := na(pre_swh) ? high : pre_swh
     state_bar    := bar_index
-    label.delete(sweep_check_lbl)
-    sweep_check_lbl := label.new(bar_index, low, "✓ Liquidado", style = label.style_label_up, color = color.new(color.lime, 10), textcolor = color.white, size = size.normal)
+    active_sweep_px := ls_pdl ? pdl : ls_pwl ? pwl : ls_asia ? asia_l : last_eql
     line.delete(mss_ref_line)
     label.delete(mss_ref_lbl)
     mss_ref_line := line.new(bar_index, mss_ref_bull, bar_index + 1, mss_ref_bull, extend = extend.right, color = color.orange, style = line.style_dashed, width = 2)
@@ -471,10 +483,9 @@ if state == 0 and any_ls
 
 if (state == 1 or state == 2) and (bar_index - state_bar) > mss_max_bars
     state := 0
-    label.delete(sweep_check_lbl)
+    active_sweep_px := na
     line.delete(mss_ref_line)
     label.delete(mss_ref_lbl)
-    sweep_check_lbl := na
     mss_ref_line    := na
     mss_ref_lbl     := na
 
@@ -485,12 +496,11 @@ if bear_mss
     mss_bear_ok := true
     state       := 3
     state_bar   := bar_index
-    // Structure confirmed broken: the "waiting" visuals are done, the
-    // operative phase now shows the entry FVG instead (below).
-    label.delete(sweep_check_lbl)
+    // Structure confirmed broken: the MSS-level line is done, the operative
+    // phase now shows the entry FVG instead (below). The swept POI line
+    // stays green (active_sweep_px is only cleared once state returns to 0).
     line.delete(mss_ref_line)
     label.delete(mss_ref_lbl)
-    sweep_check_lbl := na
     mss_ref_line    := na
     mss_ref_lbl     := na
 
@@ -498,10 +508,8 @@ if bull_mss
     mss_bull_ok := true
     state       := 4
     state_bar   := bar_index
-    label.delete(sweep_check_lbl)
     line.delete(mss_ref_line)
     label.delete(mss_ref_lbl)
-    sweep_check_lbl := na
     mss_ref_line    := na
     mss_ref_lbl     := na
 
@@ -522,6 +530,7 @@ if mss_bear_ok[1]
              text_valign  = text.align_top)
     else
         state := 0
+        active_sweep_px := na
     mss_bear_ok := false
 
 if mss_bull_ok[1]
@@ -541,6 +550,7 @@ if mss_bull_ok[1]
              text_valign  = text.align_top)
     else
         state := 0
+        active_sweep_px := na
     mss_bull_ok := false
 
 if (state == 3 or state == 4) and not na(fvg_entry_box)
@@ -549,6 +559,7 @@ if (state == 3 or state == 4) and not na(fvg_entry_box)
 if (state == 3 or state == 4) and (bar_index - fvg_bar) > fvg_max_bars
     box.delete(fvg_entry_box)
     state := 0
+    active_sweep_px := na
 
 // =============================================================
 // ENTRY CONDITIONS
@@ -583,6 +594,7 @@ if short_signal
             strategy.exit("SX", from_entry = "Short", stop = sl_price, limit = tp_price)
             trades_today += 1
             state := 0
+            active_sweep_px := na
             if not na(fvg_entry_box)
                 box.set_right(fvg_entry_box, bar_index)
 
@@ -597,6 +609,7 @@ if long_signal
             strategy.exit("LX", from_entry = "Long", stop = sl_price, limit = tp_price)
             trades_today += 1
             state := 0
+            active_sweep_px := na
             if not na(fvg_entry_box)
                 box.set_right(fvg_entry_box, bar_index)
 
@@ -982,7 +995,7 @@ var float[] bull_fvg_px    = array.new_float(0)
 var int[]   bull_fvg_org   = array.new_int(0)
 var bool[]  bull_fvg_armed = array.new_bool(0)
 
-if show_fvg_vis
+if show_fvg_vis and fvg_tf_ok
     // Use fully completed bars [3] and [1] (never the still-forming bar [0])
     // so the gap size is final and doesn't flicker as the live candle forms.
     bear_vis_gap = low[3] - high[1]
@@ -1065,63 +1078,81 @@ if show_levels or show_fvg_vis
     poi_pr  = array.new_int(0)
     poi_bar = array.new_int(0)
 
+    // A swept level that triggered the CURRENT active sweep->MSS->entry cycle
+    // turns green with a "✓" instead of just disappearing, and stays visible
+    // regardless of distance (it's part of the active setup, not just a
+    // passive structural level) until the cycle resets to state 0.
+    f_poi_entry(float lvl, bool swept, string nm) =>
+        is_active = swept and lvl == active_sweep_px and state != 0
+        show = (poi_in_rng(lvl) and not swept) or is_active
+        nm2  = is_active ? nm + " ✓" : nm
+        [show, nm2, is_active]
+
     if show_levels and use_pdhl
-        if poi_in_rng(pdh) and not pdh_swept
+        [show_pdh, nm_pdh, act_pdh] = f_poi_entry(pdh, pdh_swept, "PDH")
+        if show_pdh
             array.push(poi_px, pdh)
-            array.push(poi_nm, "PDH")
-            array.push(poi_cl, color.new(color.red,    0))
+            array.push(poi_nm, nm_pdh)
+            array.push(poi_cl, act_pdh ? color.new(color.lime, 10) : color.new(color.red, 0))
             array.push(poi_st, line.style_dashed)
             array.push(poi_pr, 10)
             array.push(poi_bar, nz(pdh_bar, bar_index - 1))
-        if poi_in_rng(pdl) and not pdl_swept
+        [show_pdl, nm_pdl, act_pdl] = f_poi_entry(pdl, pdl_swept, "PDL")
+        if show_pdl
             array.push(poi_px, pdl)
-            array.push(poi_nm, "PDL")
-            array.push(poi_cl, color.new(color.teal,   0))
+            array.push(poi_nm, nm_pdl)
+            array.push(poi_cl, act_pdl ? color.new(color.lime, 10) : color.new(color.teal, 0))
             array.push(poi_st, line.style_dashed)
             array.push(poi_pr, 11)
             array.push(poi_bar, nz(pdl_bar, bar_index - 1))
     if show_levels and use_pwhl
-        if poi_in_rng(pwh) and not pwh_swept
+        [show_pwh, nm_pwh, act_pwh] = f_poi_entry(pwh, pwh_swept, "PWH")
+        if show_pwh
             array.push(poi_px, pwh)
-            array.push(poi_nm, "PWH")
-            array.push(poi_cl, color.new(color.maroon, 0))
+            array.push(poi_nm, nm_pwh)
+            array.push(poi_cl, act_pwh ? color.new(color.lime, 10) : color.new(color.maroon, 0))
             array.push(poi_st, line.style_solid)
             array.push(poi_pr, 20)
             array.push(poi_bar, nz(pwh_bar, bar_index - 1))
-        if poi_in_rng(pwl) and not pwl_swept
+        [show_pwl, nm_pwl, act_pwl] = f_poi_entry(pwl, pwl_swept, "PWL")
+        if show_pwl
             array.push(poi_px, pwl)
-            array.push(poi_nm, "PWL")
-            array.push(poi_cl, color.new(color.navy,   0))
+            array.push(poi_nm, nm_pwl)
+            array.push(poi_cl, act_pwl ? color.new(color.lime, 10) : color.new(color.navy, 0))
             array.push(poi_st, line.style_solid)
             array.push(poi_pr, 21)
             array.push(poi_bar, nz(pwl_bar, bar_index - 1))
     if show_levels and use_asia
-        if poi_in_rng(asia_h) and not asia_h_swept
+        [show_ah, nm_ah, act_ah] = f_poi_entry(asia_h, asia_h_swept, "Asia H")
+        if show_ah
             array.push(poi_px, asia_h)
-            array.push(poi_nm, "Asia H")
-            array.push(poi_cl, color.new(color.purple, 0))
+            array.push(poi_nm, nm_ah)
+            array.push(poi_cl, act_ah ? color.new(color.lime, 10) : color.new(color.purple, 0))
             array.push(poi_st, line.style_dotted)
             array.push(poi_pr, 30)
             array.push(poi_bar, nz(asia_h_bar, bar_index - 1))
-        if poi_in_rng(asia_l) and not asia_l_swept
+        [show_al, nm_al, act_al] = f_poi_entry(asia_l, asia_l_swept, "Asia L")
+        if show_al
             array.push(poi_px, asia_l)
-            array.push(poi_nm, "Asia L")
-            array.push(poi_cl, color.new(color.purple, 0))
+            array.push(poi_nm, nm_al)
+            array.push(poi_cl, act_al ? color.new(color.lime, 10) : color.new(color.purple, 0))
             array.push(poi_st, line.style_dotted)
             array.push(poi_pr, 31)
             array.push(poi_bar, nz(asia_l_bar, bar_index - 1))
     if show_levels and use_eql and eql_tf_ok
-        if poi_in_rng(last_eqh) and not eqh_swept
+        [show_eqh, nm_eqh, act_eqh] = f_poi_entry(last_eqh, eqh_swept, "EQH")
+        if show_eqh
             array.push(poi_px, last_eqh)
-            array.push(poi_nm, "EQH")
-            array.push(poi_cl, color.new(color.orange, 0))
+            array.push(poi_nm, nm_eqh)
+            array.push(poi_cl, act_eqh ? color.new(color.lime, 10) : color.new(color.orange, 0))
             array.push(poi_st, line.style_dashed)
             array.push(poi_pr, 40)
             array.push(poi_bar, nz(last_eqh_bar, bar_index - 1))
-        if poi_in_rng(last_eql) and not eql_swept
+        [show_eql, nm_eql, act_eql] = f_poi_entry(last_eql, eql_swept, "EQL")
+        if show_eql
             array.push(poi_px, last_eql)
-            array.push(poi_nm, "EQL")
-            array.push(poi_cl, color.new(color.orange, 0))
+            array.push(poi_nm, nm_eql)
+            array.push(poi_cl, act_eql ? color.new(color.lime, 10) : color.new(color.orange, 0))
             array.push(poi_st, line.style_dashed)
             array.push(poi_pr, 41)
             array.push(poi_bar, nz(last_eql_bar, bar_index - 1))
