@@ -1305,6 +1305,12 @@ if show_levels or show_fvg_vis
 plotshape(show_sweep and any_hs, title = "Sweep HIGH", style = shape.circle, location = location.abovebar, color = color.new(color.red,  0), size = size.tiny)
 plotshape(show_sweep and any_ls, title = "Sweep LOW",  style = shape.circle, location = location.belowbar, color = color.new(color.teal, 0), size = size.tiny)
 
+// Structure break (MSS) candle — bear_mss/bull_mss are true only on the
+// exact bar whose body closed beyond the MSS reference level, so this marks
+// automatically, on that candle, the moment structure is confirmed broken.
+plotshape(bear_mss, title = "Structure Break Bear", style = shape.labeldown, location = location.abovebar, color = color.orange, textcolor = color.black, text = "CE", size = size.small)
+plotshape(bull_mss, title = "Structure Break Bull", style = shape.labelup,   location = location.belowbar, color = color.orange, textcolor = color.black, text = "CE", size = size.small)
+
 // Entry signals
 plotshape(short_signal, title = "Short Entry", style = shape.labeldown, location = location.abovebar, color = color.red,  textcolor = color.white, text = "SHORT", size = size.small)
 plotshape(long_signal,  title = "Long Entry",  style = shape.labelup,   location = location.belowbar, color = color.teal, textcolor = color.white, text = "LONG",  size = size.small)
