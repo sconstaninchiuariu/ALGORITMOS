@@ -398,6 +398,12 @@ var float pre_swh      = na
 
 var box fvg_entry_box = na
 
+// Phase visuals: sweep confirmed (green check) -> waiting for structure break
+// (orange MSS level line) -> structure broken, entry FVG marked (below).
+var label sweep_check_lbl = na
+var line  mss_ref_line    = na
+var label mss_ref_lbl     = na
+
 var bool prev_bear_1h = false
 var bool prev_bull_1h = false
 var bool prev_bear_4h = false
@@ -442,15 +448,35 @@ if state == 0 and any_hs
     sweep_hi     := high
     mss_ref_bear := na(pre_swl) ? low : pre_swl
     state_bar    := bar_index
+    // Phase 1: zone liquidated -> green check, then show the level price
+    // must break through to confirm a bearish structure shift.
+    label.delete(sweep_check_lbl)
+    sweep_check_lbl := label.new(bar_index, high, "✓ Liquidado", style = label.style_label_down, color = color.new(color.lime, 10), textcolor = color.white, size = size.normal)
+    line.delete(mss_ref_line)
+    label.delete(mss_ref_lbl)
+    mss_ref_line := line.new(bar_index, mss_ref_bear, bar_index + 1, mss_ref_bear, extend = extend.right, color = color.orange, style = line.style_dashed, width = 2)
+    mss_ref_lbl  := label.new(bar_index, mss_ref_bear, "Ruptura p/ CE Bajista", style = label.style_none, textcolor = color.orange, size = size.normal)
 
 if state == 0 and any_ls
     state        := 2
     sweep_lo     := low
     mss_ref_bull := na(pre_swh) ? high : pre_swh
     state_bar    := bar_index
+    label.delete(sweep_check_lbl)
+    sweep_check_lbl := label.new(bar_index, low, "✓ Liquidado", style = label.style_label_up, color = color.new(color.lime, 10), textcolor = color.white, size = size.normal)
+    line.delete(mss_ref_line)
+    label.delete(mss_ref_lbl)
+    mss_ref_line := line.new(bar_index, mss_ref_bull, bar_index + 1, mss_ref_bull, extend = extend.right, color = color.orange, style = line.style_dashed, width = 2)
+    mss_ref_lbl  := label.new(bar_index, mss_ref_bull, "Ruptura p/ CE Alcista", style = label.style_none, textcolor = color.orange, size = size.normal)
 
 if (state == 1 or state == 2) and (bar_index - state_bar) > mss_max_bars
     state := 0
+    label.delete(sweep_check_lbl)
+    line.delete(mss_ref_line)
+    label.delete(mss_ref_lbl)
+    sweep_check_lbl := na
+    mss_ref_line    := na
+    mss_ref_lbl     := na
 
 bear_mss = state == 1 and not na(mss_ref_bear) and body_lo < mss_ref_bear and is_bear
 bull_mss = state == 2 and not na(mss_ref_bull) and body_hi > mss_ref_bull and is_bull
@@ -459,11 +485,25 @@ if bear_mss
     mss_bear_ok := true
     state       := 3
     state_bar   := bar_index
+    // Structure confirmed broken: the "waiting" visuals are done, the
+    // operative phase now shows the entry FVG instead (below).
+    label.delete(sweep_check_lbl)
+    line.delete(mss_ref_line)
+    label.delete(mss_ref_lbl)
+    sweep_check_lbl := na
+    mss_ref_line    := na
+    mss_ref_lbl     := na
 
 if bull_mss
     mss_bull_ok := true
     state       := 4
     state_bar   := bar_index
+    label.delete(sweep_check_lbl)
+    line.delete(mss_ref_line)
+    label.delete(mss_ref_lbl)
+    sweep_check_lbl := na
+    mss_ref_line    := na
+    mss_ref_lbl     := na
 
 if mss_bear_ok[1]
     bear_gap = low[2] - high
@@ -475,7 +515,7 @@ if mss_bear_ok[1]
         fvg_entry_box := box.new(bar_index - 2, fvg_top, bar_index + 1, fvg_bot,
              border_color = color.new(color.red, 10),
              bgcolor      = color.new(color.red, 80),
-             text         = "FVG",
+             text         = "ENTRY FVG (Bear)",
              text_color   = color.new(color.red, 20),
              text_size    = size.small,
              text_halign  = text.align_left,
@@ -494,7 +534,7 @@ if mss_bull_ok[1]
         fvg_entry_box := box.new(bar_index - 2, fvg_top, bar_index + 1, fvg_bot,
              border_color = color.new(color.teal, 10),
              bgcolor      = color.new(color.teal, 80),
-             text         = "FVG",
+             text         = "ENTRY FVG (Bull)",
              text_color   = color.new(color.teal, 20),
              text_size    = size.small,
              text_halign  = text.align_left,
