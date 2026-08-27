@@ -56,6 +56,7 @@ use_pwhl  = input.bool(true,    "PWH / PWL (Previous Week)", group = GLIQ)
 use_asia  = input.bool(true,    "Asia Range H/L",            group = GLIQ)
 sw_len    = input.int(10,       "Swing Lookback (MSS ref)",  2, 50, group = GLIQ)
 sweep_buf = input.float(0.0002, "Sweep Buffer", 0.00005, 0.001, 0.00001, group = GLIQ)
+sweep_win = input.int(12,       "Sweep Window (bars to reject back through level)", 1, 100, group = GLIQ)
 
 var string GMSS = "MSS Settings"
 mss_max_bars = input.int(80, "Max Bars for MSS", 5, 300, group = GMSS)
@@ -63,13 +64,14 @@ mss_max_bars = input.int(80, "Max Bars for MSS", 5, 300, group = GMSS)
 var string GFVG = "FVG / Imbalance"
 fvg_min_gap   = input.float(0.0002, "Min FVG Gap",  0.00005, 0.002, 0.00001, group = GFVG)
 fvg_max_bars  = input.int(60,       "FVG Max Age",  5, 300,          group = GFVG)
+fvg_search_bars = input.int(8,      "Bars after MSS to find entry FVG", 1, 50, group = GFVG)
 req_close_fvg = input.bool(true,    "Entry candle must CLOSE inside FVG", group = GFVG)
-req_engulf    = input.bool(true,    "Entry candle must be ENGULFING (body covers prev body)", group = GFVG)
+req_engulf    = input.bool(false,   "Entry candle must be ENGULFING (body covers prev body) — very restrictive", group = GFVG)
 fvg_tf_min    = input.int(1,   "Show Chart Imbalances: Min Timeframe (minutes)", 1, 1440, group = GFVG)
 fvg_tf_max    = input.int(5,   "Show Chart Imbalances: Max Timeframe (minutes)", 1, 1440, group = GFVG)
 
 var string GHTF = "HTF Context Filter"
-use_htf     = input.bool(true,  "Require HTF FVG alignment (at least one active TF)", group = GHTF)
+use_htf     = input.bool(false, "Require HTF FVG alignment (at least one active TF) — heavy filter", group = GHTF)
 use_htf_1h  = input.bool(true,  "1H FVG zones",      group = GHTF)
 use_htf_4h  = input.bool(true,  "4H FVG zones",      group = GHTF)
 use_htf_d   = input.bool(true,  "Daily FVG zones",   group = GHTF)
@@ -82,6 +84,7 @@ rr_ratio   = input.float(2.0,    "RR Ratio",         1.0, 10.0, 0.1,    group = 
 max_sl     = input.float(0.0050, "Max SL Distance",  0.0005, 0.0200, 0.0001, group = GRSK)
 min_sl     = input.float(0.0003, "Min SL Distance",  0.0001, 0.0020, 0.0001, group = GRSK)
 max_day_tr = input.int(2,        "Max Trades / Day", 1, 5,              group = GRSK)
+cap_sl_to_max = input.bool(true, "Cap SL at Max Distance instead of skipping trade", group = GRSK)
 fixed_cap  = input.float(100000, "Fixed Capital (non-compounded)",       group = GRSK)
 
 var string GTR = "Tiered Risk (% of Fixed Capital)"
@@ -193,67 +196,108 @@ htf_bull_d  = h3_h2 < h3_l0 and (h3_l0 - h3_h2) >= htf_fvg_min
 htf_bull_w  = hw_h2 < hw_l0 and (hw_l0 - hw_h2) >= htf_fvg_min
 htf_bull_m  = hm_h2 < hm_l0 and (hm_l0 - hm_h2) >= htf_fvg_min
 
-// BUG FIX: htf_bear_1h etc. only reflect the immediate 3-candle window on
-// that TF, so they go false again as soon as the NEXT HTF candle closes —
-// meaning any_hs/any_ls (gated by htf_ok_bear/htf_ok_bull below) were only
-// ever true for a ~1-bar-of-that-timeframe window right when a gap formed.
-// Combined with also needing a lower-TF sweep in that exact narrow window,
-// this made a valid setup practically impossible — zero trades over 1.5+
-// years of backtest. Fixed with sticky tracking: an HTF bias stays "on"
-// once a qualifying gap forms, until price actually trades back through
-// its near edge (mitigated), same concept as the visual zone tracking.
-var bool htf_bear_1h_ok = false
-var bool htf_bear_4h_ok = false
-var bool htf_bear_d_ok  = false
-var bool htf_bear_w_ok  = false
-var bool htf_bear_m_ok  = false
-var bool htf_bull_1h_ok = false
-var bool htf_bull_4h_ok = false
-var bool htf_bull_d_ok  = false
-var bool htf_bull_w_ok  = false
-var bool htf_bull_m_ok  = false
+// ROOT CAUSE #2. The previous sticky version compared price against h1_h0
+// (and friends) to decide "has this gap been mitigated?". But h1_h0 is
+// high[1] ON THE HIGHER TIMEFRAME — i.e. "the previous 1H candle's high",
+// which SLIDES FORWARD every single hour. So the mitigation test was
+// measuring current price against a constantly-moving reference that tracks
+// price itself, rather than against the fixed edge of the gap that actually
+// formed. Result: the flag was knocked back to false almost immediately and
+// htf_bear/htf_bull were false nearly always — and since htf_ok_bear/bull
+// gate any_hs/any_ls, that alone suppressed the vast majority of sweeps.
+// The same sliding value also drove the on-chart HTF zone lines, which is
+// why those lines appeared to sit at different prices on different
+// timeframes.
+//
+// Fix: FREEZE the gap's edges into var floats the moment the gap forms, and
+// test mitigation against that frozen edge. A zone re-arms only when a
+// genuinely different gap forms (near edge changes while the pattern holds).
+f_htf_edge(bool gap_now, float near_now, float far_now, bool is_supply, float edge_in, float far_in, bool ok_in) =>
+    float e = edge_in
+    float f = far_in
+    bool  k = ok_in
+    if gap_now and (na(e) or near_now != e)
+        e := near_now
+        f := far_now
+        k := true
+    if k and not na(e)
+        if is_supply ? high >= e : low <= e
+            k := false
+    [e, f, k]
 
-if htf_bear_1h
-    htf_bear_1h_ok := true
-if high >= h1_h0
-    htf_bear_1h_ok := false
-if htf_bear_4h
-    htf_bear_4h_ok := true
-if high >= h2_h0
-    htf_bear_4h_ok := false
-if htf_bear_d
-    htf_bear_d_ok := true
-if high >= h3_h0
-    htf_bear_d_ok := false
-if htf_bear_w
-    htf_bear_w_ok := true
-if high >= hw_h0
-    htf_bear_w_ok := false
-if htf_bear_m
-    htf_bear_m_ok := true
-if high >= hm_h0
-    htf_bear_m_ok := false
+var float htf_b1h_edge = na
+var float htf_b1h_far  = na
+var bool  htf_bear_1h_ok = false
+var float htf_b4h_edge = na
+var float htf_b4h_far  = na
+var bool  htf_bear_4h_ok = false
+var float htf_bd_edge  = na
+var float htf_bd_far   = na
+var bool  htf_bear_d_ok  = false
+var float htf_bw_edge  = na
+var float htf_bw_far   = na
+var bool  htf_bear_w_ok  = false
+var float htf_bm_edge  = na
+var float htf_bm_far   = na
+var bool  htf_bear_m_ok  = false
 
-if htf_bull_1h
-    htf_bull_1h_ok := true
-if low <= h1_l0
-    htf_bull_1h_ok := false
-if htf_bull_4h
-    htf_bull_4h_ok := true
-if low <= h2_l0
-    htf_bull_4h_ok := false
-if htf_bull_d
-    htf_bull_d_ok := true
-if low <= h3_l0
-    htf_bull_d_ok := false
-if htf_bull_w
-    htf_bull_w_ok := true
-if low <= hw_l0
-    htf_bull_w_ok := false
-if htf_bull_m
-    htf_bull_m_ok := true
-if low <= hm_l0
-    htf_bull_m_ok := false
+var float htf_u1h_edge = na
+var float htf_u1h_far  = na
+var bool  htf_bull_1h_ok = false
+var float htf_u4h_edge = na
+var float htf_u4h_far  = na
+var bool  htf_bull_4h_ok = false
+var float htf_ud_edge  = na
+var float htf_ud_far   = na
+var bool  htf_bull_d_ok  = false
+var float htf_uw_edge  = na
+var float htf_uw_far   = na
+var bool  htf_bull_w_ok  = false
+var float htf_um_edge  = na
+var float htf_um_far   = na
+var bool  htf_bull_m_ok  = false
+
+[e_b1h, f_b1h, k_b1h] = f_htf_edge(htf_bear_1h, h1_h0, h1_l2, true, htf_b1h_edge, htf_b1h_far, htf_bear_1h_ok)
+htf_b1h_edge := e_b1h
+htf_b1h_far  := f_b1h
+htf_bear_1h_ok := k_b1h
+[e_b4h, f_b4h, k_b4h] = f_htf_edge(htf_bear_4h, h2_h0, h2_l2, true, htf_b4h_edge, htf_b4h_far, htf_bear_4h_ok)
+htf_b4h_edge := e_b4h
+htf_b4h_far  := f_b4h
+htf_bear_4h_ok := k_b4h
+[e_bd, f_bd, k_bd] = f_htf_edge(htf_bear_d, h3_h0, h3_l2, true, htf_bd_edge, htf_bd_far, htf_bear_d_ok)
+htf_bd_edge := e_bd
+htf_bd_far  := f_bd
+htf_bear_d_ok := k_bd
+[e_bw, f_bw, k_bw] = f_htf_edge(htf_bear_w, hw_h0, hw_l2, true, htf_bw_edge, htf_bw_far, htf_bear_w_ok)
+htf_bw_edge := e_bw
+htf_bw_far  := f_bw
+htf_bear_w_ok := k_bw
+[e_bm, f_bm, k_bm] = f_htf_edge(htf_bear_m, hm_h0, hm_l2, true, htf_bm_edge, htf_bm_far, htf_bear_m_ok)
+htf_bm_edge := e_bm
+htf_bm_far  := f_bm
+htf_bear_m_ok := k_bm
+
+[e_u1h, f_u1h, k_u1h] = f_htf_edge(htf_bull_1h, h1_l0, h1_h2, false, htf_u1h_edge, htf_u1h_far, htf_bull_1h_ok)
+htf_u1h_edge := e_u1h
+htf_u1h_far  := f_u1h
+htf_bull_1h_ok := k_u1h
+[e_u4h, f_u4h, k_u4h] = f_htf_edge(htf_bull_4h, h2_l0, h2_h2, false, htf_u4h_edge, htf_u4h_far, htf_bull_4h_ok)
+htf_u4h_edge := e_u4h
+htf_u4h_far  := f_u4h
+htf_bull_4h_ok := k_u4h
+[e_ud, f_ud, k_ud] = f_htf_edge(htf_bull_d, h3_l0, h3_h2, false, htf_ud_edge, htf_ud_far, htf_bull_d_ok)
+htf_ud_edge := e_ud
+htf_ud_far  := f_ud
+htf_bull_d_ok := k_ud
+[e_uw, f_uw, k_uw] = f_htf_edge(htf_bull_w, hw_l0, hw_h2, false, htf_uw_edge, htf_uw_far, htf_bull_w_ok)
+htf_uw_edge := e_uw
+htf_uw_far  := f_uw
+htf_bull_w_ok := k_uw
+[e_um, f_um, k_um] = f_htf_edge(htf_bull_m, hm_l0, hm_h2, false, htf_um_edge, htf_um_far, htf_bull_m_ok)
+htf_um_edge := e_um
+htf_um_far  := f_um
+htf_bull_m_ok := k_um
 
 htf_bear = (use_htf_1h and htf_bear_1h_ok) or (use_htf_4h and htf_bear_4h_ok) or (use_htf_d and htf_bear_d_ok) or (use_htf_w and htf_bear_w_ok) or (use_htf_m and htf_bear_m_ok)
 htf_bull = (use_htf_1h and htf_bull_1h_ok) or (use_htf_4h and htf_bull_4h_ok) or (use_htf_d and htf_bull_d_ok) or (use_htf_w and htf_bull_w_ok) or (use_htf_m and htf_bull_m_ok)
@@ -519,8 +563,8 @@ var float mss_ref_bull = na
 var float fvg_top      = na
 var float fvg_bot      = na
 var int   fvg_bar      = 0
-var bool  mss_bear_ok  = false
-var bool  mss_bull_ok  = false
+var bool  awaiting_fvg = false
+var int   mss_bar      = 0
 var float pre_swl      = na
 var float pre_swh      = na
 
@@ -571,11 +615,36 @@ if state == 0
     if not na(raw_swh)
         pre_swh := raw_swh
 
+// ROOT CAUSE #1 of "Sweeps = 7 over years of 1m data".
+// The old test demanded, ALL ON ONE CANDLE: the wick pierces the level by
+// sweep_buf, the ENTIRE body closes back below the level, and the candle is
+// bearish. That is one specific rejection-pin pattern. A real liquidity
+// sweep almost never completes inside a single 1m candle — price pokes
+// through, often hovers above for several bars, then gets pushed back. So
+// virtually every genuine sweep (including the Asian high the user watched
+// get taken) failed this test and the bot never even entered "hunting" mode.
+//
+// New definition: price traded beyond the level at some point within the
+// last sweep_win bars, AND the current bar closes back on the original side.
+// Edge-triggered (the "and not (prev...)" clause) so it fires once on the
+// rejection instead of every bar for as long as the condition holds.
+// ta.highest/ta.lowest are called unconditionally — Pine requires ta.*
+// to evaluate on every bar or their internal state desyncs.
 f_high_sweep(float lvl) =>
-    not na(lvl) and high > (lvl + sweep_buf) and body_hi < lvl and is_bear
+    hh = ta.highest(high, sweep_win)
+    pierced_now   = not na(lvl) and hh    > lvl + sweep_buf
+    rejected_now  = not na(lvl) and close < lvl
+    pierced_prev  = not na(lvl) and hh[1] > lvl + sweep_buf
+    rejected_prev = not na(lvl) and close[1] < lvl
+    (pierced_now and rejected_now) and not (pierced_prev and rejected_prev)
 
 f_low_sweep(float lvl) =>
-    not na(lvl) and low < (lvl - sweep_buf) and body_lo > lvl and is_bull
+    ll = ta.lowest(low, sweep_win)
+    pierced_now   = not na(lvl) and ll    < lvl - sweep_buf
+    rejected_now  = not na(lvl) and close > lvl
+    pierced_prev  = not na(lvl) and ll[1] < lvl - sweep_buf
+    rejected_prev = not na(lvl) and close[1] > lvl
+    (pierced_now and rejected_now) and not (pierced_prev and rejected_prev)
 
 hs_pdh  = use_pdhl and f_high_sweep(pdh)
 hs_pwh  = use_pwhl and f_high_sweep(pwh)
@@ -637,6 +706,7 @@ if state == 0 and any_ls
 
 if (state == 1 or state == 2) and (bar_index - state_bar) > mss_max_bars
     state := 0
+    awaiting_fvg := false
     active_sweep_px := na
     line.delete(mss_ref_line)
     label.delete(mss_ref_lbl)
@@ -647,10 +717,11 @@ bear_mss = state == 1 and not na(mss_ref_bear) and body_lo < mss_ref_bear and is
 bull_mss = state == 2 and not na(mss_ref_bull) and body_hi > mss_ref_bull and is_bull
 
 if bear_mss
-    mss_bear_ok := true
-    state       := 3
-    state_bar   := bar_index
-    cnt_mss     += 1
+    awaiting_fvg := true
+    mss_bar      := bar_index
+    state        := 3
+    state_bar    := bar_index
+    cnt_mss      += 1
     // Structure confirmed broken: the MSS-level line is done, the operative
     // phase now shows the entry FVG instead (below). The swept POI line
     // stays green (active_sweep_px is only cleared once state returns to 0).
@@ -660,22 +731,34 @@ if bear_mss
     mss_ref_lbl     := na
 
 if bull_mss
-    mss_bull_ok := true
-    state       := 4
-    state_bar   := bar_index
-    cnt_mss     += 1
+    awaiting_fvg := true
+    mss_bar      := bar_index
+    state        := 4
+    state_bar    := bar_index
+    cnt_mss      += 1
     line.delete(mss_ref_line)
     label.delete(mss_ref_lbl)
     mss_ref_line    := na
     mss_ref_lbl     := na
 
-if mss_bear_ok[1]
+// ROOT CAUSE #3. The old code checked mss_bear_ok[1] — i.e. EXACTLY ONE bar
+// after the structure break — and if that single bar happened not to leave a
+// 3-candle gap, it gave up and reset the whole setup to IDLE. The impulse
+// leg after an MSS usually runs for several bars and the displacement gap
+// often appears on the 2nd, 3rd or 4th bar, not always the 1st. That is the
+// MSS=4 -> FVG=2 attrition.
+//
+// Now the machine keeps hunting for a qualifying gap for fvg_search_bars
+// after the break, taking the FIRST one that qualifies, and only abandons
+// the setup if the whole window passes with nothing.
+if awaiting_fvg and state == 3 and bar_index > mss_bar
     bear_gap = low[2] - high
     if bear_gap >= fvg_min_gap
         fvg_top := low[2]
         fvg_bot := high
         fvg_bar := bar_index
         cnt_fvg += 1
+        awaiting_fvg := false
         box.delete(fvg_entry_box)
         fvg_entry_box := box.new(bar_index - 2, fvg_top, bar_index + 1, fvg_bot,
              border_color = color.new(color.red, 10),
@@ -685,18 +768,19 @@ if mss_bear_ok[1]
              text_size    = size.small,
              text_halign  = text.align_left,
              text_valign  = text.align_top)
-    else
+    else if (bar_index - mss_bar) >= fvg_search_bars
         state := 0
+        awaiting_fvg := false
         active_sweep_px := na
-    mss_bear_ok := false
 
-if mss_bull_ok[1]
+if awaiting_fvg and state == 4 and bar_index > mss_bar
     bull_gap = low - high[2]
     if bull_gap >= fvg_min_gap
         fvg_top := low
         fvg_bot := high[2]
         fvg_bar := bar_index
         cnt_fvg += 1
+        awaiting_fvg := false
         box.delete(fvg_entry_box)
         fvg_entry_box := box.new(bar_index - 2, fvg_top, bar_index + 1, fvg_bot,
              border_color = color.new(color.teal, 10),
@@ -706,17 +790,18 @@ if mss_bull_ok[1]
              text_size    = size.small,
              text_halign  = text.align_left,
              text_valign  = text.align_top)
-    else
+    else if (bar_index - mss_bar) >= fvg_search_bars
         state := 0
+        awaiting_fvg := false
         active_sweep_px := na
-    mss_bull_ok := false
 
 if (state == 3 or state == 4) and not na(fvg_entry_box)
     box.set_right(fvg_entry_box, bar_index + 5)
 
-if (state == 3 or state == 4) and (bar_index - fvg_bar) > fvg_max_bars
+if (state == 3 or state == 4) and not awaiting_fvg and (bar_index - fvg_bar) > fvg_max_bars
     box.delete(fvg_entry_box)
     state := 0
+    awaiting_fvg := false
     active_sweep_px := na
 
 // =============================================================
@@ -751,10 +836,23 @@ if (touched_bear and engulf_ok_bear) or (touched_bull and engulf_ok_bull)
 // ORDER EXECUTION
 // =============================================================
 
+// ROOT CAUSE #4 (FVG=2 -> Entries=0). SL is placed at the sweep wick. By the
+// time a setup completes — sweep, then an impulse leg breaking structure,
+// then a retrace back into the gap — the distance from entry back up to that
+// wick is frequently well beyond max_sl (50 pips). The old code treated that
+// as "reject the trade entirely", silently discarding otherwise-valid
+// signals and never reaching strategy.entry at all.
+//
+// Now, when the structural stop is too wide, it is CAPPED at max_sl instead
+// of dropping the trade (cap_sl_to_max, on by default). Risk per trade stays
+// bounded exactly as before — position size is derived from the actual stop
+// distance either way — but the setup is taken. Turn the input off to
+// restore the strict structural-stop-or-nothing behaviour.
 if short_signal
-    sl_price = sweep_hi + sweep_buf
-    tp_price = close - (sl_price - close) * rr_ratio
-    sl_dist  = sl_price - close
+    sl_struct = sweep_hi + sweep_buf
+    sl_price  = cap_sl_to_max ? math.min(sl_struct, close + max_sl) : sl_struct
+    tp_price  = close - (sl_price - close) * rr_ratio
+    sl_dist   = sl_price - close
     if sl_dist >= min_sl and sl_dist <= max_sl
         qty = f_qty(sl_dist)
         if qty > 0
@@ -763,14 +861,16 @@ if short_signal
             trades_today += 1
             cnt_entry    += 1
             state := 0
+            awaiting_fvg := false
             active_sweep_px := na
             if not na(fvg_entry_box)
                 box.set_right(fvg_entry_box, bar_index)
 
 if long_signal
-    sl_price = sweep_lo - sweep_buf
-    tp_price = close + (close - sl_price) * rr_ratio
-    sl_dist  = close - sl_price
+    sl_struct = sweep_lo - sweep_buf
+    sl_price  = cap_sl_to_max ? math.max(sl_struct, close - max_sl) : sl_struct
+    tp_price  = close + (close - sl_price) * rr_ratio
+    sl_dist   = close - sl_price
     if sl_dist >= min_sl and sl_dist <= max_sl
         qty = f_qty(sl_dist)
         if qty > 0
@@ -779,6 +879,7 @@ if long_signal
             trades_today += 1
             cnt_entry    += 1
             state := 0
+            awaiting_fvg := false
             active_sweep_px := na
             if not na(fvg_entry_box)
                 box.set_right(fvg_entry_box, bar_index)
@@ -1013,33 +1114,26 @@ prev_bull_w  := htf_bull_w
 prev_bear_m  := htf_bear_m
 prev_bull_m  := htf_bull_m
 
-// Near-edge price of each HTF zone (bear supply: zone bottom; bull demand: zone top)
-htf_b1h_px = h1_h0
-htf_u1h_px = h1_l0
-htf_b4h_px = h2_h0
-htf_u4h_px = h2_l0
-htf_bd_px  = h3_h0
-htf_ud_px  = h3_l0
-htf_bw_px  = hw_h0
-htf_uw_px  = hw_l0
-htf_bm_px  = hm_h0
-htf_um_px  = hm_l0
+// Near-edge price of each HTF zone, taken from the FROZEN edge captured when
+// the gap formed (see f_htf_edge above) rather than the sliding raw HTF
+// value. Using the raw value here is what made the same zone render at
+// different prices depending on the chart timeframe.
+htf_b1h_px = htf_b1h_edge
+htf_u1h_px = htf_u1h_edge
+htf_b4h_px = htf_b4h_edge
+htf_u4h_px = htf_u4h_edge
+htf_bd_px  = htf_bd_edge
+htf_ud_px  = htf_ud_edge
+htf_bw_px  = htf_bw_edge
+htf_uw_px  = htf_uw_edge
+htf_bm_px  = htf_bm_edge
+htf_um_px  = htf_um_edge
 
-// Mitigation (price traded back through the near edge) is sticky until the
-// next fresh edge — once mitigated a zone stays hidden, it doesn't reappear
-// just because price wandered back close to it. Origin bar is fixed at the
-// bar the zone first appeared, so the merged line anchors there, not "now".
-var bool htf_b1h_mit = false
-var bool htf_u1h_mit = false
-var bool htf_b4h_mit = false
-var bool htf_u4h_mit = false
-var bool htf_bd_mit  = false
-var bool htf_ud_mit  = false
-var bool htf_bw_mit  = false
-var bool htf_uw_mit  = false
-var bool htf_bm_mit  = false
-var bool htf_um_mit  = false
-
+// Mitigation is now tracked by the *_ok flags in the HTF BIAS section, which
+// test against the FROZEN gap edge (the old *_mit booleans here tested
+// against the sliding raw HTF value and have been removed as dead code).
+// Only the origin bar is still tracked here, so a merged line anchors at the
+// bar the zone first appeared rather than at "now".
 var int htf_b1h_org = na
 var int htf_u1h_org = na
 var int htf_b4h_org = na
@@ -1052,59 +1146,25 @@ var int htf_bm_org  = na
 var int htf_um_org  = na
 
 if new_bear_1h
-    htf_b1h_mit := false
     htf_b1h_org := bar_index
-if htf_bear_1h and high >= htf_b1h_px
-    htf_b1h_mit := true
 if new_bull_1h
-    htf_u1h_mit := false
     htf_u1h_org := bar_index
-if htf_bull_1h and low <= htf_u1h_px
-    htf_u1h_mit := true
-
 if new_bear_4h
-    htf_b4h_mit := false
     htf_b4h_org := bar_index
-if htf_bear_4h and high >= htf_b4h_px
-    htf_b4h_mit := true
 if new_bull_4h
-    htf_u4h_mit := false
     htf_u4h_org := bar_index
-if htf_bull_4h and low <= htf_u4h_px
-    htf_u4h_mit := true
-
 if new_bear_d
-    htf_bd_mit := false
     htf_bd_org := bar_index
-if htf_bear_d and high >= htf_bd_px
-    htf_bd_mit := true
 if new_bull_d
-    htf_ud_mit := false
     htf_ud_org := bar_index
-if htf_bull_d and low <= htf_ud_px
-    htf_ud_mit := true
-
 if new_bear_w
-    htf_bw_mit := false
     htf_bw_org := bar_index
-if htf_bear_w and high >= htf_bw_px
-    htf_bw_mit := true
 if new_bull_w
-    htf_uw_mit := false
     htf_uw_org := bar_index
-if htf_bull_w and low <= htf_uw_px
-    htf_uw_mit := true
-
 if new_bear_m
-    htf_bm_mit := false
     htf_bm_org := bar_index
-if htf_bear_m and high >= htf_bm_px
-    htf_bm_mit := true
 if new_bull_m
-    htf_um_mit := false
     htf_um_org := bar_index
-if htf_bull_m and low <= htf_um_px
-    htf_um_mit := true
 
 // --- Proximity alerts for the 10 dedicated HTF FVG zones ---
 // Same hysteresis armed/disarmed idea as the 8 structural POI alerts above:
@@ -1134,25 +1194,25 @@ var bool htf_uw_armed  = true
 var bool htf_bm_armed  = true
 var bool htf_um_armed  = true
 
-[tmp_b1h_armed, fire_b1h] = f_zone_alert(use_near_alert and htf_bear_1h and not htf_b1h_mit and f_near(htf_b1h_px), f_far(htf_b1h_px), new_bear_1h, htf_b1h_armed)
+[tmp_b1h_armed, fire_b1h] = f_zone_alert(use_near_alert and htf_bear_1h_ok and f_near(htf_b1h_px), f_far(htf_b1h_px), new_bear_1h, htf_b1h_armed)
 htf_b1h_armed := tmp_b1h_armed
-[tmp_u1h_armed, fire_u1h] = f_zone_alert(use_near_alert and htf_bull_1h and not htf_u1h_mit and f_near(htf_u1h_px), f_far(htf_u1h_px), new_bull_1h, htf_u1h_armed)
+[tmp_u1h_armed, fire_u1h] = f_zone_alert(use_near_alert and htf_bull_1h_ok and f_near(htf_u1h_px), f_far(htf_u1h_px), new_bull_1h, htf_u1h_armed)
 htf_u1h_armed := tmp_u1h_armed
-[tmp_b4h_armed, fire_b4h] = f_zone_alert(use_near_alert and htf_bear_4h and not htf_b4h_mit and f_near(htf_b4h_px), f_far(htf_b4h_px), new_bear_4h, htf_b4h_armed)
+[tmp_b4h_armed, fire_b4h] = f_zone_alert(use_near_alert and htf_bear_4h_ok and f_near(htf_b4h_px), f_far(htf_b4h_px), new_bear_4h, htf_b4h_armed)
 htf_b4h_armed := tmp_b4h_armed
-[tmp_u4h_armed, fire_u4h] = f_zone_alert(use_near_alert and htf_bull_4h and not htf_u4h_mit and f_near(htf_u4h_px), f_far(htf_u4h_px), new_bull_4h, htf_u4h_armed)
+[tmp_u4h_armed, fire_u4h] = f_zone_alert(use_near_alert and htf_bull_4h_ok and f_near(htf_u4h_px), f_far(htf_u4h_px), new_bull_4h, htf_u4h_armed)
 htf_u4h_armed := tmp_u4h_armed
-[tmp_bd_armed, fire_bd] = f_zone_alert(use_near_alert and htf_bear_d and not htf_bd_mit and f_near(htf_bd_px), f_far(htf_bd_px), new_bear_d, htf_bd_armed)
+[tmp_bd_armed, fire_bd] = f_zone_alert(use_near_alert and htf_bear_d_ok and f_near(htf_bd_px), f_far(htf_bd_px), new_bear_d, htf_bd_armed)
 htf_bd_armed := tmp_bd_armed
-[tmp_ud_armed, fire_ud] = f_zone_alert(use_near_alert and htf_bull_d and not htf_ud_mit and f_near(htf_ud_px), f_far(htf_ud_px), new_bull_d, htf_ud_armed)
+[tmp_ud_armed, fire_ud] = f_zone_alert(use_near_alert and htf_bull_d_ok and f_near(htf_ud_px), f_far(htf_ud_px), new_bull_d, htf_ud_armed)
 htf_ud_armed := tmp_ud_armed
-[tmp_bw_armed, fire_bw] = f_zone_alert(use_near_alert and htf_bear_w and not htf_bw_mit and f_near(htf_bw_px), f_far(htf_bw_px), new_bear_w, htf_bw_armed)
+[tmp_bw_armed, fire_bw] = f_zone_alert(use_near_alert and htf_bear_w_ok and f_near(htf_bw_px), f_far(htf_bw_px), new_bear_w, htf_bw_armed)
 htf_bw_armed := tmp_bw_armed
-[tmp_uw_armed, fire_uw] = f_zone_alert(use_near_alert and htf_bull_w and not htf_uw_mit and f_near(htf_uw_px), f_far(htf_uw_px), new_bull_w, htf_uw_armed)
+[tmp_uw_armed, fire_uw] = f_zone_alert(use_near_alert and htf_bull_w_ok and f_near(htf_uw_px), f_far(htf_uw_px), new_bull_w, htf_uw_armed)
 htf_uw_armed := tmp_uw_armed
-[tmp_bm_armed, fire_bm] = f_zone_alert(use_near_alert and htf_bear_m and not htf_bm_mit and f_near(htf_bm_px), f_far(htf_bm_px), new_bear_m, htf_bm_armed)
+[tmp_bm_armed, fire_bm] = f_zone_alert(use_near_alert and htf_bear_m_ok and f_near(htf_bm_px), f_far(htf_bm_px), new_bear_m, htf_bm_armed)
 htf_bm_armed := tmp_bm_armed
-[tmp_um_armed, fire_um] = f_zone_alert(use_near_alert and htf_bull_m and not htf_um_mit and f_near(htf_um_px), f_far(htf_um_px), new_bull_m, htf_um_armed)
+[tmp_um_armed, fire_um] = f_zone_alert(use_near_alert and htf_bull_m_ok and f_near(htf_um_px), f_far(htf_um_px), new_bull_m, htf_um_armed)
 htf_um_armed := tmp_um_armed
 
 if fire_b1h
@@ -1353,14 +1413,14 @@ if show_levels or show_fvg_vis
 
     // --- HTF FVG imbalance zones (1H..MN), same merge system as POI levels ---
     if show_levels and use_htf_1h
-        if htf_bear_1h and not htf_b1h_mit and f_imb_in_rng(htf_b1h_px)
+        if htf_bear_1h_ok and f_imb_in_rng(htf_b1h_px)
             array.push(poi_px, htf_b1h_px)
             array.push(poi_nm, "1H FVG Bear")
             array.push(poi_cl, color.new(color.red, 30))
             array.push(poi_st, line.style_dotted)
             array.push(poi_pr, 58)
             array.push(poi_bar, nz(htf_b1h_org, bar_index - 1))
-        if htf_bull_1h and not htf_u1h_mit and f_imb_in_rng(htf_u1h_px)
+        if htf_bull_1h_ok and f_imb_in_rng(htf_u1h_px)
             array.push(poi_px, htf_u1h_px)
             array.push(poi_nm, "1H FVG Bull")
             array.push(poi_cl, color.new(color.teal, 30))
@@ -1368,14 +1428,14 @@ if show_levels or show_fvg_vis
             array.push(poi_pr, 59)
             array.push(poi_bar, nz(htf_u1h_org, bar_index - 1))
     if show_levels and use_htf_4h
-        if htf_bear_4h and not htf_b4h_mit and f_imb_in_rng(htf_b4h_px)
+        if htf_bear_4h_ok and f_imb_in_rng(htf_b4h_px)
             array.push(poi_px, htf_b4h_px)
             array.push(poi_nm, "4H FVG Bear")
             array.push(poi_cl, color.new(color.red, 20))
             array.push(poi_st, line.style_dotted)
             array.push(poi_pr, 56)
             array.push(poi_bar, nz(htf_b4h_org, bar_index - 1))
-        if htf_bull_4h and not htf_u4h_mit and f_imb_in_rng(htf_u4h_px)
+        if htf_bull_4h_ok and f_imb_in_rng(htf_u4h_px)
             array.push(poi_px, htf_u4h_px)
             array.push(poi_nm, "4H FVG Bull")
             array.push(poi_cl, color.new(color.teal, 20))
@@ -1383,14 +1443,14 @@ if show_levels or show_fvg_vis
             array.push(poi_pr, 57)
             array.push(poi_bar, nz(htf_u4h_org, bar_index - 1))
     if show_levels and use_htf_d
-        if htf_bear_d and not htf_bd_mit and f_imb_in_rng(htf_bd_px)
+        if htf_bear_d_ok and f_imb_in_rng(htf_bd_px)
             array.push(poi_px, htf_bd_px)
             array.push(poi_nm, "D FVG Bear")
             array.push(poi_cl, color.new(color.red, 10))
             array.push(poi_st, line.style_dashed)
             array.push(poi_pr, 54)
             array.push(poi_bar, nz(htf_bd_org, bar_index - 1))
-        if htf_bull_d and not htf_ud_mit and f_imb_in_rng(htf_ud_px)
+        if htf_bull_d_ok and f_imb_in_rng(htf_ud_px)
             array.push(poi_px, htf_ud_px)
             array.push(poi_nm, "D FVG Bull")
             array.push(poi_cl, color.new(color.teal, 10))
@@ -1398,14 +1458,14 @@ if show_levels or show_fvg_vis
             array.push(poi_pr, 55)
             array.push(poi_bar, nz(htf_ud_org, bar_index - 1))
     if show_levels and use_htf_w
-        if htf_bear_w and not htf_bw_mit and f_imb_in_rng(htf_bw_px)
+        if htf_bear_w_ok and f_imb_in_rng(htf_bw_px)
             array.push(poi_px, htf_bw_px)
             array.push(poi_nm, "W FVG Bear")
             array.push(poi_cl, color.new(color.red, 5))
             array.push(poi_st, line.style_dashed)
             array.push(poi_pr, 52)
             array.push(poi_bar, nz(htf_bw_org, bar_index - 1))
-        if htf_bull_w and not htf_uw_mit and f_imb_in_rng(htf_uw_px)
+        if htf_bull_w_ok and f_imb_in_rng(htf_uw_px)
             array.push(poi_px, htf_uw_px)
             array.push(poi_nm, "W FVG Bull")
             array.push(poi_cl, color.new(color.teal, 5))
@@ -1413,14 +1473,14 @@ if show_levels or show_fvg_vis
             array.push(poi_pr, 53)
             array.push(poi_bar, nz(htf_uw_org, bar_index - 1))
     if show_levels and use_htf_m
-        if htf_bear_m and not htf_bm_mit and f_imb_in_rng(htf_bm_px)
+        if htf_bear_m_ok and f_imb_in_rng(htf_bm_px)
             array.push(poi_px, htf_bm_px)
             array.push(poi_nm, "MN FVG Bear")
             array.push(poi_cl, color.new(color.red, 0))
             array.push(poi_st, line.style_dashed)
             array.push(poi_pr, 50)
             array.push(poi_bar, nz(htf_bm_org, bar_index - 1))
-        if htf_bull_m and not htf_um_mit and f_imb_in_rng(htf_um_px)
+        if htf_bull_m_ok and f_imb_in_rng(htf_um_px)
             array.push(poi_px, htf_um_px)
             array.push(poi_nm, "MN FVG Bull")
             array.push(poi_cl, color.new(color.teal, 0))
