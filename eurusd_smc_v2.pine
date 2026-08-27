@@ -29,6 +29,8 @@ kz_lon_close  = input.int(5,  "London Close (h)", 0, 23, group = GKZ)
 kz_ny_open    = input.int(8,  "NY Open (h)",      0, 23, group = GKZ)
 kz_ny_close_h = input.int(10, "NY Close (h)",     0, 23, group = GKZ)
 kz_ny_close_m = input.int(30, "NY Close (min)",   0, 59, group = GKZ)
+kz_asia_open  = input.int(22, "Asia Open (h)",    0, 23, group = GKZ)
+kz_asia_close = input.int(7,  "Asia Close (h)",   0, 23, group = GKZ)
 
 var string GLIQ = "Liquidity Levels (HTF POIs)"
 use_pdhl  = input.bool(true,    "PDH / PDL (Previous Day)",  group = GLIQ)
@@ -83,6 +85,10 @@ show_stats_tbl = input.bool(true,  "Show Stats Table (top left)", group = GVIS)
 show_levels  = input.bool(true,    "Show POI Lines (PDH/PDL, PWH/PWL, Asia, EQH/EQL)", group = GVIS)
 show_kz_bg   = input.bool(true,    "Show Session Range Boxes (Asia/London/NY high-low)", group = GVIS)
 sess_box_max = input.int(10, "Max Session Boxes per Session (oldest dropped)", 2, 30, group = GVIS)
+asia_box_txt = input.string("Asia",     "Asia Session Box Label",     group = GVIS)
+lon_box_txt  = input.string("London",   "London Session Box Label",  group = GVIS)
+ny_box_txt   = input.string("New York", "New York Session Box Label", group = GVIS)
+viewport_pad_pct = input.float(30.0, "Visible Range Padding (% of visible height) — smooths zoom/pan", 0.0, 100.0, 5.0, group = GVIS)
 show_sweep   = input.bool(true,    "Show Sweep Markers",                                group = GVIS)
 max_poi_pct  = input.float(0.50,   "Max POI Distance (% of price, hide zones beyond) — forex baseline; auto x2 on futures", 0.05, 5.0, 0.05, group = GVIS)
 show_fvg_vis = input.bool(true,    "Show FVG Imbalance Boxes (all unmitigated)",        group = GVIS)
@@ -165,8 +171,15 @@ if is_vis_bar
     vis_hi := na(vis_hi) ? high : math.max(vis_hi, high)
     vis_lo := na(vis_lo) ? low  : math.min(vis_lo, low)
 
+// A hard cutoff at the exact visible edge made everything flip on/off
+// abruptly on every small pan/zoom (each of which already costs a full
+// recalculation in Pine — that part can't be avoided). Padding the visible
+// band by a % of its own height keeps borderline zones from popping in and
+// out, so the chart doesn't look like it "empties out" while catching up.
+vis_pad = not na(vis_hi) and not na(vis_lo) ? (vis_hi - vis_lo) * (viewport_pad_pct / 100.0) : 0.0
+
 f_in_viewport(float px) =>
-    not na(px) and (na(vis_hi) or na(vis_lo) or (px <= vis_hi and px >= vis_lo))
+    not na(px) and (na(vis_hi) or na(vis_lo) or (px <= vis_hi + vis_pad and px >= vis_lo - vis_pad))
 
 // =============================================================
 // HTF BIAS  (no-repainting)
@@ -311,7 +324,9 @@ else
 // ASIA RANGE  (22:00 - 07:00 UTC)
 // =============================================================
 
-in_asia = h_utc >= 22 or h_utc < 7
+// Handles both an overnight session (e.g. 22h-7h, wraps past midnight) and
+// a same-day session (e.g. 1h-6h) depending on which input is larger.
+in_asia = kz_asia_open <= kz_asia_close ? (h_utc >= kz_asia_open and h_utc < kz_asia_close) : (h_utc >= kz_asia_open or h_utc < kz_asia_close)
 
 var float asia_live_h     = na
 var float asia_live_l     = na
@@ -689,9 +704,9 @@ var box[] lon_boxes  = array.new<box>(0)
 var box[] ny_boxes   = array.new<box>(0)
 
 if show_kz_bg
-    f_session_box(in_asia,   in_asia[1],   asia_live_h, asia_live_l, color.new(color.purple, 40), color.new(color.purple, 90), "Asia",   asia_boxes)
-    f_session_box(in_london, in_london[1], lon_live_h,  lon_live_l,  color.new(color.blue,   40), color.new(color.blue,   90), "London", lon_boxes)
-    f_session_box(in_ny,     in_ny[1],     ny_live_h,   ny_live_l,   color.new(color.yellow, 30), color.new(color.yellow, 90), "New York", ny_boxes)
+    f_session_box(in_asia,   in_asia[1],   asia_live_h, asia_live_l, color.new(color.purple, 40), color.new(color.purple, 90), asia_box_txt, asia_boxes)
+    f_session_box(in_london, in_london[1], lon_live_h,  lon_live_l,  color.new(color.blue,   40), color.new(color.blue,   90), lon_box_txt,  lon_boxes)
+    f_session_box(in_ny,     in_ny[1],     ny_live_h,   ny_live_l,   color.new(color.yellow, 30), color.new(color.yellow, 90), ny_box_txt,   ny_boxes)
 
 // =============================================================
 // POI LINE MANAGER — rebuilt every bar with merge logic
