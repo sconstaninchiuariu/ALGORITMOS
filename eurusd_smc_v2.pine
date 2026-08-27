@@ -1,7 +1,7 @@
 // This Pine Script(tm) code is subject to the terms of the Mozilla Public License 2.0
 // SMC EURUSD v4 | Sweep HTF POI > 1M MSS > FVG + Engulfing Entry
 // HTF Bias: Monthly/Weekly/Daily/4H/1H FVG | POIs: PDH/PDL, PWH/PWL, Asia, EQH/EQL
-// Kill Zones: London 03:00-05:00 UTC | NY 08:00-10:30 UTC
+// Kill Zones: Asia 00:00-08:00 | London 09:00-11:00 | NY 14:00-16:30 (UTC+2)
 // Risk: Tiered non-compounded 0.7%-2.0% | SL=sweep wick | TP=SLxRR
 
 //@version=6
@@ -24,28 +24,29 @@ strategy(
 // =============================================================
 
 // Everything about a session — its time window, whether its box shows, its
-// label, and its color — lives together here (UTC hours), instead of the
-// times being under "Kill Zones" and the box appearance under "Visuals".
-var string GSESS = "Market Sessions (UTC)"
+// label, and its color — lives together here, instead of the times being
+// under "Kill Zones" and the box appearance under "Visuals". All hours are
+// UTC+2 (matches typical broker/exchange chart time, e.g. FXCM feeds).
+var string GSESS = "Market Sessions (UTC+2)"
 
 show_asia_box = input.bool(true,  "Asia",   group = GSESS, inline = "asia1")
 asia_box_txt  = input.string("Asia", "Label", group = GSESS, inline = "asia1")
 asia_box_col  = input.color(color.purple, "Color", group = GSESS, inline = "asia1")
-kz_asia_open  = input.int(22, "Open (h)",  0, 23, group = GSESS, inline = "asia2")
-kz_asia_close = input.int(7,  "Close (h)", 0, 23, group = GSESS, inline = "asia2")
+kz_asia_open  = input.int(0, "Open (h)",  0, 23, group = GSESS, inline = "asia2")
+kz_asia_close = input.int(8, "Close (h)", 0, 23, group = GSESS, inline = "asia2")
 
 show_lon_box = input.bool(true,  "London", group = GSESS, inline = "lon1")
 lon_box_txt  = input.string("London", "Label", group = GSESS, inline = "lon1")
 lon_box_col  = input.color(color.blue, "Color", group = GSESS, inline = "lon1")
-kz_lon_open  = input.int(3, "Open (h)",  0, 23, group = GSESS, inline = "lon2")
-kz_lon_close = input.int(5, "Close (h)", 0, 23, group = GSESS, inline = "lon2")
+kz_lon_open  = input.int(9,  "Open (h)",  0, 23, group = GSESS, inline = "lon2")
+kz_lon_close = input.int(11, "Close (h)", 0, 23, group = GSESS, inline = "lon2")
 
 show_ny_box   = input.bool(true,  "New York", group = GSESS, inline = "ny1")
 ny_box_txt    = input.string("New York", "Label", group = GSESS, inline = "ny1")
 ny_box_col    = input.color(color.yellow, "Color", group = GSESS, inline = "ny1")
-kz_ny_open    = input.int(8,  "Open (h)",       0, 23, group = GSESS, inline = "ny2")
-kz_ny_close_h = input.int(10, "Close (h)",      0, 23, group = GSESS, inline = "ny2")
-kz_ny_close_m = input.int(30, "Close (min)",    0, 59, group = GSESS, inline = "ny2")
+kz_ny_open    = input.int(14, "Open (h)",    0, 23, group = GSESS, inline = "ny2")
+kz_ny_close_h = input.int(16, "Close (h)",   0, 23, group = GSESS, inline = "ny2")
+kz_ny_close_m = input.int(30, "Close (min)", 0, 59, group = GSESS, inline = "ny2")
 
 sess_box_max = input.int(10, "Max Boxes per Session (oldest dropped)", 2, 30, group = GSESS)
 
@@ -100,7 +101,6 @@ var string GVIS = "Visuals"
 show_info_tbl  = input.bool(true,  "Show Info Table (top right)", group = GVIS)
 show_stats_tbl = input.bool(true,  "Show Stats Table (top left)", group = GVIS)
 show_levels  = input.bool(true,    "Show POI Lines (PDH/PDL, PWH/PWL, Asia, EQH/EQL)", group = GVIS)
-viewport_pad_pct = input.float(30.0, "Visible Range Padding (% of visible height) — smooths zoom/pan", 0.0, 100.0, 5.0, group = GVIS)
 show_sweep   = input.bool(true,    "Show Sweep Markers",                                group = GVIS)
 max_poi_pct  = input.float(0.50,   "Max POI Distance (% of price, hide zones beyond) — forex baseline; auto x2 on futures", 0.05, 5.0, 0.05, group = GVIS)
 show_fvg_vis = input.bool(true,    "Show FVG Imbalance Boxes (all unmitigated)",        group = GVIS)
@@ -158,40 +158,16 @@ chart_tf_lbl = f_tf_label(timeframe.period)
 chart_tf_minutes = timeframe.in_seconds(timeframe.period) / 60.0
 fvg_tf_ok         = chart_tf_minutes >= fvg_tf_min and chart_tf_minutes <= fvg_tf_max
 
-// =============================================================
-// VISIBLE PRICE RANGE — Pine has no direct API for the visible y-axis
-// range, only the visible x-axis (chart.left/right_visible_bar_time).
-// Any pan/zoom re-triggers a full script recalculation, so tracking the
-// highest/lowest price among only the currently-visible bars gives an
-// accurate proxy for "what price range is actually on screen right now"
-// by the time execution reaches the last bar. Lines/boxes outside this
-// range are hidden even if they'd pass the % distance rule — this is
-// what stops a level from rendering across the whole width of a zoomed-in
-// view when its origin (and therefore context) isn't visible at all.
-// =============================================================
-
-is_vis_bar = time >= chart.left_visible_bar_time and time <= chart.right_visible_bar_time
-
-// "var" already resets to na once per full recalculation (each pan/zoom
-// re-triggers one), then accumulates while inside the window and freezes
-// (stops updating, keeps its last value) for bars after it — which is
-// exactly what's needed: by the current/last bar, vis_hi/vis_lo hold the
-// visible window's range even if the user has scrolled away from price.
-var float vis_hi = na
-var float vis_lo = na
-if is_vis_bar
-    vis_hi := na(vis_hi) ? high : math.max(vis_hi, high)
-    vis_lo := na(vis_lo) ? low  : math.min(vis_lo, low)
-
-// A hard cutoff at the exact visible edge made everything flip on/off
-// abruptly on every small pan/zoom (each of which already costs a full
-// recalculation in Pine — that part can't be avoided). Padding the visible
-// band by a % of its own height keeps borderline zones from popping in and
-// out, so the chart doesn't look like it "empties out" while catching up.
-vis_pad = not na(vis_hi) and not na(vis_lo) ? (vis_hi - vis_lo) * (viewport_pad_pct / 100.0) : 0.0
-
-f_in_viewport(float px) =>
-    not na(px) and (na(vis_hi) or na(vis_lo) or (px <= vis_hi + vis_pad and px >= vis_lo - vis_pad))
+// NOTE ON VIEWPORT-BASED HIDING (removed): an earlier version hid zones
+// outside the visible price range using chart.left_visible_bar_time /
+// chart.right_visible_bar_time. That's the ONLY way Pine can know anything
+// about the visible range at all, but referencing those variables forces a
+// full script recalculation on every pan/zoom/timeframe change — there is
+// no incremental update. That's what caused everything to disappear and
+// take a few seconds to redraw when scrolling or resizing the chart. Since
+// that trade-off wasn't worth it, visibility now goes back to depending
+// only on price distance (max_poi_dist / imb_dist below), which updates
+// smoothly every bar with no extra recalculation cost.
 
 // =============================================================
 // HTF BIAS  (no-repainting)
@@ -285,8 +261,10 @@ htf_bull = (use_htf_1h and htf_bull_1h_ok) or (use_htf_4h and htf_bull_4h_ok) or
 // SESSION / KILL ZONE
 // =============================================================
 
-h_utc = hour(time, "UTC")
-m_utc = minute(time, "UTC")
+// Kept the h_utc/m_utc names to avoid touching every call site, but these
+// are now UTC+2 hours/minutes (matches the Market Sessions inputs above).
+h_utc = hour(time, "UTC+2")
+m_utc = minute(time, "UTC+2")
 
 ny_closed = h_utc > kz_ny_close_h or (h_utc == kz_ny_close_h and m_utc >= kz_ny_close_m)
 in_london = h_utc >= kz_lon_open and h_utc < kz_lon_close
@@ -396,7 +374,7 @@ else
         cur_wl_bar := bar_index
 
 // =============================================================
-// ASIA RANGE  (22:00 - 07:00 UTC)
+// ASIA RANGE  (default 00:00 - 08:00 UTC+2, see kz_asia_open/close above)
 // =============================================================
 
 // Handles both an overnight session (e.g. 22h-7h, wraps past midnight) and
@@ -508,7 +486,7 @@ f_qty(float sl_dist) =>
     sl_dist > 0.0 ? (fixed_cap * f_risk(attempt)) / sl_dist : 0.0
 
 poi_in_rng(float px) =>
-    not na(px) and math.abs(close - px) <= max_poi_dist and f_in_viewport(px)
+    not na(px) and math.abs(close - px) <= max_poi_dist
 
 // =============================================================
 // CANDLE BODY + ENGULFING
@@ -551,6 +529,14 @@ var float pre_swh      = na
 var float active_sweep_px = na
 
 var box fvg_entry_box = na
+
+// Funnel diagnostics — where in sweep -> MSS -> FVG -> retest -> entry the
+// setups are actually getting cut off. Shown in the info table so a zero-
+// trade backtest is diagnosable at a glance instead of a black box.
+var int cnt_sweep  = 0
+var int cnt_mss    = 0
+var int cnt_fvg    = 0
+var int cnt_entry  = 0
 
 // Phase visuals: sweep confirmed (the swept POI line itself turns green with
 // a check, see f_poi_entry below) -> waiting for structure break (orange MSS
@@ -602,6 +588,7 @@ if state == 0 and any_hs
     sweep_hi     := high
     mss_ref_bear := na(pre_swl) ? low : pre_swl
     state_bar    := bar_index
+    cnt_sweep    += 1
     active_sweep_px := hs_pdh ? pdh : hs_pwh ? pwh : hs_asia ? asia_h : last_eqh
     // Phase 1: zone liquidated (its own line turns green with a check via
     // f_poi_entry), then show the level price must break through to confirm
@@ -616,6 +603,7 @@ if state == 0 and any_ls
     sweep_lo     := low
     mss_ref_bull := na(pre_swh) ? high : pre_swh
     state_bar    := bar_index
+    cnt_sweep    += 1
     active_sweep_px := ls_pdl ? pdl : ls_pwl ? pwl : ls_asia ? asia_l : last_eql
     line.delete(mss_ref_line)
     label.delete(mss_ref_lbl)
@@ -637,6 +625,7 @@ if bear_mss
     mss_bear_ok := true
     state       := 3
     state_bar   := bar_index
+    cnt_mss     += 1
     // Structure confirmed broken: the MSS-level line is done, the operative
     // phase now shows the entry FVG instead (below). The swept POI line
     // stays green (active_sweep_px is only cleared once state returns to 0).
@@ -649,6 +638,7 @@ if bull_mss
     mss_bull_ok := true
     state       := 4
     state_bar   := bar_index
+    cnt_mss     += 1
     line.delete(mss_ref_line)
     label.delete(mss_ref_lbl)
     mss_ref_line    := na
@@ -660,6 +650,7 @@ if mss_bear_ok[1]
         fvg_top := low[2]
         fvg_bot := high
         fvg_bar := bar_index
+        cnt_fvg += 1
         box.delete(fvg_entry_box)
         fvg_entry_box := box.new(bar_index - 2, fvg_top, bar_index + 1, fvg_bot,
              border_color = color.new(color.red, 10),
@@ -680,6 +671,7 @@ if mss_bull_ok[1]
         fvg_top := low
         fvg_bot := high[2]
         fvg_bar := bar_index
+        cnt_fvg += 1
         box.delete(fvg_entry_box)
         fvg_entry_box := box.new(bar_index - 2, fvg_top, bar_index + 1, fvg_bot,
              border_color = color.new(color.teal, 10),
@@ -734,6 +726,7 @@ if short_signal
             strategy.entry("Short", strategy.short, qty = qty, comment = "SMC Short")
             strategy.exit("SX", from_entry = "Short", stop = sl_price, limit = tp_price)
             trades_today += 1
+            cnt_entry    += 1
             state := 0
             active_sweep_px := na
             if not na(fvg_entry_box)
@@ -749,6 +742,7 @@ if long_signal
             strategy.entry("Long", strategy.long, qty = qty, comment = "SMC Long")
             strategy.exit("LX", from_entry = "Long", stop = sl_price, limit = tp_price)
             trades_today += 1
+            cnt_entry    += 1
             state := 0
             active_sweep_px := na
             if not na(fvg_entry_box)
@@ -950,7 +944,7 @@ if eql_near_alert
 // =============================================================
 
 f_imb_in_rng(float px) =>
-    not na(px) and math.abs(close - px) <= imb_dist and f_in_viewport(px)
+    not na(px) and math.abs(close - px) <= imb_dist
 
 new_bear_1h  = htf_bear_1h and not prev_bear_1h
 gone_bear_1h = not htf_bear_1h and prev_bear_1h
@@ -1484,7 +1478,7 @@ plotshape(long_signal,  title = "Long Entry",  style = shape.labelup,   location
 // INFO TABLE  (top right)
 // =============================================================
 
-var table tbl = table.new(position.top_right, 2, 9, bgcolor = color.new(color.black, 75), border_width = 1, border_color = color.gray)
+var table tbl = table.new(position.top_right, 2, 13, bgcolor = color.new(color.black, 75), border_width = 1, border_color = color.gray)
 
 if barstate.islast and show_info_tbl
     table.cell(tbl, 0, 0, "SMC v4 EURUSD", text_color = color.white, bgcolor = color.new(color.navy, 50), text_size = size.normal)
@@ -1552,6 +1546,20 @@ if barstate.islast and show_info_tbl
     fvg_val    = fvg_active ? str.tostring(fvg_top, "#.#####") + "/" + str.tostring(fvg_bot, "#.#####") : "--"
     table.cell(tbl, 0, 8, "FVG Zone", text_color = color.gray,  text_size = size.small)
     table.cell(tbl, 1, 8, fvg_val,    text_color = color.yellow, text_size = size.small)
+
+    // Funnel diagnostics — if a count is stuck at 0, that's exactly where
+    // setups are being cut off (no sweeps = HTF bias/kill zone too strict,
+    // sweeps but no MSS = mss_max_bars too short, MSS but no FVG = gap too
+    // small at the break, FVG but no entry = retest never happened / too
+    // strict close+engulfing requirement).
+    table.cell(tbl, 0, 9,  "Sweeps",   text_color = color.gray, text_size = size.small)
+    table.cell(tbl, 1, 9,  str.tostring(cnt_sweep), text_color = color.white, text_size = size.small)
+    table.cell(tbl, 0, 10, "MSS Confirmed", text_color = color.gray, text_size = size.small)
+    table.cell(tbl, 1, 10, str.tostring(cnt_mss),   text_color = color.white, text_size = size.small)
+    table.cell(tbl, 0, 11, "FVGs Formed", text_color = color.gray, text_size = size.small)
+    table.cell(tbl, 1, 11, str.tostring(cnt_fvg),   text_color = color.white, text_size = size.small)
+    table.cell(tbl, 0, 12, "Entries", text_color = color.gray, text_size = size.small)
+    table.cell(tbl, 1, 12, str.tostring(cnt_entry), text_color = color.lime,  text_size = size.small)
 
 // =============================================================
 // STATS TABLE  (top left)
