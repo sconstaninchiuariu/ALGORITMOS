@@ -98,10 +98,11 @@ eql_tol      = input.float(0.0003, "Tolerance (price)",  0.00005, 0.002, 0.00001
 eql_lookback = input.int(5,        "History depth (# pivots)", 2, 20,   group = GEQL)
 
 var string GVIS = "Visuals"
-show_info_tbl  = input.bool(true,  "Show Info Table (top right)", group = GVIS)
-show_stats_tbl = input.bool(true,  "Show Stats Table (top left)", group = GVIS)
+show_info_tbl  = input.bool(false, "Show Info Table (top right)", group = GVIS)
+show_stats_tbl = input.bool(false, "Show Stats Table (top left)", group = GVIS)
 show_levels  = input.bool(true,    "Show POI Lines (PDH/PDL, PWH/PWL, Asia, EQH/EQL)", group = GVIS)
 show_sweep   = input.bool(true,    "Show Sweep Markers",                                group = GVIS)
+show_checklist = input.bool(true,  "Show Setup Checklist (while waiting for entry)",    group = GVIS)
 max_poi_pct  = input.float(0.50,   "Max POI Distance (% of price, hide zones beyond) — forex baseline; auto x2 on futures", 0.05, 5.0, 0.05, group = GVIS)
 show_fvg_vis = input.bool(true,    "Show FVG Imbalance Boxes (all unmitigated)",        group = GVIS)
 imb_max_pct  = input.float(1.00,   "Max Imbalance Distance (% of price) — same rule on every timeframe, forex baseline; auto x2 on futures", 0.10, 5.0, 0.10, group = GVIS)
@@ -538,6 +539,15 @@ var int cnt_mss    = 0
 var int cnt_fvg    = 0
 var int cnt_entry  = 0
 
+// Live setup checklist — tracked per active cycle so the on-chart panel can
+// show exactly which conditions still need to happen before an entry fires,
+// checking each one off as soon as it's met. Reset at the start of every
+// new cycle (a fresh sweep), not when it ends, so the final state stays
+// visible for the checklist to render before the panel disappears.
+var bool cyc_touched   = false
+var bool cyc_close_ok  = false
+var bool cyc_engulf_ok = false
+
 // Phase visuals: sweep confirmed (the swept POI line itself turns green with
 // a check, see f_poi_entry below) -> waiting for structure break (orange MSS
 // level line) -> structure broken, entry FVG marked (below).
@@ -580,8 +590,17 @@ ls_eql  = use_eql  and f_low_sweep(last_eql)
 htf_ok_bear = not use_htf or htf_bear
 htf_ok_bull = not use_htf or htf_bull
 
-any_hs = (hs_pdh or hs_pwh or hs_asia or hs_eqh) and htf_ok_bear and can_trade and in_kz
-any_ls = (ls_pdl or ls_pwl or ls_asia or ls_eql)  and htf_ok_bull and can_trade and in_kz
+// BUG FIX: in_kz used to gate sweep detection here, but the swept-state
+// flags below (pdh_swept etc.) mark a level swept 24/7 regardless of kill
+// zone — so a sweep outside London/NY hours (most of the day, especially
+// visible on low timeframes where sweeps happen constantly) marked the
+// level swept but never engaged the state machine, leaving no MSS wait, no
+// green check, nothing — the line just vanished. Also silently discarded a
+// large fraction of otherwise-valid setups. Kill zone timing is still
+// tracked/shown (info table), just no longer a hard gate on the state
+// machine engaging.
+any_hs = (hs_pdh or hs_pwh or hs_asia or hs_eqh) and htf_ok_bear and can_trade
+any_ls = (ls_pdl or ls_pwl or ls_asia or ls_eql)  and htf_ok_bull and can_trade
 
 if state == 0 and any_hs
     state        := 1
@@ -589,6 +608,9 @@ if state == 0 and any_hs
     mss_ref_bear := na(pre_swl) ? low : pre_swl
     state_bar    := bar_index
     cnt_sweep    += 1
+    cyc_touched   := false
+    cyc_close_ok  := false
+    cyc_engulf_ok := false
     active_sweep_px := hs_pdh ? pdh : hs_pwh ? pwh : hs_asia ? asia_h : last_eqh
     // Phase 1: zone liquidated (its own line turns green with a check via
     // f_poi_entry), then show the level price must break through to confirm
@@ -604,6 +626,9 @@ if state == 0 and any_ls
     mss_ref_bull := na(pre_swh) ? high : pre_swh
     state_bar    := bar_index
     cnt_sweep    += 1
+    cyc_touched   := false
+    cyc_close_ok  := false
+    cyc_engulf_ok := false
     active_sweep_px := ls_pdl ? pdl : ls_pwl ? pwl : ls_asia ? asia_l : last_eql
     line.delete(mss_ref_line)
     label.delete(mss_ref_lbl)
@@ -711,6 +736,16 @@ engulf_ok_bull = not req_engulf or bull_engulf
 
 short_signal = touched_bear and close_ok_bear and engulf_ok_bear and can_trade
 long_signal  = touched_bull and close_ok_bull  and engulf_ok_bull and can_trade
+
+// Checklist progress for the current cycle — "ever true so far this cycle",
+// not "true on this exact bar" (entry still needs all three aligned on the
+// same bar; this is a progress readout, not a substitute for short/long_signal).
+if touched_bear or touched_bull
+    cyc_touched := true
+if (touched_bear and close_ok_bear) or (touched_bull and close_ok_bull)
+    cyc_close_ok := true
+if (touched_bear and engulf_ok_bear) or (touched_bull and engulf_ok_bull)
+    cyc_engulf_ok := true
 
 // =============================================================
 // ORDER EXECUTION
@@ -1608,6 +1643,53 @@ if barstate.islast and show_stats_tbl
     exp_col = expect >= 0.0 ? color.lime : color.red
     table.cell(stats, 0, 8, "Expectancy", text_color = color.gray, text_size = size.small)
     table.cell(stats, 1, 8, str.tostring(expect, "#.###") + "R",  text_color = exp_col, text_size = size.small)
+
+// =============================================================
+// SETUP CHECKLIST — appears the moment a zone is liquidated (state != 0)
+// and disappears once the cycle resolves (entry fires or setup expires).
+// Each condition checks off live as it's met, so "why hasn't it entered
+// yet" is visible on the chart instead of a guessing game.
+// =============================================================
+
+var table checklist = table.new(position.bottom_right, 2, 7, bgcolor = color.new(color.black, 75), border_width = 1, border_color = color.gray)
+
+f_chk_cell(bool done, bool applicable) =>
+    txt = not applicable ? "N/D" : done ? "✓" : "⏳"
+    col = not applicable ? color.gray : done ? color.lime : color.orange
+    [txt, col]
+
+if barstate.islast and show_checklist and state != 0
+    dir_str = (state == 1 or state == 3) ? "BAJISTA" : "ALCISTA"
+    dir_col = (state == 1 or state == 3) ? color.red : color.teal
+    table.cell(checklist, 0, 0, "SETUP " + dir_str, text_color = color.white, bgcolor = color.new(dir_col, 30), text_size = size.normal)
+    table.cell(checklist, 1, 0, "",                 text_color = color.white, bgcolor = color.new(dir_col, 30), text_size = size.normal)
+
+    mss_done = state == 3 or state == 4
+    fvg_done = state == 3 or state == 4
+
+    [c1txt, c1col] = f_chk_cell(true, true)
+    table.cell(checklist, 0, 1, "Zona Liquidada",      text_color = color.gray, text_size = size.small)
+    table.cell(checklist, 1, 1, c1txt, text_color = c1col, text_size = size.small)
+
+    [c2txt, c2col] = f_chk_cell(mss_done, true)
+    table.cell(checklist, 0, 2, "Cambio Estructura",   text_color = color.gray, text_size = size.small)
+    table.cell(checklist, 1, 2, c2txt, text_color = c2col, text_size = size.small)
+
+    [c3txt, c3col] = f_chk_cell(fvg_done, true)
+    table.cell(checklist, 0, 3, "Imbalance Formado",   text_color = color.gray, text_size = size.small)
+    table.cell(checklist, 1, 3, c3txt, text_color = c3col, text_size = size.small)
+
+    [c4txt, c4col] = f_chk_cell(cyc_touched, mss_done)
+    table.cell(checklist, 0, 4, "Retest de Zona",      text_color = color.gray, text_size = size.small)
+    table.cell(checklist, 1, 4, c4txt, text_color = c4col, text_size = size.small)
+
+    [c5txt, c5col] = f_chk_cell(cyc_close_ok, mss_done and req_close_fvg)
+    table.cell(checklist, 0, 5, "Cierre Confirmación", text_color = color.gray, text_size = size.small)
+    table.cell(checklist, 1, 5, c5txt, text_color = c5col, text_size = size.small)
+
+    [c6txt, c6col] = f_chk_cell(cyc_engulf_ok, mss_done and req_engulf)
+    table.cell(checklist, 0, 6, "Vela Envolvente",     text_color = color.gray, text_size = size.small)
+    table.cell(checklist, 1, 6, c6txt, text_color = c6col, text_size = size.small)
 
 // =============================================================
 // ALERTS
