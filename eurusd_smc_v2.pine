@@ -23,14 +23,31 @@ strategy(
 // INPUTS
 // =============================================================
 
-var string GKZ = "Kill Zones (UTC)"
-kz_lon_open   = input.int(3,  "London Open (h)",  0, 23, group = GKZ)
-kz_lon_close  = input.int(5,  "London Close (h)", 0, 23, group = GKZ)
-kz_ny_open    = input.int(8,  "NY Open (h)",      0, 23, group = GKZ)
-kz_ny_close_h = input.int(10, "NY Close (h)",     0, 23, group = GKZ)
-kz_ny_close_m = input.int(30, "NY Close (min)",   0, 59, group = GKZ)
-kz_asia_open  = input.int(22, "Asia Open (h)",    0, 23, group = GKZ)
-kz_asia_close = input.int(7,  "Asia Close (h)",   0, 23, group = GKZ)
+// Everything about a session — its time window, whether its box shows, its
+// label, and its color — lives together here (UTC hours), instead of the
+// times being under "Kill Zones" and the box appearance under "Visuals".
+var string GSESS = "Market Sessions (UTC)"
+
+show_asia_box = input.bool(true,  "Asia",   group = GSESS, inline = "asia1")
+asia_box_txt  = input.string("Asia", "Label", group = GSESS, inline = "asia1")
+asia_box_col  = input.color(color.purple, "Color", group = GSESS, inline = "asia1")
+kz_asia_open  = input.int(22, "Open (h)",  0, 23, group = GSESS, inline = "asia2")
+kz_asia_close = input.int(7,  "Close (h)", 0, 23, group = GSESS, inline = "asia2")
+
+show_lon_box = input.bool(true,  "London", group = GSESS, inline = "lon1")
+lon_box_txt  = input.string("London", "Label", group = GSESS, inline = "lon1")
+lon_box_col  = input.color(color.blue, "Color", group = GSESS, inline = "lon1")
+kz_lon_open  = input.int(3, "Open (h)",  0, 23, group = GSESS, inline = "lon2")
+kz_lon_close = input.int(5, "Close (h)", 0, 23, group = GSESS, inline = "lon2")
+
+show_ny_box   = input.bool(true,  "New York", group = GSESS, inline = "ny1")
+ny_box_txt    = input.string("New York", "Label", group = GSESS, inline = "ny1")
+ny_box_col    = input.color(color.yellow, "Color", group = GSESS, inline = "ny1")
+kz_ny_open    = input.int(8,  "Open (h)",       0, 23, group = GSESS, inline = "ny2")
+kz_ny_close_h = input.int(10, "Close (h)",      0, 23, group = GSESS, inline = "ny2")
+kz_ny_close_m = input.int(30, "Close (min)",    0, 59, group = GSESS, inline = "ny2")
+
+sess_box_max = input.int(10, "Max Boxes per Session (oldest dropped)", 2, 30, group = GSESS)
 
 var string GLIQ = "Liquidity Levels (HTF POIs)"
 use_pdhl  = input.bool(true,    "PDH / PDL (Previous Day)",  group = GLIQ)
@@ -83,11 +100,6 @@ var string GVIS = "Visuals"
 show_info_tbl  = input.bool(true,  "Show Info Table (top right)", group = GVIS)
 show_stats_tbl = input.bool(true,  "Show Stats Table (top left)", group = GVIS)
 show_levels  = input.bool(true,    "Show POI Lines (PDH/PDL, PWH/PWL, Asia, EQH/EQL)", group = GVIS)
-show_kz_bg   = input.bool(true,    "Show Session Range Boxes (Asia/London/NY high-low)", group = GVIS)
-sess_box_max = input.int(10, "Max Session Boxes per Session (oldest dropped)", 2, 30, group = GVIS)
-asia_box_txt = input.string("Asia",     "Asia Session Box Label",     group = GVIS)
-lon_box_txt  = input.string("London",   "London Session Box Label",  group = GVIS)
-ny_box_txt   = input.string("New York", "New York Session Box Label", group = GVIS)
 viewport_pad_pct = input.float(30.0, "Visible Range Padding (% of visible height) — smooths zoom/pan", 0.0, 100.0, 5.0, group = GVIS)
 show_sweep   = input.bool(true,    "Show Sweep Markers",                                group = GVIS)
 max_poi_pct  = input.float(0.50,   "Max POI Distance (% of price, hide zones beyond) — forex baseline; auto x2 on futures", 0.05, 5.0, 0.05, group = GVIS)
@@ -197,14 +209,77 @@ htf_bear_4h = h2_l2 > h2_h0 and (h2_l2 - h2_h0) >= htf_fvg_min
 htf_bear_d  = h3_l2 > h3_h0 and (h3_l2 - h3_h0) >= htf_fvg_min
 htf_bear_w  = hw_l2 > hw_h0 and (hw_l2 - hw_h0) >= htf_fvg_min
 htf_bear_m  = hm_l2 > hm_h0 and (hm_l2 - hm_h0) >= htf_fvg_min
-htf_bear    = (use_htf_1h and htf_bear_1h) or (use_htf_4h and htf_bear_4h) or (use_htf_d and htf_bear_d) or (use_htf_w and htf_bear_w) or (use_htf_m and htf_bear_m)
 
 htf_bull_1h = h1_h2 < h1_l0 and (h1_l0 - h1_h2) >= htf_fvg_min
 htf_bull_4h = h2_h2 < h2_l0 and (h2_l0 - h2_h2) >= htf_fvg_min
 htf_bull_d  = h3_h2 < h3_l0 and (h3_l0 - h3_h2) >= htf_fvg_min
 htf_bull_w  = hw_h2 < hw_l0 and (hw_l0 - hw_h2) >= htf_fvg_min
 htf_bull_m  = hm_h2 < hm_l0 and (hm_l0 - hm_h2) >= htf_fvg_min
-htf_bull    = (use_htf_1h and htf_bull_1h) or (use_htf_4h and htf_bull_4h) or (use_htf_d and htf_bull_d) or (use_htf_w and htf_bull_w) or (use_htf_m and htf_bull_m)
+
+// BUG FIX: htf_bear_1h etc. only reflect the immediate 3-candle window on
+// that TF, so they go false again as soon as the NEXT HTF candle closes —
+// meaning any_hs/any_ls (gated by htf_ok_bear/htf_ok_bull below) were only
+// ever true for a ~1-bar-of-that-timeframe window right when a gap formed.
+// Combined with also needing a lower-TF sweep in that exact narrow window,
+// this made a valid setup practically impossible — zero trades over 1.5+
+// years of backtest. Fixed with sticky tracking: an HTF bias stays "on"
+// once a qualifying gap forms, until price actually trades back through
+// its near edge (mitigated), same concept as the visual zone tracking.
+var bool htf_bear_1h_ok = false
+var bool htf_bear_4h_ok = false
+var bool htf_bear_d_ok  = false
+var bool htf_bear_w_ok  = false
+var bool htf_bear_m_ok  = false
+var bool htf_bull_1h_ok = false
+var bool htf_bull_4h_ok = false
+var bool htf_bull_d_ok  = false
+var bool htf_bull_w_ok  = false
+var bool htf_bull_m_ok  = false
+
+if htf_bear_1h
+    htf_bear_1h_ok := true
+if high >= h1_h0
+    htf_bear_1h_ok := false
+if htf_bear_4h
+    htf_bear_4h_ok := true
+if high >= h2_h0
+    htf_bear_4h_ok := false
+if htf_bear_d
+    htf_bear_d_ok := true
+if high >= h3_h0
+    htf_bear_d_ok := false
+if htf_bear_w
+    htf_bear_w_ok := true
+if high >= hw_h0
+    htf_bear_w_ok := false
+if htf_bear_m
+    htf_bear_m_ok := true
+if high >= hm_h0
+    htf_bear_m_ok := false
+
+if htf_bull_1h
+    htf_bull_1h_ok := true
+if low <= h1_l0
+    htf_bull_1h_ok := false
+if htf_bull_4h
+    htf_bull_4h_ok := true
+if low <= h2_l0
+    htf_bull_4h_ok := false
+if htf_bull_d
+    htf_bull_d_ok := true
+if low <= h3_l0
+    htf_bull_d_ok := false
+if htf_bull_w
+    htf_bull_w_ok := true
+if low <= hw_l0
+    htf_bull_w_ok := false
+if htf_bull_m
+    htf_bull_m_ok := true
+if low <= hm_l0
+    htf_bull_m_ok := false
+
+htf_bear = (use_htf_1h and htf_bear_1h_ok) or (use_htf_4h and htf_bear_4h_ok) or (use_htf_d and htf_bear_d_ok) or (use_htf_w and htf_bear_w_ok) or (use_htf_m and htf_bear_m_ok)
+htf_bull = (use_htf_1h and htf_bull_1h_ok) or (use_htf_4h and htf_bull_4h_ok) or (use_htf_d and htf_bull_d_ok) or (use_htf_w and htf_bull_w_ok) or (use_htf_m and htf_bull_m_ok)
 
 // =============================================================
 // SESSION / KILL ZONE
@@ -703,10 +778,12 @@ var box[] asia_boxes = array.new<box>(0)
 var box[] lon_boxes  = array.new<box>(0)
 var box[] ny_boxes   = array.new<box>(0)
 
-if show_kz_bg
-    f_session_box(in_asia,   in_asia[1],   asia_live_h, asia_live_l, color.new(color.purple, 40), color.new(color.purple, 90), asia_box_txt, asia_boxes)
-    f_session_box(in_london, in_london[1], lon_live_h,  lon_live_l,  color.new(color.blue,   40), color.new(color.blue,   90), lon_box_txt,  lon_boxes)
-    f_session_box(in_ny,     in_ny[1],     ny_live_h,   ny_live_l,   color.new(color.yellow, 30), color.new(color.yellow, 90), ny_box_txt,   ny_boxes)
+if show_asia_box
+    f_session_box(in_asia,   in_asia[1],   asia_live_h, asia_live_l, color.new(asia_box_col, 40), color.new(asia_box_col, 90), asia_box_txt, asia_boxes)
+if show_lon_box
+    f_session_box(in_london, in_london[1], lon_live_h,  lon_live_l,  color.new(lon_box_col,  40), color.new(lon_box_col,  90), lon_box_txt,  lon_boxes)
+if show_ny_box
+    f_session_box(in_ny,     in_ny[1],     ny_live_h,   ny_live_l,   color.new(ny_box_col,   30), color.new(ny_box_col,   90), ny_box_txt,   ny_boxes)
 
 // =============================================================
 // POI LINE MANAGER — rebuilt every bar with merge logic
