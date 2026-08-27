@@ -81,7 +81,8 @@ var string GVIS = "Visuals"
 show_info_tbl  = input.bool(true,  "Show Info Table (top right)", group = GVIS)
 show_stats_tbl = input.bool(true,  "Show Stats Table (top left)", group = GVIS)
 show_levels  = input.bool(true,    "Show POI Lines (PDH/PDL, PWH/PWL, Asia, EQH/EQL)", group = GVIS)
-show_kz_bg   = input.bool(true,    "Show Kill Zone Background",                         group = GVIS)
+show_kz_bg   = input.bool(true,    "Show Session Range Boxes (Asia/London/NY high-low)", group = GVIS)
+sess_box_max = input.int(10, "Max Session Boxes per Session (oldest dropped)", 2, 30, group = GVIS)
 show_sweep   = input.bool(true,    "Show Sweep Markers",                                group = GVIS)
 max_poi_pct  = input.float(0.50,   "Max POI Distance (% of price, hide zones beyond) — forex baseline; auto x2 on futures", 0.05, 5.0, 0.05, group = GVIS)
 show_fvg_vis = input.bool(true,    "Show FVG Imbalance Boxes (all unmitigated)",        group = GVIS)
@@ -205,6 +206,28 @@ in_ny     = h_utc >= kz_ny_open and not ny_closed
 in_kz     = in_london or in_ny
 
 eql_tf_ok = timeframe.in_seconds() >= 900
+
+// Running high/low while each kill zone session is in progress, so the
+// session can be drawn as a box (its actual traded range) instead of a
+// flat background strip.
+var float lon_live_h = na
+var float lon_live_l = na
+var float ny_live_h  = na
+var float ny_live_l  = na
+
+if in_london
+    lon_live_h := na(lon_live_h) ? high : math.max(lon_live_h, high)
+    lon_live_l := na(lon_live_l) ? low  : math.min(lon_live_l, low)
+else
+    lon_live_h := na
+    lon_live_l := na
+
+if in_ny
+    ny_live_h := na(ny_live_h) ? high : math.max(ny_live_h, high)
+    ny_live_l := na(ny_live_l) ? low  : math.min(ny_live_l, low)
+else
+    ny_live_h := na
+    ny_live_l := na
 
 // =============================================================
 // DAILY TRADE COUNTER
@@ -642,11 +665,33 @@ if long_signal
                 box.set_right(fvg_entry_box, bar_index)
 
 // =============================================================
-// VISUALS
+// VISUALS — session range boxes (Asia/London/NY), instead of a flat
+// full-height background strip: a box bounding the session's actual
+// traded high/low, growing live while the session is in progress and
+// freezing once it ends. Oldest boxes drop off past sess_box_max so
+// history doesn't accumulate forever.
 // =============================================================
 
-bgcolor(show_kz_bg and in_london ? color.new(color.blue,   95) : na, title = "London KZ")
-bgcolor(show_kz_bg and in_ny     ? color.new(color.yellow, 95) : na, title = "NY KZ")
+f_session_box(bool in_session, bool prev_in_session, float sess_h, float sess_l, color line_col, color fill_col, string txt, box[] arr) =>
+    if in_session and not prev_in_session
+        nb = box.new(bar_index, sess_h, bar_index, sess_l, border_color = line_col, bgcolor = fill_col, border_style = line.style_dotted, text = txt, text_color = line_col, text_size = size.small, text_halign = text.align_center, text_valign = text.align_top)
+        array.push(arr, nb)
+        if array.size(arr) > sess_box_max
+            box.delete(array.shift(arr))
+    if in_session and array.size(arr) > 0
+        last_box = array.get(arr, array.size(arr) - 1)
+        box.set_top(last_box, sess_h)
+        box.set_bottom(last_box, sess_l)
+        box.set_right(last_box, bar_index)
+
+var box[] asia_boxes = array.new<box>(0)
+var box[] lon_boxes  = array.new<box>(0)
+var box[] ny_boxes   = array.new<box>(0)
+
+if show_kz_bg
+    f_session_box(in_asia,   in_asia[1],   asia_live_h, asia_live_l, color.new(color.purple, 40), color.new(color.purple, 90), "Asia",   asia_boxes)
+    f_session_box(in_london, in_london[1], lon_live_h,  lon_live_l,  color.new(color.blue,   40), color.new(color.blue,   90), "London", lon_boxes)
+    f_session_box(in_ny,     in_ny[1],     ny_live_h,   ny_live_l,   color.new(color.yellow, 30), color.new(color.yellow, 90), "New York", ny_boxes)
 
 // =============================================================
 // POI LINE MANAGER — rebuilt every bar with merge logic
