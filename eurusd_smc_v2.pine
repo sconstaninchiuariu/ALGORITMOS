@@ -83,7 +83,8 @@ var string GRSK = "Risk Management"
 rr_ratio   = input.float(2.0,    "RR Ratio",         1.0, 10.0, 0.1,    group = GRSK)
 max_sl     = input.float(0.0050, "Max SL Distance",  0.0005, 0.0200, 0.0001, group = GRSK)
 min_sl     = input.float(0.0003, "Min SL Distance",  0.0001, 0.0020, 0.0001, group = GRSK)
-max_day_tr = input.int(2,        "Max Trades / Day", 1, 5,              group = GRSK)
+max_day_tr = input.int(4,        "Max Trades / Day (overall ceiling)", 1, 10,   group = GRSK)
+sess_max_trades = input.int(2,   "Max Trades per Session (London/NY only)", 1, 5, group = GRSK)
 cap_sl_to_max = input.bool(true, "Cap SL at Max Distance instead of skipping trade", group = GRSK)
 fixed_cap  = input.float(100000, "Fixed Capital (non-compounded)",       group = GRSK)
 
@@ -341,7 +342,7 @@ else
     ny_live_l := na
 
 // =============================================================
-// DAILY TRADE COUNTER
+// DAILY + PER-SESSION TRADE COUNTERS
 // =============================================================
 
 var int trades_today = 0
@@ -352,7 +353,23 @@ if day_id != last_day_id
     trades_today := 0
     last_day_id  := day_id
 
+// can_trade: used for SWEEP DETECTION only (state-machine engaging, lines
+// turning green, checklist appearing) — deliberately session-agnostic so a
+// sweep outside London/NY still gets tracked instead of silently vanishing.
 can_trade = trades_today < max_day_tr and strategy.position_size == 0
+
+// Trading only actually happens in London/NY, capped independently per
+// session (sess_max_trades each, default 2) — this is the hard rule the
+// user asked for. Counters reset the moment each session starts.
+var int lon_session_trades = 0
+var int ny_session_trades  = 0
+
+if in_london and not in_london[1]
+    lon_session_trades := 0
+if in_ny and not in_ny[1]
+    ny_session_trades := 0
+
+can_trade_entry = can_trade and ((in_london and lon_session_trades < sess_max_trades) or (in_ny and ny_session_trades < sess_max_trades))
 
 // =============================================================
 // PREVIOUS DAY HIGH / LOW
@@ -563,10 +580,7 @@ var float mss_ref_bull = na
 var float fvg_top      = na
 var float fvg_bot      = na
 var int   fvg_bar      = 0
-var bool  awaiting_fvg = false
 var int   mss_bar      = 0
-var float pre_swl      = na
-var float pre_swh      = na
 
 // Which POI level triggered the current active sweep cycle (if any), so its
 // own line can turn green with a check instead of just disappearing once
@@ -608,12 +622,6 @@ var bool prev_bear_w  = false
 var bool prev_bull_w  = false
 var bool prev_bear_m  = false
 var bool prev_bull_m  = false
-
-if state == 0
-    if not na(raw_swl)
-        pre_swl := raw_swl
-    if not na(raw_swh)
-        pre_swh := raw_swh
 
 // ROOT CAUSE #1 of "Sweeps = 7 over years of 1m data".
 // The old test demanded, ALL ON ONE CANDLE: the wick pierces the level by
@@ -674,7 +682,13 @@ any_ls = (ls_pdl or ls_pwl or ls_asia or ls_eql)  and htf_ok_bull and can_trade
 if state == 0 and any_hs
     state        := 1
     sweep_hi     := high
-    mss_ref_bear := na(pre_swl) ? low : pre_swl
+    // Structure reference = a trailing low, seeded at the sweep candle's own
+    // low and pulled down each bar that DOESN'T break it (see the trailing
+    // update below the MSS check). This is "the low of the pullback since
+    // the sweep" — the last bearish structure point before the reaction —
+    // not a distant swing pivot from sw_len bars back, which could sit far
+    // away or on the wrong side of price and made MSS unreachable.
+    mss_ref_bear := low
     state_bar    := bar_index
     cnt_sweep    += 1
     cyc_touched   := false
@@ -692,7 +706,7 @@ if state == 0 and any_hs
 if state == 0 and any_ls
     state        := 2
     sweep_lo     := low
-    mss_ref_bull := na(pre_swh) ? high : pre_swh
+    mss_ref_bull := high
     state_bar    := bar_index
     cnt_sweep    += 1
     cyc_touched   := false
@@ -706,18 +720,32 @@ if state == 0 and any_ls
 
 if (state == 1 or state == 2) and (bar_index - state_bar) > mss_max_bars
     state := 0
-    awaiting_fvg := false
     active_sweep_px := na
     line.delete(mss_ref_line)
     label.delete(mss_ref_lbl)
     mss_ref_line    := na
     mss_ref_lbl     := na
 
-bear_mss = state == 1 and not na(mss_ref_bear) and body_lo < mss_ref_bear and is_bear
-bull_mss = state == 2 and not na(mss_ref_bull) and body_hi > mss_ref_bull and is_bull
+// Checked BEFORE the trailing reference is extended with this bar's own
+// low/high, so "close breaks the structure formed so far" and "today's low
+// becomes the new structure point" can never both be true on the same bar.
+bear_mss = state == 1 and not na(mss_ref_bear) and close < mss_ref_bear
+bull_mss = state == 2 and not na(mss_ref_bull) and close > mss_ref_bull
+
+if state == 1 and not bear_mss
+    mss_ref_bear := math.min(mss_ref_bear, low)
+    if not na(mss_ref_line)
+        line.set_y1(mss_ref_line, mss_ref_bear)
+        line.set_y2(mss_ref_line, mss_ref_bear)
+        label.set_y(mss_ref_lbl, mss_ref_bear)
+if state == 2 and not bull_mss
+    mss_ref_bull := math.max(mss_ref_bull, high)
+    if not na(mss_ref_line)
+        line.set_y1(mss_ref_line, mss_ref_bull)
+        line.set_y2(mss_ref_line, mss_ref_bull)
+        label.set_y(mss_ref_lbl, mss_ref_bull)
 
 if bear_mss
-    awaiting_fvg := true
     mss_bar      := bar_index
     state        := 3
     state_bar    := bar_index
@@ -731,7 +759,6 @@ if bear_mss
     mss_ref_lbl     := na
 
 if bull_mss
-    awaiting_fvg := true
     mss_bar      := bar_index
     state        := 4
     state_bar    := bar_index
@@ -741,68 +768,76 @@ if bull_mss
     mss_ref_line    := na
     mss_ref_lbl     := na
 
-// ROOT CAUSE #3. The old code checked mss_bear_ok[1] — i.e. EXACTLY ONE bar
-// after the structure break — and if that single bar happened not to leave a
-// 3-candle gap, it gave up and reset the whole setup to IDLE. The impulse
-// leg after an MSS usually runs for several bars and the displacement gap
-// often appears on the 2nd, 3rd or 4th bar, not always the 1st. That is the
-// MSS=4 -> FVG=2 attrition.
+// ROOT CAUSE #3 + "closest imbalance" rule. The old code checked
+// mss_bear_ok[1] — exactly one bar after the structure break — and gave up
+// entirely if that single bar left no 3-candle gap (impulses usually run
+// several bars; the gap can appear on the 2nd-4th bar, not just the 1st).
+// That was the MSS=4 -> FVG=2 attrition.
 //
-// Now the machine keeps hunting for a qualifying gap for fvg_search_bars
-// after the break, taking the FIRST one that qualifies, and only abandons
-// the setup if the whole window passes with nothing.
-if awaiting_fvg and state == 3 and bar_index > mss_bar
-    bear_gap = low[2] - high
-    if bear_gap >= fvg_min_gap
-        fvg_top := low[2]
-        fvg_bot := high
-        fvg_bar := bar_index
-        cnt_fvg += 1
-        awaiting_fvg := false
-        box.delete(fvg_entry_box)
-        fvg_entry_box := box.new(bar_index - 2, fvg_top, bar_index + 1, fvg_bot,
-             border_color = color.new(color.red, 10),
-             bgcolor      = color.new(color.red, 80),
-             text         = "ENTRY FVG (Bear)",
-             text_color   = color.new(color.red, 20),
-             text_size    = size.small,
-             text_halign  = text.align_left,
-             text_valign  = text.align_top)
-    else if (bar_index - mss_bar) >= fvg_search_bars
+// It also locked onto the FIRST gap found. But as the impulse continues,
+// each new gap forms progressively CLOSER to where price currently is — so
+// "the imbalance closest to current price" (the user's rule when several
+// form) is whichever one is MOST RECENT, not the first. So this now keeps
+// overwriting fvg_top/fvg_bot with the latest qualifying gap on every bar,
+// for as long as price hasn't already retraced back into the current one —
+// once it has, that's the retest, and the zone freezes for the entry logic
+// below to evaluate.
+if state == 3 and bar_index > mss_bar
+    already_in_current = not na(fvg_top) and high >= fvg_bot and low <= fvg_top
+    if not already_in_current
+        bear_gap = low[2] - high
+        if bear_gap >= fvg_min_gap
+            if na(fvg_top)
+                cnt_fvg += 1
+            fvg_top := low[2]
+            fvg_bot := high
+            fvg_bar := bar_index
+            box.delete(fvg_entry_box)
+            fvg_entry_box := box.new(bar_index - 2, fvg_top, bar_index + 1, fvg_bot,
+                 border_color = color.new(color.red, 10),
+                 bgcolor      = color.new(color.red, 80),
+                 text         = "ENTRY FVG (Bear)",
+                 text_color   = color.new(color.red, 20),
+                 text_size    = size.small,
+                 text_halign  = text.align_left,
+                 text_valign  = text.align_top)
+    if na(fvg_top) and (bar_index - mss_bar) >= fvg_search_bars
         state := 0
-        awaiting_fvg := false
+        active_sweep_px := na
+    else if not na(fvg_top) and (bar_index - mss_bar) > fvg_max_bars
+        box.delete(fvg_entry_box)
+        state := 0
         active_sweep_px := na
 
-if awaiting_fvg and state == 4 and bar_index > mss_bar
-    bull_gap = low - high[2]
-    if bull_gap >= fvg_min_gap
-        fvg_top := low
-        fvg_bot := high[2]
-        fvg_bar := bar_index
-        cnt_fvg += 1
-        awaiting_fvg := false
-        box.delete(fvg_entry_box)
-        fvg_entry_box := box.new(bar_index - 2, fvg_top, bar_index + 1, fvg_bot,
-             border_color = color.new(color.teal, 10),
-             bgcolor      = color.new(color.teal, 80),
-             text         = "ENTRY FVG (Bull)",
-             text_color   = color.new(color.teal, 20),
-             text_size    = size.small,
-             text_halign  = text.align_left,
-             text_valign  = text.align_top)
-    else if (bar_index - mss_bar) >= fvg_search_bars
+if state == 4 and bar_index > mss_bar
+    already_in_current = not na(fvg_top) and low <= fvg_top and high >= fvg_bot
+    if not already_in_current
+        bull_gap = low - high[2]
+        if bull_gap >= fvg_min_gap
+            if na(fvg_top)
+                cnt_fvg += 1
+            fvg_top := low
+            fvg_bot := high[2]
+            fvg_bar := bar_index
+            box.delete(fvg_entry_box)
+            fvg_entry_box := box.new(bar_index - 2, fvg_top, bar_index + 1, fvg_bot,
+                 border_color = color.new(color.teal, 10),
+                 bgcolor      = color.new(color.teal, 80),
+                 text         = "ENTRY FVG (Bull)",
+                 text_color   = color.new(color.teal, 20),
+                 text_size    = size.small,
+                 text_halign  = text.align_left,
+                 text_valign  = text.align_top)
+    if na(fvg_top) and (bar_index - mss_bar) >= fvg_search_bars
         state := 0
-        awaiting_fvg := false
+        active_sweep_px := na
+    else if not na(fvg_top) and (bar_index - mss_bar) > fvg_max_bars
+        box.delete(fvg_entry_box)
+        state := 0
         active_sweep_px := na
 
 if (state == 3 or state == 4) and not na(fvg_entry_box)
     box.set_right(fvg_entry_box, bar_index + 5)
-
-if (state == 3 or state == 4) and not awaiting_fvg and (bar_index - fvg_bar) > fvg_max_bars
-    box.delete(fvg_entry_box)
-    state := 0
-    awaiting_fvg := false
-    active_sweep_px := na
 
 // =============================================================
 // ENTRY CONDITIONS
@@ -819,8 +854,11 @@ close_ok_bull  = req_close_fvg ? (close >= fvg_bot and close <= fvg_top and is_b
 engulf_ok_bear = not req_engulf or bear_engulf
 engulf_ok_bull = not req_engulf or bull_engulf
 
-short_signal = touched_bear and close_ok_bear and engulf_ok_bear and can_trade
-long_signal  = touched_bull and close_ok_bull  and engulf_ok_bull and can_trade
+// can_trade_entry (not the bare can_trade) — actual order placement is
+// restricted to London/NY sessions, session-capped, on top of the daily cap
+// and being flat. Sweep tracking above stays session-agnostic on purpose.
+short_signal = touched_bear and close_ok_bear and engulf_ok_bear and can_trade_entry
+long_signal  = touched_bull and close_ok_bull  and engulf_ok_bull and can_trade_entry
 
 // Checklist progress for the current cycle — "ever true so far this cycle",
 // not "true on this exact bar" (entry still needs all three aligned on the
@@ -841,48 +879,58 @@ if (touched_bear and engulf_ok_bear) or (touched_bull and engulf_ok_bull)
 // then a retrace back into the gap — the distance from entry back up to that
 // wick is frequently well beyond max_sl (50 pips). The old code treated that
 // as "reject the trade entirely", silently discarding otherwise-valid
-// signals and never reaching strategy.entry at all.
+// signals and never reaching strategy.entry at all. It also plotted the
+// SHORT/LONG marker from short_signal/long_signal alone, so the chart could
+// show an entry arrow even on a bar where the trade was actually rejected —
+// exactly the "marker but nothing in the Strategy Tester" the user saw.
 //
-// Now, when the structural stop is too wide, it is CAPPED at max_sl instead
-// of dropping the trade (cap_sl_to_max, on by default). Risk per trade stays
-// bounded exactly as before — position size is derived from the actual stop
-// distance either way — but the setup is taken. Turn the input off to
-// restore the strict structural-stop-or-nothing behaviour.
-if short_signal
-    sl_struct = sweep_hi + sweep_buf
-    sl_price  = cap_sl_to_max ? math.min(sl_struct, close + max_sl) : sl_struct
-    tp_price  = close - (sl_price - close) * rr_ratio
-    sl_dist   = sl_price - close
-    if sl_dist >= min_sl and sl_dist <= max_sl
-        qty = f_qty(sl_dist)
-        if qty > 0
-            strategy.entry("Short", strategy.short, qty = qty, comment = "SMC Short")
-            strategy.exit("SX", from_entry = "Short", stop = sl_price, limit = tp_price)
-            trades_today += 1
-            cnt_entry    += 1
-            state := 0
-            awaiting_fvg := false
-            active_sweep_px := na
-            if not na(fvg_entry_box)
-                box.set_right(fvg_entry_box, bar_index)
+// Now sl/tp/qty are computed unconditionally (na-safe) so a single validated
+// boolean (short_valid/long_valid) gates BOTH the plotted marker below and
+// the actual order here — they can never disagree. When the structural stop
+// is too wide it's CAPPED at max_sl instead of dropping the trade
+// (cap_sl_to_max, on by default); risk per trade stays bounded either way
+// since size is derived from the real stop distance.
+sl_struct_s = sweep_hi + sweep_buf
+sl_price_s  = cap_sl_to_max ? math.min(sl_struct_s, close + max_sl) : sl_struct_s
+sl_dist_s   = sl_price_s - close
+tp_price_s  = close - (sl_price_s - close) * rr_ratio
+qty_s       = f_qty(sl_dist_s)
+short_valid = short_signal and sl_dist_s >= min_sl and sl_dist_s <= max_sl and qty_s > 0
 
-if long_signal
-    sl_struct = sweep_lo - sweep_buf
-    sl_price  = cap_sl_to_max ? math.max(sl_struct, close - max_sl) : sl_struct
-    tp_price  = close + (close - sl_price) * rr_ratio
-    sl_dist   = close - sl_price
-    if sl_dist >= min_sl and sl_dist <= max_sl
-        qty = f_qty(sl_dist)
-        if qty > 0
-            strategy.entry("Long", strategy.long, qty = qty, comment = "SMC Long")
-            strategy.exit("LX", from_entry = "Long", stop = sl_price, limit = tp_price)
-            trades_today += 1
-            cnt_entry    += 1
-            state := 0
-            awaiting_fvg := false
-            active_sweep_px := na
-            if not na(fvg_entry_box)
-                box.set_right(fvg_entry_box, bar_index)
+sl_struct_l = sweep_lo - sweep_buf
+sl_price_l  = cap_sl_to_max ? math.max(sl_struct_l, close - max_sl) : sl_struct_l
+sl_dist_l   = close - sl_price_l
+tp_price_l  = close + (close - sl_price_l) * rr_ratio
+qty_l       = f_qty(sl_dist_l)
+long_valid  = long_signal and sl_dist_l >= min_sl and sl_dist_l <= max_sl and qty_l > 0
+
+if short_valid
+    strategy.entry("Short", strategy.short, qty = qty_s, comment = "SMC Short")
+    strategy.exit("SX", from_entry = "Short", stop = sl_price_s, limit = tp_price_s)
+    trades_today += 1
+    cnt_entry    += 1
+    if in_london
+        lon_session_trades += 1
+    if in_ny
+        ny_session_trades += 1
+    state := 0
+    active_sweep_px := na
+    if not na(fvg_entry_box)
+        box.set_right(fvg_entry_box, bar_index)
+
+if long_valid
+    strategy.entry("Long", strategy.long, qty = qty_l, comment = "SMC Long")
+    strategy.exit("LX", from_entry = "Long", stop = sl_price_l, limit = tp_price_l)
+    trades_today += 1
+    cnt_entry    += 1
+    if in_london
+        lon_session_trades += 1
+    if in_ny
+        ny_session_trades += 1
+    state := 0
+    active_sweep_px := na
+    if not na(fvg_entry_box)
+        box.set_right(fvg_entry_box, bar_index)
 
 // =============================================================
 // VISUALS — session range boxes (Asia/London/NY), instead of a flat
@@ -1566,14 +1614,17 @@ plotshape(bear_mss, title = "Structure Break Bear", style = shape.labeldown, loc
 plotshape(bull_mss, title = "Structure Break Bull", style = shape.labelup,   location = location.belowbar, color = color.orange, textcolor = color.black, text = "CE", size = size.small)
 
 // Entry signals
-plotshape(short_signal, title = "Short Entry", style = shape.labeldown, location = location.abovebar, color = color.red,  textcolor = color.white, text = "SHORT", size = size.small)
-plotshape(long_signal,  title = "Long Entry",  style = shape.labelup,   location = location.belowbar, color = color.teal, textcolor = color.white, text = "LONG",  size = size.small)
+// Gated by short_valid/long_valid (not the raw signal) so the marker can
+// never appear on a bar where the order was actually rejected by the SL/qty
+// checks — what you see on the chart is exactly what's in the Strategy Tester.
+plotshape(short_valid, title = "Short Entry", style = shape.labeldown, location = location.abovebar, color = color.red,  textcolor = color.white, text = "SHORT", size = size.small)
+plotshape(long_valid,  title = "Long Entry",  style = shape.labelup,   location = location.belowbar, color = color.teal, textcolor = color.white, text = "LONG",  size = size.small)
 
 // =============================================================
 // INFO TABLE  (top right)
 // =============================================================
 
-var table tbl = table.new(position.top_right, 2, 13, bgcolor = color.new(color.black, 75), border_width = 1, border_color = color.gray)
+var table tbl = table.new(position.top_right, 2, 15, bgcolor = color.new(color.black, 75), border_width = 1, border_color = color.gray)
 
 if barstate.islast and show_info_tbl
     table.cell(tbl, 0, 0, "SMC v4 EURUSD", text_color = color.white, bgcolor = color.new(color.navy, 50), text_size = size.normal)
@@ -1656,6 +1707,16 @@ if barstate.islast and show_info_tbl
     table.cell(tbl, 0, 12, "Entries", text_color = color.gray, text_size = size.small)
     table.cell(tbl, 1, 12, str.tostring(cnt_entry), text_color = color.lime,  text_size = size.small)
 
+    lon_str = str.tostring(lon_session_trades) + "/" + str.tostring(sess_max_trades)
+    lon_col = lon_session_trades >= sess_max_trades ? color.red : color.lime
+    table.cell(tbl, 0, 13, "London Trades", text_color = color.gray, text_size = size.small)
+    table.cell(tbl, 1, 13, lon_str, text_color = lon_col, text_size = size.small)
+
+    ny_str = str.tostring(ny_session_trades) + "/" + str.tostring(sess_max_trades)
+    ny_col = ny_session_trades >= sess_max_trades ? color.red : color.lime
+    table.cell(tbl, 0, 14, "NY Trades", text_color = color.gray, text_size = size.small)
+    table.cell(tbl, 1, 14, ny_str, text_color = ny_col, text_size = size.small)
+
 // =============================================================
 // STATS TABLE  (top left)
 // =============================================================
@@ -1725,7 +1786,7 @@ if barstate.islast and show_checklist and state != 0
     table.cell(checklist, 1, 0, "",                 text_color = color.white, bgcolor = color.new(dir_col, 30), text_size = size.normal)
 
     mss_done = state == 3 or state == 4
-    fvg_done = state == 3 or state == 4
+    fvg_done = mss_done and not na(fvg_top)
 
     [c1txt, c1col] = f_chk_cell(true, true)
     table.cell(checklist, 0, 1, "Zona Liquidada",      text_color = color.gray, text_size = size.small)
@@ -1759,8 +1820,8 @@ alertcondition(any_hs,       title = "Sweep HIGH",         message = "Sweep HIGH
 alertcondition(any_ls,       title = "Sweep LOW",          message = "Sweep LOW - watch for bullish MSS")
 alertcondition(bear_mss,     title = "MSS Bear Confirmed", message = "Bearish MSS confirmed - FVG active")
 alertcondition(bull_mss,     title = "MSS Bull Confirmed", message = "Bullish MSS confirmed - FVG active")
-alertcondition(short_signal, title = "SHORT Entry",        message = "SMC SHORT | Engulfing FVG retest | Entry: {{close}}")
-alertcondition(long_signal,  title = "LONG Entry",         message = "SMC LONG  | Engulfing FVG retest | Entry: {{close}}")
+alertcondition(short_valid, title = "SHORT Entry",        message = "SMC SHORT | Engulfing FVG retest | Entry: {{close}}")
+alertcondition(long_valid,  title = "LONG Entry",         message = "SMC LONG  | Engulfing FVG retest | Entry: {{close}}")
 alertcondition(eqh_new,      title = "EQH Formed",         message = "Equal High detected - liquidity pool above")
 alertcondition(eql_new,      title = "EQL Formed",         message = "Equal Low detected - liquidity pool below")
 
