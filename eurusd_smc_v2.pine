@@ -140,6 +140,34 @@ chart_tf_minutes = timeframe.in_seconds(timeframe.period) / 60.0
 fvg_tf_ok         = chart_tf_minutes >= fvg_tf_min and chart_tf_minutes <= fvg_tf_max
 
 // =============================================================
+// VISIBLE PRICE RANGE — Pine has no direct API for the visible y-axis
+// range, only the visible x-axis (chart.left/right_visible_bar_time).
+// Any pan/zoom re-triggers a full script recalculation, so tracking the
+// highest/lowest price among only the currently-visible bars gives an
+// accurate proxy for "what price range is actually on screen right now"
+// by the time execution reaches the last bar. Lines/boxes outside this
+// range are hidden even if they'd pass the % distance rule — this is
+// what stops a level from rendering across the whole width of a zoomed-in
+// view when its origin (and therefore context) isn't visible at all.
+// =============================================================
+
+is_vis_bar = time >= chart.left_visible_bar_time and time <= chart.right_visible_bar_time
+
+// "var" already resets to na once per full recalculation (each pan/zoom
+// re-triggers one), then accumulates while inside the window and freezes
+// (stops updating, keeps its last value) for bars after it — which is
+// exactly what's needed: by the current/last bar, vis_hi/vis_lo hold the
+// visible window's range even if the user has scrolled away from price.
+var float vis_hi = na
+var float vis_lo = na
+if is_vis_bar
+    vis_hi := na(vis_hi) ? high : math.max(vis_hi, high)
+    vis_lo := na(vis_lo) ? low  : math.min(vis_lo, low)
+
+f_in_viewport(float px) =>
+    not na(px) and (na(vis_hi) or na(vis_lo) or (px <= vis_hi and px >= vis_lo))
+
+// =============================================================
 // HTF BIAS  (no-repainting)
 // =============================================================
 
@@ -367,7 +395,7 @@ f_qty(float sl_dist) =>
     sl_dist > 0.0 ? (fixed_cap * f_risk(attempt)) / sl_dist : 0.0
 
 poi_in_rng(float px) =>
-    not na(px) and math.abs(close - px) <= max_poi_dist
+    not na(px) and math.abs(close - px) <= max_poi_dist and f_in_viewport(px)
 
 // =============================================================
 // CANDLE BODY + ENGULFING
@@ -785,7 +813,7 @@ if eql_near_alert
 // =============================================================
 
 f_imb_in_rng(float px) =>
-    not na(px) and math.abs(close - px) <= imb_dist
+    not na(px) and math.abs(close - px) <= imb_dist and f_in_viewport(px)
 
 new_bear_1h  = htf_bear_1h and not prev_bear_1h
 gone_bear_1h = not htf_bear_1h and prev_bear_1h
