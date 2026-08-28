@@ -225,11 +225,23 @@ htf_bull_m  = hm_h2 < hm_l0 and (hm_l0 - hm_h2) >= htf_fvg_min
 // Fix: FREEZE the gap's edges into var floats the moment the gap forms, and
 // test mitigation against that frozen edge. A zone re-arms only when a
 // genuinely different gap forms (near edge changes while the pattern holds).
+//
+// STATISTICAL FIX: this used to swap to a new gap as soon as ANY different
+// gap formed, even while the one currently tracked was still unmitigated —
+// so during a sustained move that leaves several stacked 1H (or 4H/D/W/M)
+// gaps in a row, only the MOST RECENT one ever got shown, and the older
+// unfilled ones were silently dropped. Price statistically tends to fill
+// higher-timeframe imbalances in order, oldest first, before continuing —
+// so the oldest unmitigated one is the one that actually matters as a
+// target/reference, not the newest. Now a new gap is only picked up once
+// the CURRENTLY tracked one has actually been mitigated (or nothing was
+// tracked yet) — it stays sticky to the oldest unfilled gap of a move
+// instead of jumping to whichever formed last.
 f_htf_edge(bool gap_now, float near_now, float far_now, bool is_supply, float edge_in, float far_in, bool ok_in) =>
     float e = edge_in
     float f = far_in
     bool  k = ok_in
-    if gap_now and (na(e) or near_now != e)
+    if gap_now and near_now != e and (na(e) or not k)
         e := near_now
         f := far_now
         k := true
