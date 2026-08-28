@@ -619,6 +619,32 @@ var line  fvg_top_line = na
 var line  fvg_bot_line = na
 var label fvg_lbl      = na
 
+// Deletes the entry-FVG lines/label and clears the handles. Called at every
+// point a cycle ends or restarts, so nothing from an old cycle can ever
+// leak into a new one (that leak was the actual cause of the vertical-line
+// render bug — see the fvg_top/fvg_bot reset at the sweep transitions below).
+// Defined here (before ANY call site) — Pine requires a function to appear
+// before its first use; putting it later in the file is a compile error.
+f_fvg_clear() =>
+    line.delete(fvg_top_line)
+    line.delete(fvg_bot_line)
+    label.delete(fvg_lbl)
+    fvg_top_line := na
+    fvg_bot_line := na
+    fvg_lbl      := na
+
+// Draws the entry FVG as two plain dashed lines (top edge + bottom edge)
+// instead of a filled box, extend=extend.right so they grow on their own —
+// no per-bar "set_right" upkeep needed, and no box whose height can ever
+// blow up. col is red for a bear (sell) zone, teal for a bull (buy) zone.
+f_fvg_draw(float top, float bot, bool bear_side) =>
+    f_fvg_clear()
+    col = bear_side ? color.new(color.red, 10) : color.new(color.teal, 10)
+    txt = bear_side ? "ENTRY FVG (Bear)" : "ENTRY FVG (Bull)"
+    fvg_top_line := line.new(bar_index - 2, top, bar_index + 1, top, extend = extend.right, color = col, style = line.style_dashed, width = 1)
+    fvg_bot_line := line.new(bar_index - 2, bot, bar_index + 1, bot, extend = extend.right, color = col, style = line.style_dashed, width = 1)
+    fvg_lbl      := label.new(bar_index, bear_side ? bot : top, txt, style = label.style_label_down, color = color.new(color.black, 100), textcolor = col, size = size.small)
+
 // Funnel diagnostics — where in sweep -> MSS -> FVG -> retest -> entry the
 // setups are actually getting cut off. Shown in the info table so a zero-
 // trade backtest is diagnosable at a glance instead of a black box.
@@ -834,30 +860,6 @@ if bull_mss
     mss_ref_lbl     := na
     label.delete(ce_lbl)
     ce_lbl := label.new(bar_index, low, "CE", style = label.style_label_up, color = color.orange, textcolor = color.black, size = size.small)
-
-// Deletes the entry-FVG lines/label and clears the handles. Called at every
-// point a cycle ends or restarts, so nothing from an old cycle can ever
-// leak into a new one (that leak was the actual cause of the vertical-line
-// render bug — see the fvg_top/fvg_bot reset at the sweep transitions above).
-f_fvg_clear() =>
-    line.delete(fvg_top_line)
-    line.delete(fvg_bot_line)
-    label.delete(fvg_lbl)
-    fvg_top_line := na
-    fvg_bot_line := na
-    fvg_lbl      := na
-
-// Draws the entry FVG as two plain dashed lines (top edge + bottom edge)
-// instead of a filled box, extend=extend.right so they grow on their own —
-// no per-bar "set_right" upkeep needed, and no box whose height can ever
-// blow up. col is red for a bear (sell) zone, teal for a bull (buy) zone.
-f_fvg_draw(float top, float bot, bool bear_side) =>
-    f_fvg_clear()
-    col = bear_side ? color.new(color.red, 10) : color.new(color.teal, 10)
-    txt = bear_side ? "ENTRY FVG (Bear)" : "ENTRY FVG (Bull)"
-    fvg_top_line := line.new(bar_index - 2, top, bar_index + 1, top, extend = extend.right, color = col, style = line.style_dashed, width = 1)
-    fvg_bot_line := line.new(bar_index - 2, bot, bar_index + 1, bot, extend = extend.right, color = col, style = line.style_dashed, width = 1)
-    fvg_lbl      := label.new(bar_index, bear_side ? bot : top, txt, style = label.style_label_down, color = color.new(color.black, 100), textcolor = col, size = size.small)
 
 // ROOT CAUSE #3 + "closest imbalance" rule. The old code checked
 // mss_bear_ok[1] — exactly one bar after the structure break — and gave up
