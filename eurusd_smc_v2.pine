@@ -120,10 +120,8 @@ imb_line_col    = input.color(color.white, "Imbalance Color", group = GVIS, inli
      tooltip = "One flat color for every imbalance line (HTF and chart-native). The line uses the transparency below; its label text is always fully solid.")
 imb_line_transp = input.int(10, "Transp %", 0, 90, group = GVIS, inline = "imbcol")
 
-max_poi_pct = input.float(0.40, "Max POI Distance (%)", 0.05, 5.0, 0.05, group = GVIS,
-     tooltip = "Hide a POI line once price is farther than this % away. Auto x2 on futures.")
-imb_max_pct = input.float(1.00, "Max Imbalance Distance (%)", 0.10, 5.0, 0.10, group = GVIS,
-     tooltip = "Same idea for imbalances, same rule on every timeframe. Auto x2 on futures.")
+max_poi_pct = input.float(0.40, "Max Distance (%) — POI lines AND imbalances", 0.05, 5.0, 0.05, group = GVIS,
+     tooltip = "ONE distance rule for everything: POI lines and imbalances alike hide once price is farther than this % away. Auto x2 on futures. (Used to be two separate settings — a leftover 1% imbalance threshold was why imbalances weren't respecting the same limit as POI lines.)")
 merge_tol   = input.float(0.0005, "Zone Merge Tolerance", 0.00010, 0.005, 0.00010, group = GVIS,
      tooltip = "Zones within this price distance of each other collapse into one line, names joined with \"+\".")
 
@@ -146,13 +144,12 @@ near_dist          = close * near_pct_eff / 100.0
 near_reset_pct_eff = syminfo.type == "futures" ? near_alert_reset_pct * 2.0 : near_alert_reset_pct
 near_reset_dist    = close * near_reset_pct_eff / 100.0
 
-// Imbalances (FVG) use ONE flat distance rule on every timeframe and every
-// chart TF — 1% of price by default. Earlier versions gave D/W/M a wider or
-// unlimited leash and skipped the filter entirely on Daily/Weekly/Monthly
-// charts; both caused a flood of unmitigated imbalances to stay visible when
-// zooming out. Now it's simple: farther than imb_dist away → hidden, period.
-imb_pct_eff = syminfo.type == "futures" ? imb_max_pct * 2.0 : imb_max_pct
-imb_dist    = close * imb_pct_eff / 100.0
+// Imbalances now reuse max_poi_dist directly instead of a separate
+// imb_max_pct — they used to have their own 1% threshold that quietly
+// drifted from the POI one (0.4%), which is exactly why imbalances weren't
+// respecting the same visible-distance limit as POI lines. One input, one
+// distance, applied identically to both.
+imb_dist = max_poi_dist
 
 // Formats a timeframe.period string ("1","5","60","240","D","W","M") into a
 // short human label ("1m","5m","1H","4H","D","W","MN") for imbalance labels.
