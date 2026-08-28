@@ -29,21 +29,23 @@ strategy(
 // UTC+2 (matches typical broker/exchange chart time, e.g. FXCM feeds).
 var string GSESS = "Market Sessions (UTC+2)"
 
+show_session_labels = input.bool(false, "Show Session Name Labels (Asia/London/New York text)", group = GSESS)
+
 show_asia_box = input.bool(true,  "Asia",   group = GSESS, inline = "asia1")
 asia_box_txt  = input.string("Asia", "Label", group = GSESS, inline = "asia1")
-asia_box_col  = input.color(color.purple, "Color", group = GSESS, inline = "asia1")
+asia_box_col  = input.color(color.red, "Color", group = GSESS, inline = "asia1")
 kz_asia_open  = input.int(0, "Open (h)",  0, 23, group = GSESS, inline = "asia2")
 kz_asia_close = input.int(8, "Close (h)", 0, 23, group = GSESS, inline = "asia2")
 
 show_lon_box = input.bool(true,  "London", group = GSESS, inline = "lon1")
 lon_box_txt  = input.string("London", "Label", group = GSESS, inline = "lon1")
-lon_box_col  = input.color(color.blue, "Color", group = GSESS, inline = "lon1")
+lon_box_col  = input.color(color.green, "Color", group = GSESS, inline = "lon1")
 kz_lon_open  = input.int(9,  "Open (h)",  0, 23, group = GSESS, inline = "lon2")
 kz_lon_close = input.int(11, "Close (h)", 0, 23, group = GSESS, inline = "lon2")
 
 show_ny_box   = input.bool(true,  "New York", group = GSESS, inline = "ny1")
 ny_box_txt    = input.string("New York", "Label", group = GSESS, inline = "ny1")
-ny_box_col    = input.color(color.yellow, "Color", group = GSESS, inline = "ny1")
+ny_box_col    = input.color(color.blue, "Color", group = GSESS, inline = "ny1")
 kz_ny_open    = input.int(14, "Open (h)",    0, 23, group = GSESS, inline = "ny2")
 kz_ny_close_h = input.int(16, "Close (h)",   0, 23, group = GSESS, inline = "ny2")
 kz_ny_close_m = input.int(30, "Close (min)", 0, 59, group = GSESS, inline = "ny2")
@@ -731,6 +733,19 @@ if state == 0 and any_hs
     cyc_touched   := false
     cyc_close_ok  := false
     cyc_engulf_ok := false
+    // BUG FIX: fvg_top/fvg_bot were never cleared between cycles, so a brand
+    // new cycle could inherit the PREVIOUS cycle's gap coordinates (a
+    // completely different price level) until it happened to find its own
+    // new gap. That stale zone could keep the FVG search running on the
+    // wrong timeout (fvg_max_bars instead of fvg_search_bars, since the
+    // na(fvg_top) check that picks between them was fooled by the leftover
+    // value) with a box still anchored 2-3 bars wide at the old price — a
+    // thin, absurdly tall box that renders as a vertical line. Clearing
+    // both here, at the start of every fresh cycle, closes that off.
+    fvg_top := na
+    fvg_bot := na
+    box.delete(fvg_entry_box)
+    fvg_entry_box := na
     active_sweep_px := hs_pdh ? pdh : hs_pwh ? pwh : hs_asia ? asia_h : last_eqh
     // Phase 1: zone liquidated (its own line turns green with a check via
     // f_poi_entry), then show the level price must break through to confirm
@@ -749,6 +764,10 @@ if state == 0 and any_ls
     cyc_touched   := false
     cyc_close_ok  := false
     cyc_engulf_ok := false
+    fvg_top := na
+    fvg_bot := na
+    box.delete(fvg_entry_box)
+    fvg_entry_box := na
     active_sweep_px := ls_pdl ? pdl : ls_pwl ? pwl : ls_asia ? asia_l : last_eql
     line.delete(mss_ref_line)
     label.delete(mss_ref_lbl)
@@ -829,7 +848,10 @@ if state == 3 and bar_index > mss_bar
     already_in_current = not na(fvg_top) and high >= fvg_bot and low <= fvg_top
     if not already_in_current
         bear_gap = low[2] - high
-        if bear_gap >= fvg_min_gap
+        // Sanity ceiling: a genuine data anomaly (weekend gap, bad tick) can
+        // otherwise produce a "gap" many times wider than any real trade
+        // setup, creating a box that renders as a near-vertical spike.
+        if bear_gap >= fvg_min_gap and bear_gap <= max_sl * 5
             if na(fvg_top)
                 cnt_fvg += 1
             fvg_top := low[2]
@@ -860,7 +882,7 @@ if state == 4 and bar_index > mss_bar
     already_in_current = not na(fvg_top) and low <= fvg_top and high >= fvg_bot
     if not already_in_current
         bull_gap = low - high[2]
-        if bull_gap >= fvg_min_gap
+        if bull_gap >= fvg_min_gap and bull_gap <= max_sl * 5
             if na(fvg_top)
                 cnt_fvg += 1
             fvg_top := low
@@ -1011,12 +1033,17 @@ var box[] asia_boxes = array.new<box>(0)
 var box[] lon_boxes  = array.new<box>(0)
 var box[] ny_boxes   = array.new<box>(0)
 
+// Boxes only by default — the name text is opt-in (show_session_labels).
+asia_lbl_txt = show_session_labels ? asia_box_txt : ""
+lon_lbl_txt  = show_session_labels ? lon_box_txt  : ""
+ny_lbl_txt   = show_session_labels ? ny_box_txt   : ""
+
 if show_asia_box
-    f_session_box(in_asia,   in_asia[1],   asia_live_h, asia_live_l, color.new(asia_box_col, 40), color.new(asia_box_col, 90), asia_box_txt, asia_boxes)
+    f_session_box(in_asia,   in_asia[1],   asia_live_h, asia_live_l, color.new(asia_box_col, 40), color.new(asia_box_col, 90), asia_lbl_txt, asia_boxes)
 if show_lon_box
-    f_session_box(in_london, in_london[1], lon_live_h,  lon_live_l,  color.new(lon_box_col,  40), color.new(lon_box_col,  90), lon_box_txt,  lon_boxes)
+    f_session_box(in_london, in_london[1], lon_live_h,  lon_live_l,  color.new(lon_box_col,  40), color.new(lon_box_col,  90), lon_lbl_txt,  lon_boxes)
 if show_ny_box
-    f_session_box(in_ny,     in_ny[1],     ny_live_h,   ny_live_l,   color.new(ny_box_col,   30), color.new(ny_box_col,   90), ny_box_txt,   ny_boxes)
+    f_session_box(in_ny,     in_ny[1],     ny_live_h,   ny_live_l,   color.new(ny_box_col,   30), color.new(ny_box_col,   90), ny_lbl_txt,   ny_boxes)
 
 // =============================================================
 // POI LINE MANAGER — rebuilt every bar with merge logic
