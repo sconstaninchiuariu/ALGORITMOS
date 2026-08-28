@@ -1584,6 +1584,7 @@ if show_levels or show_fvg_vis
     poi_bar = array.new_int(0)
     poi_ext = array.new_bool(0)     // true = extend.right ("live"), false = frozen at poi_end
     poi_end = array.new_int(0)      // x2 (time) — "now" when live, liquidation time when frozen
+    poi_hi  = array.new_bool(0)     // true = zone marks a HIGH/max (label above line), false = LOW/min (label below)
 
     if show_levels and use_pdhl
         [show_pdh, nm_pdh, act_pdh, frz_pdh, end_pdh] = f_poi_entry(pdh, pdh_swept, pdh_swept_t, pdh_swept_s, "PDH")
@@ -1596,6 +1597,7 @@ if show_levels or show_fvg_vis
             array.push(poi_bar, nz(pdh_bar, time))
             array.push(poi_ext, not frz_pdh)
             array.push(poi_end, end_pdh)
+            array.push(poi_hi, true)
         [show_pdl, nm_pdl, act_pdl, frz_pdl, end_pdl] = f_poi_entry(pdl, pdl_swept, pdl_swept_t, pdl_swept_s, "PDL")
         if show_pdl
             array.push(poi_px, pdl)
@@ -1606,6 +1608,7 @@ if show_levels or show_fvg_vis
             array.push(poi_bar, nz(pdl_bar, time))
             array.push(poi_ext, not frz_pdl)
             array.push(poi_end, end_pdl)
+            array.push(poi_hi, false)
     if show_levels and use_pwhl
         [show_pwh, nm_pwh, act_pwh, frz_pwh, end_pwh] = f_poi_entry(pwh, pwh_swept, pwh_swept_t, pwh_swept_s, "PWH")
         if show_pwh
@@ -1617,6 +1620,7 @@ if show_levels or show_fvg_vis
             array.push(poi_bar, nz(pwh_bar, time))
             array.push(poi_ext, not frz_pwh)
             array.push(poi_end, end_pwh)
+            array.push(poi_hi, true)
         [show_pwl, nm_pwl, act_pwl, frz_pwl, end_pwl] = f_poi_entry(pwl, pwl_swept, pwl_swept_t, pwl_swept_s, "PWL")
         if show_pwl
             array.push(poi_px, pwl)
@@ -1627,6 +1631,7 @@ if show_levels or show_fvg_vis
             array.push(poi_bar, nz(pwl_bar, time))
             array.push(poi_ext, not frz_pwl)
             array.push(poi_end, end_pwl)
+            array.push(poi_hi, false)
     if show_levels and use_asia
         [show_ah, nm_ah, act_ah, frz_ah, end_ah] = f_poi_entry(asia_h, asia_h_swept, asia_h_swept_t, asia_h_swept_s, "Asia H")
         if show_ah
@@ -1638,6 +1643,7 @@ if show_levels or show_fvg_vis
             array.push(poi_bar, nz(asia_h_bar, time))
             array.push(poi_ext, not frz_ah)
             array.push(poi_end, end_ah)
+            array.push(poi_hi, true)
         [show_al, nm_al, act_al, frz_al, end_al] = f_poi_entry(asia_l, asia_l_swept, asia_l_swept_t, asia_l_swept_s, "Asia L")
         if show_al
             array.push(poi_px, asia_l)
@@ -1648,6 +1654,7 @@ if show_levels or show_fvg_vis
             array.push(poi_bar, nz(asia_l_bar, time))
             array.push(poi_ext, not frz_al)
             array.push(poi_end, end_al)
+            array.push(poi_hi, false)
     if show_levels and use_eql and eql_tf_ok
         [show_eqh, nm_eqh, act_eqh, frz_eqh, end_eqh] = f_poi_entry(last_eqh, eqh_swept, eqh_swept_t, eqh_swept_s, "EQH")
         if show_eqh
@@ -1659,6 +1666,7 @@ if show_levels or show_fvg_vis
             array.push(poi_bar, nz(last_eqh_bar, time))
             array.push(poi_ext, not frz_eqh)
             array.push(poi_end, end_eqh)
+            array.push(poi_hi, true)
         [show_eql, nm_eql, act_eql, frz_eql, end_eql] = f_poi_entry(last_eql, eql_swept, eql_swept_t, eql_swept_s, "EQL")
         if show_eql
             array.push(poi_px, last_eql)
@@ -1669,6 +1677,7 @@ if show_levels or show_fvg_vis
             array.push(poi_bar, nz(last_eql_bar, time))
             array.push(poi_ext, not frz_eql)
             array.push(poi_end, end_eql)
+            array.push(poi_hi, false)
 
     // --- HTF FVG imbalance zones (1H..MN), same merge system as POI levels ---
     if show_levels and use_htf_1h
@@ -1681,6 +1690,7 @@ if show_levels or show_fvg_vis
             array.push(poi_bar, nz(htf_b1h_org, time))
             array.push(poi_ext, true)
             array.push(poi_end, time)
+            array.push(poi_hi, true)
         if htf_bull_1h_ok and f_imb_in_rng(htf_u1h_px)
             array.push(poi_px, htf_u1h_px)
             array.push(poi_nm, "1H FVG Bull")
@@ -1690,6 +1700,7 @@ if show_levels or show_fvg_vis
             array.push(poi_bar, nz(htf_u1h_org, time))
             array.push(poi_ext, true)
             array.push(poi_end, time)
+            array.push(poi_hi, false)
     if show_levels and use_htf_4h
         if htf_bear_4h_ok and f_imb_in_rng(htf_b4h_px)
             array.push(poi_px, htf_b4h_px)
@@ -1700,6 +1711,7 @@ if show_levels or show_fvg_vis
             array.push(poi_bar, nz(htf_b4h_org, time))
             array.push(poi_ext, true)
             array.push(poi_end, time)
+            array.push(poi_hi, true)
         if htf_bull_4h_ok and f_imb_in_rng(htf_u4h_px)
             array.push(poi_px, htf_u4h_px)
             array.push(poi_nm, "4H FVG Bull")
@@ -1709,6 +1721,7 @@ if show_levels or show_fvg_vis
             array.push(poi_bar, nz(htf_u4h_org, time))
             array.push(poi_ext, true)
             array.push(poi_end, time)
+            array.push(poi_hi, false)
     if show_levels and use_htf_d
         if htf_bear_d_ok and f_imb_in_rng(htf_bd_px)
             array.push(poi_px, htf_bd_px)
@@ -1719,6 +1732,7 @@ if show_levels or show_fvg_vis
             array.push(poi_bar, nz(htf_bd_org, time))
             array.push(poi_ext, true)
             array.push(poi_end, time)
+            array.push(poi_hi, true)
         if htf_bull_d_ok and f_imb_in_rng(htf_ud_px)
             array.push(poi_px, htf_ud_px)
             array.push(poi_nm, "D FVG Bull")
@@ -1728,6 +1742,7 @@ if show_levels or show_fvg_vis
             array.push(poi_bar, nz(htf_ud_org, time))
             array.push(poi_ext, true)
             array.push(poi_end, time)
+            array.push(poi_hi, false)
     if show_levels and use_htf_w
         if htf_bear_w_ok and f_imb_in_rng(htf_bw_px)
             array.push(poi_px, htf_bw_px)
@@ -1738,6 +1753,7 @@ if show_levels or show_fvg_vis
             array.push(poi_bar, nz(htf_bw_org, time))
             array.push(poi_ext, true)
             array.push(poi_end, time)
+            array.push(poi_hi, true)
         if htf_bull_w_ok and f_imb_in_rng(htf_uw_px)
             array.push(poi_px, htf_uw_px)
             array.push(poi_nm, "W FVG Bull")
@@ -1747,6 +1763,7 @@ if show_levels or show_fvg_vis
             array.push(poi_bar, nz(htf_uw_org, time))
             array.push(poi_ext, true)
             array.push(poi_end, time)
+            array.push(poi_hi, false)
     if show_levels and use_htf_m
         if htf_bear_m_ok and f_imb_in_rng(htf_bm_px)
             array.push(poi_px, htf_bm_px)
@@ -1757,6 +1774,7 @@ if show_levels or show_fvg_vis
             array.push(poi_bar, nz(htf_bm_org, time))
             array.push(poi_ext, true)
             array.push(poi_end, time)
+            array.push(poi_hi, true)
         if htf_bull_m_ok and f_imb_in_rng(htf_um_px)
             array.push(poi_px, htf_um_px)
             array.push(poi_nm, "MN FVG Bull")
@@ -1766,6 +1784,7 @@ if show_levels or show_fvg_vis
             array.push(poi_bar, nz(htf_um_org, time))
             array.push(poi_ext, true)
             array.push(poi_end, time)
+            array.push(poi_hi, false)
 
     // --- Generic chart-native imbalances (whatever timeframe the chart is on) ---
     if show_fvg_vis
@@ -1782,6 +1801,7 @@ if show_levels or show_fvg_vis
                     array.push(poi_bar, array.get(bear_fvg_org, k))
                     array.push(poi_ext, true)
                     array.push(poi_end, time)
+                    array.push(poi_hi, true)
         n_bull_push = array.size(bull_fvg_px)
         if n_bull_push > 0
             for k = 0 to n_bull_push - 1
@@ -1795,6 +1815,7 @@ if show_levels or show_fvg_vis
                     array.push(poi_bar, array.get(bull_fvg_org, k))
                     array.push(poi_ext, true)
                     array.push(poi_end, time)
+                    array.push(poi_hi, false)
 
     n_poi = array.size(poi_px)
     if n_poi > 0
@@ -1813,6 +1834,7 @@ if show_levels or show_fvg_vis
             g_bar = array.get(poi_bar, si)
             g_ext = array.get(poi_ext, si)
             g_end = array.get(poi_end, si)
+            g_hi  = array.get(poi_hi, si)
             array.set(used_flags, si, true)
 
             jj = ii + 1
@@ -1832,6 +1854,7 @@ if show_levels or show_fvg_vis
                         g_bar := array.get(poi_bar, sj)
                         g_ext := array.get(poi_ext, sj)
                         g_end := array.get(poi_end, sj)
+                        g_hi  := array.get(poi_hi, sj)
                     else
                         g_nm := g_nm + " + " + nmj
                     array.set(used_flags, sj, true)
@@ -1844,9 +1867,10 @@ if show_levels or show_fvg_vis
             // coordinates have no such limit.
             // g_ext=false (a POI swept this session) freezes the line at
             // g_end (the liquidation time) instead of extending to "now".
-            // label.style_label_down places the text ABOVE the anchor point.
+            // g_hi (max/high zone): label.style_label_down places text ABOVE
+            // the line. Low/min zone: label.style_label_up places it BELOW.
             new_l  = line.new(g_bar, g_px, g_end, g_px, xloc = xloc.bar_time, extend = g_ext ? extend.right : extend.none, color = g_cl, style = line.style_solid, width = 1)
-            new_lb = label.new(g_end, g_px, g_nm, xloc = xloc.bar_time, style = label.style_label_down, color = color.new(color.black, 100), textcolor = g_tx, size = size.small)
+            new_lb = label.new(g_end, g_px, g_nm, xloc = xloc.bar_time, style = g_hi ? label.style_label_down : label.style_label_up, color = color.new(color.black, 100), textcolor = g_tx, size = size.small)
             array.push(managed_poi_lines,  new_l)
             array.push(managed_poi_labels, new_lb)
 
