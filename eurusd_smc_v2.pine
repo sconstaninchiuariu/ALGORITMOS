@@ -101,16 +101,29 @@ use_eql      = input.bool(true,    "Detect and show EQH / EQL",        group = G
 eql_tol      = input.float(0.0003, "Tolerance (price)",  0.00005, 0.002, 0.00001, group = GEQL)
 eql_lookback = input.int(5,        "History depth (# pivots)", 2, 20,   group = GEQL)
 
+// Simplified on purpose: short labels here, full explanation in the tooltip
+// (hover the ⓘ) instead of long inline text.
 var string GVIS = "Visuals"
-show_info_tbl  = input.bool(false, "Show Info Table (top right)", group = GVIS)
-show_stats_tbl = input.bool(false, "Show Stats Table (top left)", group = GVIS)
-show_levels  = input.bool(true,    "Show POI Lines (PDH/PDL, PWH/PWL, Asia, EQH/EQL)", group = GVIS)
-show_sweep   = input.bool(true,    "Show Sweep Markers",                                group = GVIS)
-show_checklist = input.bool(true,  "Show Setup Checklist (while waiting for entry)",    group = GVIS)
-max_poi_pct  = input.float(0.50,   "Max POI Distance (% of price, hide zones beyond) — forex baseline; auto x2 on futures", 0.05, 5.0, 0.05, group = GVIS)
-show_fvg_vis = input.bool(true,    "Show FVG Imbalance Boxes (all unmitigated)",        group = GVIS)
-imb_max_pct  = input.float(1.00,   "Max Imbalance Distance (% of price) — same rule on every timeframe, forex baseline; auto x2 on futures", 0.10, 5.0, 0.10, group = GVIS)
-merge_tol    = input.float(0.0005, "Zone Merge Tolerance",  0.00010, 0.005, 0.00010,   group = GVIS)
+
+show_levels  = input.bool(true, "POI Lines",   group = GVIS, inline = "show1")
+show_fvg_vis = input.bool(true, "Imbalances",  group = GVIS, inline = "show1")
+show_sweep   = input.bool(true, "Sweep Marks", group = GVIS, inline = "show2")
+show_checklist = input.bool(true, "Setup Checklist", group = GVIS, inline = "show2")
+show_info_tbl  = input.bool(false, "Info Table",  group = GVIS, inline = "show3")
+show_stats_tbl = input.bool(false, "Stats Table", group = GVIS, inline = "show3")
+
+poi_line_col    = input.color(color.white, "POI Line Color", group = GVIS,
+     tooltip = "One flat color for every POI line (PDH/PDL, PWH/PWL, Asia, EQH/EQL) — always solid, straight. The active swept level still turns green while its trade cycle is live.")
+imb_line_col    = input.color(color.white, "Imbalance Color", group = GVIS, inline = "imbcol",
+     tooltip = "One flat color for every imbalance line (HTF and chart-native). The line uses the transparency below; its label text is always fully solid.")
+imb_line_transp = input.int(10, "Transp %", 0, 90, group = GVIS, inline = "imbcol")
+
+max_poi_pct = input.float(0.50, "Max POI Distance (%)", 0.05, 5.0, 0.05, group = GVIS,
+     tooltip = "Hide a POI line once price is farther than this % away. Auto x2 on futures.")
+imb_max_pct = input.float(1.00, "Max Imbalance Distance (%)", 0.10, 5.0, 0.10, group = GVIS,
+     tooltip = "Same idea for imbalances, same rule on every timeframe. Auto x2 on futures.")
+merge_tol   = input.float(0.0005, "Zone Merge Tolerance", 0.00010, 0.005, 0.00010, group = GVIS,
+     tooltip = "Zones within this price distance of each other collapse into one line, names joined with \"+\".")
 
 var string GALR = "Proximity Alerts"
 use_near_alert       = input.bool(true, "Alert when price nears a POI zone", group = GALR)
@@ -393,15 +406,15 @@ if is_new_day
     pdl_bar    := cur_dl_bar
     cur_dh     := high
     cur_dl     := low
-    cur_dh_bar := bar_index
-    cur_dl_bar := bar_index
+    cur_dh_bar := time
+    cur_dl_bar := time
 else
     if na(cur_dh) or high > cur_dh
         cur_dh     := high
-        cur_dh_bar := bar_index
+        cur_dh_bar := time
     if na(cur_dl) or low < cur_dl
         cur_dl     := low
-        cur_dl_bar := bar_index
+        cur_dl_bar := time
 
 // =============================================================
 // PREVIOUS WEEK HIGH / LOW
@@ -425,15 +438,15 @@ if is_new_week
     pwl_bar    := cur_wl_bar
     cur_wh     := high
     cur_wl     := low
-    cur_wh_bar := bar_index
-    cur_wl_bar := bar_index
+    cur_wh_bar := time
+    cur_wl_bar := time
 else
     if na(cur_wh) or high > cur_wh
         cur_wh     := high
-        cur_wh_bar := bar_index
+        cur_wh_bar := time
     if na(cur_wl) or low < cur_wl
         cur_wl     := low
-        cur_wl_bar := bar_index
+        cur_wl_bar := time
 
 // =============================================================
 // ASIA RANGE  (default 00:00 - 08:00 UTC+2, see kz_asia_open/close above)
@@ -455,10 +468,10 @@ var int   asia_l_bar      = na
 if in_asia
     if na(asia_live_h) or high > asia_live_h
         asia_live_h     := high
-        asia_live_h_bar := bar_index
+        asia_live_h_bar := time
     if na(asia_live_l) or low < asia_live_l
         asia_live_l     := low
-        asia_live_l_bar := bar_index
+        asia_live_l_bar := time
 else if in_asia[1]
     asia_h          := asia_live_h
     asia_l          := asia_live_l
@@ -509,7 +522,7 @@ if use_eql and eql_tf_ok and not na(raw_swh)
             if math.abs(raw_swh - array.get(swh_hist, i)) <= eql_tol
                 eqh_new      := true
                 last_eqh     := raw_swh
-                last_eqh_bar := bar_index - sw_len
+                last_eqh_bar := time[sw_len]
                 break
     if array.size(swh_hist) >= eql_lookback
         array.shift(swh_hist)
@@ -522,7 +535,7 @@ if use_eql and eql_tf_ok and not na(raw_swl)
             if math.abs(raw_swl - array.get(swl_hist, i)) <= eql_tol
                 eql_new      := true
                 last_eql     := raw_swl
-                last_eql_bar := bar_index - sw_len
+                last_eql_bar := time[sw_len]
                 break
     if array.size(swl_hist) >= eql_lookback
         array.shift(swl_hist)
@@ -611,6 +624,11 @@ var bool cyc_engulf_ok = false
 // level line) -> structure broken, entry FVG marked (below).
 var line  mss_ref_line    = na
 var label mss_ref_lbl     = na
+
+// Structure-break ("CE") marker: only the CURRENT cycle's, only while the
+// bot is actually hunting for an entry (state 3/4) — not a permanent
+// plotshape history of every past break, per request.
+var label ce_lbl = na
 
 var bool prev_bear_1h = false
 var bool prev_bull_1h = false
@@ -721,6 +739,8 @@ if state == 0 and any_ls
 if (state == 1 or state == 2) and (bar_index - state_bar) > mss_max_bars
     state := 0
     active_sweep_px := na
+    label.delete(ce_lbl)
+    ce_lbl := na
     line.delete(mss_ref_line)
     label.delete(mss_ref_lbl)
     mss_ref_line    := na
@@ -757,6 +777,8 @@ if bear_mss
     label.delete(mss_ref_lbl)
     mss_ref_line    := na
     mss_ref_lbl     := na
+    label.delete(ce_lbl)
+    ce_lbl := label.new(bar_index, high, "CE", style = label.style_label_down, color = color.orange, textcolor = color.black, size = size.small)
 
 if bull_mss
     mss_bar      := bar_index
@@ -767,6 +789,8 @@ if bull_mss
     label.delete(mss_ref_lbl)
     mss_ref_line    := na
     mss_ref_lbl     := na
+    label.delete(ce_lbl)
+    ce_lbl := label.new(bar_index, low, "CE", style = label.style_label_up, color = color.orange, textcolor = color.black, size = size.small)
 
 // ROOT CAUSE #3 + "closest imbalance" rule. The old code checked
 // mss_bear_ok[1] — exactly one bar after the structure break — and gave up
@@ -804,10 +828,14 @@ if state == 3 and bar_index > mss_bar
     if na(fvg_top) and (bar_index - mss_bar) >= fvg_search_bars
         state := 0
         active_sweep_px := na
+        label.delete(ce_lbl)
+        ce_lbl := na
     else if not na(fvg_top) and (bar_index - mss_bar) > fvg_max_bars
         box.delete(fvg_entry_box)
         state := 0
         active_sweep_px := na
+        label.delete(ce_lbl)
+        ce_lbl := na
 
 if state == 4 and bar_index > mss_bar
     already_in_current = not na(fvg_top) and low <= fvg_top and high >= fvg_bot
@@ -831,10 +859,14 @@ if state == 4 and bar_index > mss_bar
     if na(fvg_top) and (bar_index - mss_bar) >= fvg_search_bars
         state := 0
         active_sweep_px := na
+        label.delete(ce_lbl)
+        ce_lbl := na
     else if not na(fvg_top) and (bar_index - mss_bar) > fvg_max_bars
         box.delete(fvg_entry_box)
         state := 0
         active_sweep_px := na
+        label.delete(ce_lbl)
+        ce_lbl := na
 
 if (state == 3 or state == 4) and not na(fvg_entry_box)
     box.set_right(fvg_entry_box, bar_index + 5)
@@ -915,6 +947,8 @@ if short_valid
         ny_session_trades += 1
     state := 0
     active_sweep_px := na
+    label.delete(ce_lbl)
+    ce_lbl := na
     if not na(fvg_entry_box)
         box.set_right(fvg_entry_box, bar_index)
 
@@ -929,6 +963,8 @@ if long_valid
         ny_session_trades += 1
     state := 0
     active_sweep_px := na
+    label.delete(ce_lbl)
+    ce_lbl := na
     if not na(fvg_entry_box)
         box.set_right(fvg_entry_box, bar_index)
 
@@ -1194,25 +1230,25 @@ var int htf_bm_org  = na
 var int htf_um_org  = na
 
 if new_bear_1h
-    htf_b1h_org := bar_index
+    htf_b1h_org := time
 if new_bull_1h
-    htf_u1h_org := bar_index
+    htf_u1h_org := time
 if new_bear_4h
-    htf_b4h_org := bar_index
+    htf_b4h_org := time
 if new_bull_4h
-    htf_u4h_org := bar_index
+    htf_u4h_org := time
 if new_bear_d
-    htf_bd_org := bar_index
+    htf_bd_org := time
 if new_bull_d
-    htf_ud_org := bar_index
+    htf_ud_org := time
 if new_bear_w
-    htf_bw_org := bar_index
+    htf_bw_org := time
 if new_bull_w
-    htf_uw_org := bar_index
+    htf_uw_org := time
 if new_bear_m
-    htf_bm_org := bar_index
+    htf_bm_org := time
 if new_bull_m
-    htf_um_org := bar_index
+    htf_um_org := time
 
 // --- Proximity alerts for the 10 dedicated HTF FVG zones ---
 // Same hysteresis armed/disarmed idea as the 8 structural POI alerts above:
@@ -1303,7 +1339,7 @@ if show_fvg_vis and fvg_tf_ok
     bear_vis_gap = low[3] - high[1]
     if bear_vis_gap >= fvg_min_gap
         array.push(bear_fvg_px,    high[1])
-        array.push(bear_fvg_org,   bar_index - 1)
+        array.push(bear_fvg_org,   time[1])
         array.push(bear_fvg_armed, true)
         if array.size(bear_fvg_px) > 20
             array.shift(bear_fvg_px)
@@ -1313,7 +1349,7 @@ if show_fvg_vis and fvg_tf_ok
     bull_vis_gap = low[1] - high[3]
     if bull_vis_gap >= fvg_min_gap
         array.push(bull_fvg_px,    low[1])
-        array.push(bull_fvg_org,   bar_index - 1)
+        array.push(bull_fvg_org,   time[1])
         array.push(bull_fvg_armed, true)
         if array.size(bull_fvg_px) > 20
             array.shift(bull_fvg_px)
@@ -1382,11 +1418,23 @@ f_poi_entry(float lvl, bool swept, string nm) =>
     nm2  = is_active ? nm + " ✓" : nm
     [show, nm2, is_active]
 
+// One flat color for every POI line and one for every imbalance line — no
+// more per-level palette. poi_line_col: the line itself, always solid,
+// opaque. imb_line_col: the imbalance line at 10% transparency; its label
+// text is always the fully-opaque version of the same color regardless of
+// the line's transparency, per the "10% transparent line, 100% solid text"
+// spec. Green (active sweep) still overrides both, since that's a
+// functional signal, not a decorative choice.
+poi_line_solid = color.new(poi_line_col, 0)
+imb_line_faded = color.new(imb_line_col, imb_line_transp)
+imb_text_solid = color.new(imb_line_col, 0)
+active_col      = color.new(color.lime, 10)
+
 if show_levels or show_fvg_vis
     poi_px  = array.new_float(0)
     poi_nm  = array.new_string(0)
-    poi_cl  = array.new<color>(0)
-    poi_st  = array.new_string(0)
+    poi_cl  = array.new<color>(0)   // line color
+    poi_tx  = array.new<color>(0)   // text color (always opaque)
     poi_pr  = array.new_int(0)
     poi_bar = array.new_int(0)
 
@@ -1395,146 +1443,146 @@ if show_levels or show_fvg_vis
         if show_pdh
             array.push(poi_px, pdh)
             array.push(poi_nm, nm_pdh)
-            array.push(poi_cl, act_pdh ? color.new(color.lime, 10) : color.new(color.red, 0))
-            array.push(poi_st, line.style_dashed)
+            array.push(poi_cl, act_pdh ? active_col : poi_line_solid)
+            array.push(poi_tx, act_pdh ? active_col : poi_line_solid)
             array.push(poi_pr, 10)
-            array.push(poi_bar, nz(pdh_bar, bar_index - 1))
+            array.push(poi_bar, nz(pdh_bar, time))
         [show_pdl, nm_pdl, act_pdl] = f_poi_entry(pdl, pdl_swept, "PDL")
         if show_pdl
             array.push(poi_px, pdl)
             array.push(poi_nm, nm_pdl)
-            array.push(poi_cl, act_pdl ? color.new(color.lime, 10) : color.new(color.teal, 0))
-            array.push(poi_st, line.style_dashed)
+            array.push(poi_cl, act_pdl ? active_col : poi_line_solid)
+            array.push(poi_tx, act_pdl ? active_col : poi_line_solid)
             array.push(poi_pr, 11)
-            array.push(poi_bar, nz(pdl_bar, bar_index - 1))
+            array.push(poi_bar, nz(pdl_bar, time))
     if show_levels and use_pwhl
         [show_pwh, nm_pwh, act_pwh] = f_poi_entry(pwh, pwh_swept, "PWH")
         if show_pwh
             array.push(poi_px, pwh)
             array.push(poi_nm, nm_pwh)
-            array.push(poi_cl, act_pwh ? color.new(color.lime, 10) : color.new(color.maroon, 0))
-            array.push(poi_st, line.style_solid)
+            array.push(poi_cl, act_pwh ? active_col : poi_line_solid)
+            array.push(poi_tx, act_pwh ? active_col : poi_line_solid)
             array.push(poi_pr, 20)
-            array.push(poi_bar, nz(pwh_bar, bar_index - 1))
+            array.push(poi_bar, nz(pwh_bar, time))
         [show_pwl, nm_pwl, act_pwl] = f_poi_entry(pwl, pwl_swept, "PWL")
         if show_pwl
             array.push(poi_px, pwl)
             array.push(poi_nm, nm_pwl)
-            array.push(poi_cl, act_pwl ? color.new(color.lime, 10) : color.new(color.navy, 0))
-            array.push(poi_st, line.style_solid)
+            array.push(poi_cl, act_pwl ? active_col : poi_line_solid)
+            array.push(poi_tx, act_pwl ? active_col : poi_line_solid)
             array.push(poi_pr, 21)
-            array.push(poi_bar, nz(pwl_bar, bar_index - 1))
+            array.push(poi_bar, nz(pwl_bar, time))
     if show_levels and use_asia
         [show_ah, nm_ah, act_ah] = f_poi_entry(asia_h, asia_h_swept, "Asia H")
         if show_ah
             array.push(poi_px, asia_h)
             array.push(poi_nm, nm_ah)
-            array.push(poi_cl, act_ah ? color.new(color.lime, 10) : color.new(color.purple, 0))
-            array.push(poi_st, line.style_dotted)
+            array.push(poi_cl, act_ah ? active_col : poi_line_solid)
+            array.push(poi_tx, act_ah ? active_col : poi_line_solid)
             array.push(poi_pr, 30)
-            array.push(poi_bar, nz(asia_h_bar, bar_index - 1))
+            array.push(poi_bar, nz(asia_h_bar, time))
         [show_al, nm_al, act_al] = f_poi_entry(asia_l, asia_l_swept, "Asia L")
         if show_al
             array.push(poi_px, asia_l)
             array.push(poi_nm, nm_al)
-            array.push(poi_cl, act_al ? color.new(color.lime, 10) : color.new(color.purple, 0))
-            array.push(poi_st, line.style_dotted)
+            array.push(poi_cl, act_al ? active_col : poi_line_solid)
+            array.push(poi_tx, act_al ? active_col : poi_line_solid)
             array.push(poi_pr, 31)
-            array.push(poi_bar, nz(asia_l_bar, bar_index - 1))
+            array.push(poi_bar, nz(asia_l_bar, time))
     if show_levels and use_eql and eql_tf_ok
         [show_eqh, nm_eqh, act_eqh] = f_poi_entry(last_eqh, eqh_swept, "EQH")
         if show_eqh
             array.push(poi_px, last_eqh)
             array.push(poi_nm, nm_eqh)
-            array.push(poi_cl, act_eqh ? color.new(color.lime, 10) : color.new(color.orange, 0))
-            array.push(poi_st, line.style_dashed)
+            array.push(poi_cl, act_eqh ? active_col : poi_line_solid)
+            array.push(poi_tx, act_eqh ? active_col : poi_line_solid)
             array.push(poi_pr, 40)
-            array.push(poi_bar, nz(last_eqh_bar, bar_index - 1))
+            array.push(poi_bar, nz(last_eqh_bar, time))
         [show_eql, nm_eql, act_eql] = f_poi_entry(last_eql, eql_swept, "EQL")
         if show_eql
             array.push(poi_px, last_eql)
             array.push(poi_nm, nm_eql)
-            array.push(poi_cl, act_eql ? color.new(color.lime, 10) : color.new(color.orange, 0))
-            array.push(poi_st, line.style_dashed)
+            array.push(poi_cl, act_eql ? active_col : poi_line_solid)
+            array.push(poi_tx, act_eql ? active_col : poi_line_solid)
             array.push(poi_pr, 41)
-            array.push(poi_bar, nz(last_eql_bar, bar_index - 1))
+            array.push(poi_bar, nz(last_eql_bar, time))
 
     // --- HTF FVG imbalance zones (1H..MN), same merge system as POI levels ---
     if show_levels and use_htf_1h
         if htf_bear_1h_ok and f_imb_in_rng(htf_b1h_px)
             array.push(poi_px, htf_b1h_px)
             array.push(poi_nm, "1H FVG Bear")
-            array.push(poi_cl, color.new(color.red, 30))
-            array.push(poi_st, line.style_dotted)
+            array.push(poi_cl, imb_line_faded)
+            array.push(poi_tx, imb_text_solid)
             array.push(poi_pr, 58)
-            array.push(poi_bar, nz(htf_b1h_org, bar_index - 1))
+            array.push(poi_bar, nz(htf_b1h_org, time))
         if htf_bull_1h_ok and f_imb_in_rng(htf_u1h_px)
             array.push(poi_px, htf_u1h_px)
             array.push(poi_nm, "1H FVG Bull")
-            array.push(poi_cl, color.new(color.teal, 30))
-            array.push(poi_st, line.style_dotted)
+            array.push(poi_cl, imb_line_faded)
+            array.push(poi_tx, imb_text_solid)
             array.push(poi_pr, 59)
-            array.push(poi_bar, nz(htf_u1h_org, bar_index - 1))
+            array.push(poi_bar, nz(htf_u1h_org, time))
     if show_levels and use_htf_4h
         if htf_bear_4h_ok and f_imb_in_rng(htf_b4h_px)
             array.push(poi_px, htf_b4h_px)
             array.push(poi_nm, "4H FVG Bear")
-            array.push(poi_cl, color.new(color.red, 20))
-            array.push(poi_st, line.style_dotted)
+            array.push(poi_cl, imb_line_faded)
+            array.push(poi_tx, imb_text_solid)
             array.push(poi_pr, 56)
-            array.push(poi_bar, nz(htf_b4h_org, bar_index - 1))
+            array.push(poi_bar, nz(htf_b4h_org, time))
         if htf_bull_4h_ok and f_imb_in_rng(htf_u4h_px)
             array.push(poi_px, htf_u4h_px)
             array.push(poi_nm, "4H FVG Bull")
-            array.push(poi_cl, color.new(color.teal, 20))
-            array.push(poi_st, line.style_dotted)
+            array.push(poi_cl, imb_line_faded)
+            array.push(poi_tx, imb_text_solid)
             array.push(poi_pr, 57)
-            array.push(poi_bar, nz(htf_u4h_org, bar_index - 1))
+            array.push(poi_bar, nz(htf_u4h_org, time))
     if show_levels and use_htf_d
         if htf_bear_d_ok and f_imb_in_rng(htf_bd_px)
             array.push(poi_px, htf_bd_px)
             array.push(poi_nm, "D FVG Bear")
-            array.push(poi_cl, color.new(color.red, 10))
-            array.push(poi_st, line.style_dashed)
+            array.push(poi_cl, imb_line_faded)
+            array.push(poi_tx, imb_text_solid)
             array.push(poi_pr, 54)
-            array.push(poi_bar, nz(htf_bd_org, bar_index - 1))
+            array.push(poi_bar, nz(htf_bd_org, time))
         if htf_bull_d_ok and f_imb_in_rng(htf_ud_px)
             array.push(poi_px, htf_ud_px)
             array.push(poi_nm, "D FVG Bull")
-            array.push(poi_cl, color.new(color.teal, 10))
-            array.push(poi_st, line.style_dashed)
+            array.push(poi_cl, imb_line_faded)
+            array.push(poi_tx, imb_text_solid)
             array.push(poi_pr, 55)
-            array.push(poi_bar, nz(htf_ud_org, bar_index - 1))
+            array.push(poi_bar, nz(htf_ud_org, time))
     if show_levels and use_htf_w
         if htf_bear_w_ok and f_imb_in_rng(htf_bw_px)
             array.push(poi_px, htf_bw_px)
             array.push(poi_nm, "W FVG Bear")
-            array.push(poi_cl, color.new(color.red, 5))
-            array.push(poi_st, line.style_dashed)
+            array.push(poi_cl, imb_line_faded)
+            array.push(poi_tx, imb_text_solid)
             array.push(poi_pr, 52)
-            array.push(poi_bar, nz(htf_bw_org, bar_index - 1))
+            array.push(poi_bar, nz(htf_bw_org, time))
         if htf_bull_w_ok and f_imb_in_rng(htf_uw_px)
             array.push(poi_px, htf_uw_px)
             array.push(poi_nm, "W FVG Bull")
-            array.push(poi_cl, color.new(color.teal, 5))
-            array.push(poi_st, line.style_dashed)
+            array.push(poi_cl, imb_line_faded)
+            array.push(poi_tx, imb_text_solid)
             array.push(poi_pr, 53)
-            array.push(poi_bar, nz(htf_uw_org, bar_index - 1))
+            array.push(poi_bar, nz(htf_uw_org, time))
     if show_levels and use_htf_m
         if htf_bear_m_ok and f_imb_in_rng(htf_bm_px)
             array.push(poi_px, htf_bm_px)
             array.push(poi_nm, "MN FVG Bear")
-            array.push(poi_cl, color.new(color.red, 0))
-            array.push(poi_st, line.style_dashed)
+            array.push(poi_cl, imb_line_faded)
+            array.push(poi_tx, imb_text_solid)
             array.push(poi_pr, 50)
-            array.push(poi_bar, nz(htf_bm_org, bar_index - 1))
+            array.push(poi_bar, nz(htf_bm_org, time))
         if htf_bull_m_ok and f_imb_in_rng(htf_um_px)
             array.push(poi_px, htf_um_px)
             array.push(poi_nm, "MN FVG Bull")
-            array.push(poi_cl, color.new(color.teal, 0))
-            array.push(poi_st, line.style_dashed)
+            array.push(poi_cl, imb_line_faded)
+            array.push(poi_tx, imb_text_solid)
             array.push(poi_pr, 51)
-            array.push(poi_bar, nz(htf_um_org, bar_index - 1))
+            array.push(poi_bar, nz(htf_um_org, time))
 
     // --- Generic chart-native imbalances (whatever timeframe the chart is on) ---
     if show_fvg_vis
@@ -1545,8 +1593,8 @@ if show_levels or show_fvg_vis
                 if f_imb_in_rng(bpx)
                     array.push(poi_px, bpx)
                     array.push(poi_nm, chart_tf_lbl + " FVG Bear")
-                    array.push(poi_cl, color.new(color.red, 40))
-                    array.push(poi_st, line.style_dotted)
+                    array.push(poi_cl, imb_line_faded)
+                    array.push(poi_tx, imb_text_solid)
                     array.push(poi_pr, 60)
                     array.push(poi_bar, array.get(bear_fvg_org, k))
         n_bull_push = array.size(bull_fvg_px)
@@ -1556,8 +1604,8 @@ if show_levels or show_fvg_vis
                 if f_imb_in_rng(bpx)
                     array.push(poi_px, bpx)
                     array.push(poi_nm, chart_tf_lbl + " FVG Bull")
-                    array.push(poi_cl, color.new(color.teal, 40))
-                    array.push(poi_st, line.style_dotted)
+                    array.push(poi_cl, imb_line_faded)
+                    array.push(poi_tx, imb_text_solid)
                     array.push(poi_pr, 61)
                     array.push(poi_bar, array.get(bull_fvg_org, k))
 
@@ -1573,7 +1621,7 @@ if show_levels or show_fvg_vis
             g_px  = array.get(poi_px, si)
             g_nm  = array.get(poi_nm, si)
             g_cl  = array.get(poi_cl, si)
-            g_st  = array.get(poi_st, si)
+            g_tx  = array.get(poi_tx, si)
             g_pr  = array.get(poi_pr, si)
             g_bar = array.get(poi_bar, si)
             array.set(used_flags, si, true)
@@ -1590,7 +1638,7 @@ if show_levels or show_fvg_vis
                     if prj < g_pr
                         g_nm  := nmj + " + " + g_nm
                         g_cl  := array.get(poi_cl, sj)
-                        g_st  := array.get(poi_st, sj)
+                        g_tx  := array.get(poi_tx, sj)
                         g_pr  := prj
                         g_bar := array.get(poi_bar, sj)
                     else
@@ -1598,8 +1646,15 @@ if show_levels or show_fvg_vis
                     array.set(used_flags, sj, true)
                 jj := jj + 1
 
-            new_l  = line.new(g_bar, g_px, bar_index, g_px, extend = extend.right, color = g_cl, style = g_st, width = 1)
-            new_lb = label.new(bar_index, g_px, g_nm, style = label.style_none, textcolor = g_cl, size = size.small)
+            // xloc=xloc.bar_time (not bar_index): an unmitigated imbalance
+            // can sit unresolved for tens of thousands of bars, and Pine's
+            // bar-index x1 has a hard "too far from current bar" limit that
+            // crashes the script once history gets long enough. Time-based
+            // coordinates have no such limit.
+            // label.style_label_left places the text to the RIGHT of the
+            // anchor point — always right-aligned at the line's live edge.
+            new_l  = line.new(g_bar, g_px, time, g_px, xloc = xloc.bar_time, extend = extend.right, color = g_cl, style = line.style_solid, width = 1)
+            new_lb = label.new(time, g_px, g_nm, xloc = xloc.bar_time, style = label.style_label_left, color = color.new(color.black, 100), textcolor = g_tx, size = size.small)
             array.push(managed_poi_lines,  new_l)
             array.push(managed_poi_labels, new_lb)
 
@@ -1607,11 +1662,10 @@ if show_levels or show_fvg_vis
 plotshape(show_sweep and any_hs, title = "Sweep HIGH", style = shape.circle, location = location.abovebar, color = color.new(color.red,  0), size = size.tiny)
 plotshape(show_sweep and any_ls, title = "Sweep LOW",  style = shape.circle, location = location.belowbar, color = color.new(color.teal, 0), size = size.tiny)
 
-// Structure break (MSS) candle — bear_mss/bull_mss are true only on the
-// exact bar whose body closed beyond the MSS reference level, so this marks
-// automatically, on that candle, the moment structure is confirmed broken.
-plotshape(bear_mss, title = "Structure Break Bear", style = shape.labeldown, location = location.abovebar, color = color.orange, textcolor = color.black, text = "CE", size = size.small)
-plotshape(bull_mss, title = "Structure Break Bull", style = shape.labelup,   location = location.belowbar, color = color.orange, textcolor = color.black, text = "CE", size = size.small)
+// Structure break ("CE") is now a managed label (ce_lbl, created above at
+// the bear_mss/bull_mss transition, cleared at every cycle reset) instead
+// of a plotshape — only the current cycle's break stays visible, and only
+// while the bot is actively hunting for an entry, not a permanent history.
 
 // Entry signals
 // Gated by short_valid/long_valid (not the raw signal) so the marker can
