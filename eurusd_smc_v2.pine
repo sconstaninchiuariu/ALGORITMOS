@@ -619,31 +619,40 @@ var line  fvg_top_line = na
 var line  fvg_bot_line = na
 var label fvg_lbl      = na
 
-// Deletes the entry-FVG lines/label and clears the handles. Called at every
-// point a cycle ends or restarts, so nothing from an old cycle can ever
-// leak into a new one (that leak was the actual cause of the vertical-line
-// render bug — see the fvg_top/fvg_bot reset at the sweep transitions below).
-// Defined here (before ANY call site) — Pine requires a function to appear
-// before its first use; putting it later in the file is a compile error.
+// Pine functions can READ a global var but can never ASSIGN to one (that's
+// CE10088, not just the tuple-":=" restriction from before) — so both
+// helpers below only delete the underlying drawing objects / create new
+// ones and RETURN the handles; every call site below assigns the result
+// back to fvg_top_line/fvg_bot_line/fvg_lbl itself with ":=".
+//
+// Deletes the entry-FVG lines/label; returns the (now na) handles. Called
+// at every point a cycle ends or restarts, so nothing from an old cycle can
+// ever leak into a new one (that leak was the actual cause of the
+// vertical-line render bug — see the fvg_top/fvg_bot reset at the sweep
+// transitions below). Defined here (before ANY call site) — Pine requires
+// a function to appear before its first use.
 f_fvg_clear() =>
     line.delete(fvg_top_line)
     line.delete(fvg_bot_line)
     label.delete(fvg_lbl)
-    fvg_top_line := na
-    fvg_bot_line := na
-    fvg_lbl      := na
+    line  l1 = na
+    line  l2 = na
+    label lb = na
+    [l1, l2, lb]
 
 // Draws the entry FVG as two plain dashed lines (top edge + bottom edge)
 // instead of a filled box, extend=extend.right so they grow on their own —
 // no per-bar "set_right" upkeep needed, and no box whose height can ever
 // blow up. col is red for a bear (sell) zone, teal for a bull (buy) zone.
+// Returns the new handles; does NOT delete the old ones itself — call
+// f_fvg_clear() first at the call site.
 f_fvg_draw(float top, float bot, bool bear_side) =>
-    f_fvg_clear()
     col = bear_side ? color.new(color.red, 10) : color.new(color.teal, 10)
     txt = bear_side ? "ENTRY FVG (Bear)" : "ENTRY FVG (Bull)"
-    fvg_top_line := line.new(bar_index - 2, top, bar_index + 1, top, extend = extend.right, color = col, style = line.style_dashed, width = 1)
-    fvg_bot_line := line.new(bar_index - 2, bot, bar_index + 1, bot, extend = extend.right, color = col, style = line.style_dashed, width = 1)
-    fvg_lbl      := label.new(bar_index, bear_side ? bot : top, txt, style = label.style_label_down, color = color.new(color.black, 100), textcolor = col, size = size.small)
+    nl_top = line.new(bar_index - 2, top, bar_index + 1, top, extend = extend.right, color = col, style = line.style_dashed, width = 1)
+    nl_bot = line.new(bar_index - 2, bot, bar_index + 1, bot, extend = extend.right, color = col, style = line.style_dashed, width = 1)
+    nlb    = label.new(bar_index, bear_side ? bot : top, txt, style = label.style_label_down, color = color.new(color.black, 100), textcolor = col, size = size.small)
+    [nl_top, nl_bot, nlb]
 
 // Funnel diagnostics — where in sweep -> MSS -> FVG -> retest -> entry the
 // setups are actually getting cut off. Shown in the info table so a zero-
@@ -777,7 +786,10 @@ if state == 0 and any_hs
     // both here, at the start of every fresh cycle, closes that off.
     fvg_top := na
     fvg_bot := na
-    f_fvg_clear()
+    [tmp_fvg_l1, tmp_fvg_l2, tmp_fvg_lb] = f_fvg_clear()
+    fvg_top_line := tmp_fvg_l1
+    fvg_bot_line := tmp_fvg_l2
+    fvg_lbl := tmp_fvg_lb
     active_sweep_px := hs_pdh ? pdh : hs_pwh ? pwh : hs_asia ? asia_h : last_eqh
     // Phase 1: zone liquidated (its own line turns green with a check via
     // f_poi_entry), then show the level price must break through to confirm
@@ -798,7 +810,10 @@ if state == 0 and any_ls
     cyc_engulf_ok := false
     fvg_top := na
     fvg_bot := na
-    f_fvg_clear()
+    [tmp_fvg_l1, tmp_fvg_l2, tmp_fvg_lb] = f_fvg_clear()
+    fvg_top_line := tmp_fvg_l1
+    fvg_bot_line := tmp_fvg_l2
+    fvg_lbl := tmp_fvg_lb
     active_sweep_px := ls_pdl ? pdl : ls_pwl ? pwl : ls_asia ? asia_l : last_eql
     line.delete(mss_ref_line)
     label.delete(mss_ref_lbl)
@@ -888,14 +903,21 @@ if state == 3 and bar_index > mss_bar
             fvg_top := low[2]
             fvg_bot := high
             fvg_bar := bar_index
-            f_fvg_draw(fvg_top, fvg_bot, true)
+            [tmp_fvg_l1, tmp_fvg_l2, tmp_fvg_lb] = f_fvg_clear()
+            [tmp_fvg_d1, tmp_fvg_d2, tmp_fvg_db] = f_fvg_draw(fvg_top, fvg_bot, true)
+            fvg_top_line := tmp_fvg_d1
+            fvg_bot_line := tmp_fvg_d2
+            fvg_lbl := tmp_fvg_db
     if na(fvg_top) and (bar_index - mss_bar) >= fvg_search_bars
         state := 0
         active_sweep_px := na
         label.delete(ce_lbl)
         ce_lbl := na
     else if not na(fvg_top) and (bar_index - mss_bar) > fvg_max_bars
-        f_fvg_clear()
+        [tmp_fvg_l1, tmp_fvg_l2, tmp_fvg_lb] = f_fvg_clear()
+        fvg_top_line := tmp_fvg_l1
+        fvg_bot_line := tmp_fvg_l2
+        fvg_lbl := tmp_fvg_lb
         state := 0
         active_sweep_px := na
         label.delete(ce_lbl)
@@ -911,14 +933,21 @@ if state == 4 and bar_index > mss_bar
             fvg_top := low
             fvg_bot := high[2]
             fvg_bar := bar_index
-            f_fvg_draw(fvg_top, fvg_bot, false)
+            [tmp_fvg_l1, tmp_fvg_l2, tmp_fvg_lb] = f_fvg_clear()
+            [tmp_fvg_d1, tmp_fvg_d2, tmp_fvg_db] = f_fvg_draw(fvg_top, fvg_bot, false)
+            fvg_top_line := tmp_fvg_d1
+            fvg_bot_line := tmp_fvg_d2
+            fvg_lbl := tmp_fvg_db
     if na(fvg_top) and (bar_index - mss_bar) >= fvg_search_bars
         state := 0
         active_sweep_px := na
         label.delete(ce_lbl)
         ce_lbl := na
     else if not na(fvg_top) and (bar_index - mss_bar) > fvg_max_bars
-        f_fvg_clear()
+        [tmp_fvg_l1, tmp_fvg_l2, tmp_fvg_lb] = f_fvg_clear()
+        fvg_top_line := tmp_fvg_l1
+        fvg_bot_line := tmp_fvg_l2
+        fvg_lbl := tmp_fvg_lb
         state := 0
         active_sweep_px := na
         label.delete(ce_lbl)
@@ -1002,7 +1031,10 @@ if short_valid
     active_sweep_px := na
     label.delete(ce_lbl)
     ce_lbl := na
-    f_fvg_clear()
+    [tmp_fvg_l1, tmp_fvg_l2, tmp_fvg_lb] = f_fvg_clear()
+    fvg_top_line := tmp_fvg_l1
+    fvg_bot_line := tmp_fvg_l2
+    fvg_lbl := tmp_fvg_lb
 
 if long_valid
     strategy.entry("Long", strategy.long, qty = qty_l, comment = "SMC Long")
@@ -1017,7 +1049,10 @@ if long_valid
     active_sweep_px := na
     label.delete(ce_lbl)
     ce_lbl := na
-    f_fvg_clear()
+    [tmp_fvg_l1, tmp_fvg_l2, tmp_fvg_lb] = f_fvg_clear()
+    fvg_top_line := tmp_fvg_l1
+    fvg_bot_line := tmp_fvg_l2
+    fvg_lbl := tmp_fvg_lb
 
 // =============================================================
 // VISUALS — session range boxes (Asia/London/NY), instead of a flat
