@@ -610,7 +610,14 @@ var int   mss_bar      = 0
 // swept — it stays green through the whole sweep -> MSS -> entry cycle.
 var float active_sweep_px = na
 
-var box fvg_entry_box = na
+// The entry FVG is drawn as two plain dashed lines (top edge + bottom edge)
+// instead of a filled box — a horizontal line (y1==y2) can never develop the
+// absurd height a box could when its coordinates went stale, and dashed
+// style makes it visually distinct at a glance from the solid POI lines and
+// the imbalance lines.
+var line  fvg_top_line = na
+var line  fvg_bot_line = na
+var label fvg_lbl      = na
 
 // Funnel diagnostics — where in sweep -> MSS -> FVG -> retest -> entry the
 // setups are actually getting cut off. Shown in the info table so a zero-
@@ -744,8 +751,7 @@ if state == 0 and any_hs
     // both here, at the start of every fresh cycle, closes that off.
     fvg_top := na
     fvg_bot := na
-    box.delete(fvg_entry_box)
-    fvg_entry_box := na
+    f_fvg_clear()
     active_sweep_px := hs_pdh ? pdh : hs_pwh ? pwh : hs_asia ? asia_h : last_eqh
     // Phase 1: zone liquidated (its own line turns green with a check via
     // f_poi_entry), then show the level price must break through to confirm
@@ -766,8 +772,7 @@ if state == 0 and any_ls
     cyc_engulf_ok := false
     fvg_top := na
     fvg_bot := na
-    box.delete(fvg_entry_box)
-    fvg_entry_box := na
+    f_fvg_clear()
     active_sweep_px := ls_pdl ? pdl : ls_pwl ? pwl : ls_asia ? asia_l : last_eql
     line.delete(mss_ref_line)
     label.delete(mss_ref_lbl)
@@ -830,6 +835,30 @@ if bull_mss
     label.delete(ce_lbl)
     ce_lbl := label.new(bar_index, low, "CE", style = label.style_label_up, color = color.orange, textcolor = color.black, size = size.small)
 
+// Deletes the entry-FVG lines/label and clears the handles. Called at every
+// point a cycle ends or restarts, so nothing from an old cycle can ever
+// leak into a new one (that leak was the actual cause of the vertical-line
+// render bug — see the fvg_top/fvg_bot reset at the sweep transitions above).
+f_fvg_clear() =>
+    line.delete(fvg_top_line)
+    line.delete(fvg_bot_line)
+    label.delete(fvg_lbl)
+    fvg_top_line := na
+    fvg_bot_line := na
+    fvg_lbl      := na
+
+// Draws the entry FVG as two plain dashed lines (top edge + bottom edge)
+// instead of a filled box, extend=extend.right so they grow on their own —
+// no per-bar "set_right" upkeep needed, and no box whose height can ever
+// blow up. col is red for a bear (sell) zone, teal for a bull (buy) zone.
+f_fvg_draw(float top, float bot, bool bear_side) =>
+    f_fvg_clear()
+    col = bear_side ? color.new(color.red, 10) : color.new(color.teal, 10)
+    txt = bear_side ? "ENTRY FVG (Bear)" : "ENTRY FVG (Bull)"
+    fvg_top_line := line.new(bar_index - 2, top, bar_index + 1, top, extend = extend.right, color = col, style = line.style_dashed, width = 1)
+    fvg_bot_line := line.new(bar_index - 2, bot, bar_index + 1, bot, extend = extend.right, color = col, style = line.style_dashed, width = 1)
+    fvg_lbl      := label.new(bar_index, bear_side ? bot : top, txt, style = label.style_label_down, color = color.new(color.black, 100), textcolor = col, size = size.small)
+
 // ROOT CAUSE #3 + "closest imbalance" rule. The old code checked
 // mss_bear_ok[1] — exactly one bar after the structure break — and gave up
 // entirely if that single bar left no 3-candle gap (impulses usually run
@@ -850,29 +879,21 @@ if state == 3 and bar_index > mss_bar
         bear_gap = low[2] - high
         // Sanity ceiling: a genuine data anomaly (weekend gap, bad tick) can
         // otherwise produce a "gap" many times wider than any real trade
-        // setup, creating a box that renders as a near-vertical spike.
+        // setup.
         if bear_gap >= fvg_min_gap and bear_gap <= max_sl * 5
             if na(fvg_top)
                 cnt_fvg += 1
             fvg_top := low[2]
             fvg_bot := high
             fvg_bar := bar_index
-            box.delete(fvg_entry_box)
-            fvg_entry_box := box.new(bar_index - 2, fvg_top, bar_index + 1, fvg_bot,
-                 border_color = color.new(color.red, 10),
-                 bgcolor      = color.new(color.red, 80),
-                 text         = "ENTRY FVG (Bear)",
-                 text_color   = color.new(color.red, 20),
-                 text_size    = size.small,
-                 text_halign  = text.align_left,
-                 text_valign  = text.align_top)
+            f_fvg_draw(fvg_top, fvg_bot, true)
     if na(fvg_top) and (bar_index - mss_bar) >= fvg_search_bars
         state := 0
         active_sweep_px := na
         label.delete(ce_lbl)
         ce_lbl := na
     else if not na(fvg_top) and (bar_index - mss_bar) > fvg_max_bars
-        box.delete(fvg_entry_box)
+        f_fvg_clear()
         state := 0
         active_sweep_px := na
         label.delete(ce_lbl)
@@ -888,29 +909,18 @@ if state == 4 and bar_index > mss_bar
             fvg_top := low
             fvg_bot := high[2]
             fvg_bar := bar_index
-            box.delete(fvg_entry_box)
-            fvg_entry_box := box.new(bar_index - 2, fvg_top, bar_index + 1, fvg_bot,
-                 border_color = color.new(color.teal, 10),
-                 bgcolor      = color.new(color.teal, 80),
-                 text         = "ENTRY FVG (Bull)",
-                 text_color   = color.new(color.teal, 20),
-                 text_size    = size.small,
-                 text_halign  = text.align_left,
-                 text_valign  = text.align_top)
+            f_fvg_draw(fvg_top, fvg_bot, false)
     if na(fvg_top) and (bar_index - mss_bar) >= fvg_search_bars
         state := 0
         active_sweep_px := na
         label.delete(ce_lbl)
         ce_lbl := na
     else if not na(fvg_top) and (bar_index - mss_bar) > fvg_max_bars
-        box.delete(fvg_entry_box)
+        f_fvg_clear()
         state := 0
         active_sweep_px := na
         label.delete(ce_lbl)
         ce_lbl := na
-
-if (state == 3 or state == 4) and not na(fvg_entry_box)
-    box.set_right(fvg_entry_box, bar_index + 5)
 
 // =============================================================
 // ENTRY CONDITIONS
@@ -990,8 +1000,7 @@ if short_valid
     active_sweep_px := na
     label.delete(ce_lbl)
     ce_lbl := na
-    if not na(fvg_entry_box)
-        box.set_right(fvg_entry_box, bar_index)
+    f_fvg_clear()
 
 if long_valid
     strategy.entry("Long", strategy.long, qty = qty_l, comment = "SMC Long")
@@ -1006,8 +1015,7 @@ if long_valid
     active_sweep_px := na
     label.delete(ce_lbl)
     ce_lbl := na
-    if not na(fvg_entry_box)
-        box.set_right(fvg_entry_box, bar_index)
+    f_fvg_clear()
 
 // =============================================================
 // VISUALS — session range boxes (Asia/London/NY), instead of a flat
