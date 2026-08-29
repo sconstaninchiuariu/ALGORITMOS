@@ -74,8 +74,8 @@ mss_max_bars = input.int(80, "Max Bars for MSS", 5, 300, group = GMSS)
 
 var string GFVG = "FVG / Imbalance"
 fvg_min_gap   = input.float(0.0002, "Min FVG Gap",  0.00005, 0.002, 0.00001, group = GFVG)
-fvg_max_bars  = input.int(60,       "FVG Max Age",  5, 300,          group = GFVG)
-fvg_search_bars = input.int(8,      "Bars after MSS to find entry FVG", 1, 50, group = GFVG)
+fvg_max_bars  = input.int(30,       "FVG Max Age (bars to wait for the retest before cancelling)",  5, 300, group = GFVG, tooltip = "How long a locked entry zone stays valid waiting for price to come back and retest it. On 1m this is minutes. 60 was letting setups fire an hour after the structure break.")
+fvg_search_bars = input.int(8,      "Bars after MSS to find entry FVG", 1, 50, group = GFVG, tooltip = "The reaction-leg window. Imbalances are only picked up during this many bars after the structure break; the closest/newest one within it wins, and the zone is then LOCKED so it can't drift up the impulse.")
 req_close_fvg = input.bool(true,    "Entry candle must CLOSE inside FVG", group = GFVG)
 req_engulf    = input.bool(false,   "Entry candle must be ENGULFING (body covers prev body) — very restrictive", group = GFVG)
 fvg_tf_min    = input.int(1,   "Show Chart Imbalances: Min Timeframe (minutes)", 1, 1440, group = GFVG)
@@ -909,14 +909,28 @@ if bull_mss
 // It also locked onto the FIRST gap found. But as the impulse continues,
 // each new gap forms progressively CLOSER to where price currently is — so
 // "the imbalance closest to current price" (the user's rule when several
-// form) is whichever one is MOST RECENT, not the first. So this now keeps
-// overwriting fvg_top/fvg_bot with the latest qualifying gap on every bar,
-// for as long as price hasn't already retraced back into the current one —
-// once it has, that's the retest, and the zone freezes for the entry logic
-// below to evaluate.
+// form) is whichever one is MOST RECENT, not the first. So this overwrites
+// fvg_top/fvg_bot with the latest qualifying gap, for as long as price
+// hasn't already retraced back into the current one.
+//
+// ROOT CAUSE #5 — "the entry fires an hour later, nowhere near the break".
+// That overwrite had NO window: it kept re-anchoring to the newest gap for
+// up to fvg_max_bars (60 bars = a full hour on 1m). In a sustained impulse
+// each new gap forms higher than the last, so the tracked entry zone chased
+// price all the way up the leg and only triggered when price finally pulled
+// back into the LAST gap — near the top of the move, ~an hour after the
+// structure break, instead of at the reaction imbalance right after it.
+//
+// The imbalance that matters is the one created BY THE REACTION that broke
+// structure, so the search is now confined to the reaction leg:
+// fvg_search_bars bars after the MSS. Within that window the newest (=
+// closest) gap still wins, exactly as intended. Once the window closes the
+// zone is LOCKED and the bot only waits for the retest of that zone — it can
+// never drift up the impulse again.
 if state == 3 and bar_index > mss_bar
     already_in_current = not na(fvg_top) and high >= fvg_bot and low <= fvg_top
-    if not already_in_current
+    in_search_window   = (bar_index - mss_bar) <= fvg_search_bars
+    if not already_in_current and in_search_window
         bear_gap = low[2] - high
         // Sanity ceiling: a genuine data anomaly (weekend gap, bad tick) can
         // otherwise produce a "gap" many times wider than any real trade
@@ -949,7 +963,8 @@ if state == 3 and bar_index > mss_bar
 
 if state == 4 and bar_index > mss_bar
     already_in_current = not na(fvg_top) and low <= fvg_top and high >= fvg_bot
-    if not already_in_current
+    in_search_window   = (bar_index - mss_bar) <= fvg_search_bars
+    if not already_in_current and in_search_window
         bull_gap = low - high[2]
         if bull_gap >= fvg_min_gap and bull_gap <= max_sl * 5
             if na(fvg_top)
