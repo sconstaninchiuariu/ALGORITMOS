@@ -784,9 +784,19 @@ is_exec_tf = timeframe.period == "1"
 any_hs = (hs_pdh or hs_pwh or hs_asia or hs_eqh) and htf_ok_bear and can_trade and is_exec_tf
 any_ls = (ls_pdl or ls_pwl or ls_asia or ls_eql)  and htf_ok_bull and can_trade and is_exec_tf
 
+// The true extreme of the sweep — the wick that actually took the liquidity.
+// A sweep is only CONFIRMED on the bar that closes back through the level,
+// which is one or more bars AFTER the extreme was printed. Seeding the stop
+// from that confirmation bar's own high/low (the old `sweep_hi := high`) put
+// the stop inside the sweep wick, so the very move that defined the setup
+// could stop the trade out. ta.* must evaluate on every bar or its internal
+// state desyncs, hence computed unconditionally here at global scope.
+sweep_win_hi = ta.highest(high, sweep_win)
+sweep_win_lo = ta.lowest(low, sweep_win)
+
 if state == 0 and any_hs
     state        := 1
-    sweep_hi     := high
+    sweep_hi     := sweep_win_hi
     // Structure reference = a trailing low, seeded at the sweep candle's own
     // low and pulled down each bar that DOESN'T break it (see the trailing
     // update below the MSS check). This is "the low of the pullback since
@@ -825,7 +835,7 @@ if state == 0 and any_hs
 
 if state == 0 and any_ls
     state        := 2
-    sweep_lo     := low
+    sweep_lo     := sweep_win_lo
     mss_ref_bull := high
     state_bar    := bar_index
     cnt_sweep    += 1
@@ -922,15 +932,20 @@ if bull_mss
 // structure break, instead of at the reaction imbalance right after it.
 //
 // The imbalance that matters is the one created BY THE REACTION that broke
-// structure, so the search is now confined to the reaction leg:
-// fvg_search_bars bars after the MSS. Within that window the newest (=
-// closest) gap still wins, exactly as intended. Once the window closes the
-// zone is LOCKED and the bot only waits for the retest of that zone — it can
-// never drift up the impulse again.
+// structure — the first gap the impulse leaves right at the break. That is
+// also the one "closest to price" at the moment the decision is made, and
+// the only one that keeps the stop pinned tight to the sweep wick (an
+// imbalance eight bars up the leg puts the sweep low so far away that the
+// 1:2 RR is measured off a huge stop, which is not the setup).
+//
+// So: the FIRST qualifying gap after the MSS wins and the zone is then
+// LOCKED — no re-anchoring at all. The search is additionally confined to
+// fvg_search_bars bars after the MSS; if the reaction leaves no gap in that
+// window the cycle is cancelled rather than waiting for a later, unrelated
+// one.
 if state == 3 and bar_index > mss_bar
-    already_in_current = not na(fvg_top) and high >= fvg_bot and low <= fvg_top
-    in_search_window   = (bar_index - mss_bar) <= fvg_search_bars
-    if not already_in_current and in_search_window
+    in_search_window = (bar_index - mss_bar) <= fvg_search_bars
+    if na(fvg_top) and in_search_window
         bear_gap = low[2] - high
         // Sanity ceiling: a genuine data anomaly (weekend gap, bad tick) can
         // otherwise produce a "gap" many times wider than any real trade
@@ -962,9 +977,8 @@ if state == 3 and bar_index > mss_bar
         ce_lbl := na
 
 if state == 4 and bar_index > mss_bar
-    already_in_current = not na(fvg_top) and low <= fvg_top and high >= fvg_bot
-    in_search_window   = (bar_index - mss_bar) <= fvg_search_bars
-    if not already_in_current and in_search_window
+    in_search_window = (bar_index - mss_bar) <= fvg_search_bars
+    if na(fvg_top) and in_search_window
         bull_gap = low - high[2]
         if bull_gap >= fvg_min_gap and bull_gap <= max_sl * 5
             if na(fvg_top)
