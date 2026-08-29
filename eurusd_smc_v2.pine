@@ -575,31 +575,22 @@ if use_eql and eql_tf_ok and not na(raw_swl)
     array.push(swl_hist, raw_swl)
 
 // =============================================================
-// STRUCTURE REFERENCE — the ORIGIN CANDLE
+// STRUCTURE REFERENCE — seed for the break level
 // =============================================================
-// A structure shift is defined against the ORIGIN CANDLE: the last candle of
-// the opposite colour before the impulse that produced the recent extreme.
-// For a short setup that is the last BEARISH candle of the rally, and the
-// level to break is its LOW. Price closing below it is the break.
+// The break level itself is market structure: for a short setup the last
+// HIGHER LOW, for a long setup the last LOWER HIGH, and it only advances when
+// price prints a new structural extreme (a new higher high / lower low). That
+// tracking lives in the state machine below, where the running extreme is
+// already maintained.
 //
-// Two earlier references were wrong in opposite directions, and both for the
-// same reason — they were derived from price geometry rather than from the
-// candle that originated the move:
-//   a) the extreme of the whole move since the sweep, which only breaks at the
-//      very END of the move;
-//   b) a short swing pivot, which is just some local low — it kept re-anchoring
-//      as new candles printed, so the level visibly jumped around.
-// The origin candle does neither: it is recomputed only when a fresh impulse
-// prints, and sits still in between.
-//
-// This is the mechanic from the user's working "Sweep + BOS" strategy
-// (chochS/chochL), which scans back for the last opposite-coloured candle on
-// each impulse bar.
-impulse_up   = high > high[1] and close > close[1]
-impulse_down = low  < low[1]  and close < close[1]
+// What is needed HERE is only the SEED — the level at the very bar the zone is
+// liquidated, before any pullback has had a chance to form. That is the ORIGIN
+// CANDLE: the last candle of the opposite colour before the impulse that ran
+// into the sweep. For a short setup, the LOW of the last bearish candle of the
+// rally. Taken from the user's working "Sweep + BOS" strategy (chochS/chochL).
 
-// Returns the low of the most recent bearish candle (the origin of an up
-// impulse), or na if none within ce_scan_bars. Mirrored by f_origin_high.
+// Returns the low of the most recent bearish candle, or na if none within
+// ce_scan_bars. Mirrored by f_origin_high.
 f_origin_low() =>
     float res = na
     for i = 1 to ce_scan_bars
@@ -755,6 +746,12 @@ var int   state_bar    = 0
 var int   sweep_bar    = 0
 var float sweep_hi     = na
 var float sweep_lo     = na
+// The pullback currently forming, not yet confirmed as a structure point.
+// pend_hi is the highest high since sweep_lo last dropped: the moment price
+// makes a NEW lower low, that pullback is a confirmed LOWER HIGH and becomes
+// the level a bullish break must clear. pend_lo is the mirror (higher low).
+var float pend_hi      = na
+var float pend_lo      = na
 var float mss_ref_bear = na
 var float mss_ref_bull = na
 var float fvg_top      = na
@@ -911,6 +908,7 @@ if state == 0 and any_hs
     // Falls back to this candle's own low only if none was found.
     org_seed_b = f_origin_low()
     mss_ref_bear := na(org_seed_b) ? low : org_seed_b
+    pend_lo      := low
     state_bar    := bar_index
     cnt_sweep    += 1
     cyc_touched   := false
@@ -946,6 +944,7 @@ if state == 0 and any_ls
     // Mirror: the last bullish candle of the decline that ran into the sweep.
     org_seed_u = f_origin_high()
     mss_ref_bull := na(org_seed_u) ? high : org_seed_u
+    pend_hi      := high
     state_bar    := bar_index
     cnt_sweep    += 1
     cyc_touched   := false
@@ -984,45 +983,65 @@ if (state == 1 or state == 2) and (bar_index - sweep_bar) > mss_max_bars
 bear_mss = state == 1 and bar_index > sweep_bar and not na(mss_ref_bear) and close < mss_ref_bear
 bull_mss = state == 2 and bar_index > sweep_bar and not na(mss_ref_bull) and close > mss_ref_bull
 
-// ROOT CAUSE #6 — the structure reference itself, which is what made the
-// break register in the wrong place. Three references were tried before this
-// one, and all three failed for the same reason: they were derived from price
-// geometry rather than from the candle that ORIGINATED the move.
+// ROOT CAUSE #6 — WHEN the break level is allowed to move. Four references
+// were tried before this one and all failed for the same reason: they moved on
+// candle-level events instead of on market structure.
 //
 //   a) The extreme of the whole move since the sweep. Only breaks at the very
-//      END of the move — that is the LONG that fired at the top.
+//      END of the move — the LONG that fired at the top of the rally.
 //   b) The low of the candle that made each new high. Sits one candle from
-//      price, so the first pullback candle breaks it: breaks everywhere, all
-//      meaningless.
-//   c) A short swing pivot. Just some local low, and it re-anchored as new
-//      candles printed, so the level visibly jumped around the chart.
+//      price, so the first pullback candle breaks it: breaks everywhere.
+//   c) A short swing pivot. Just some local low, re-anchoring as candles
+//      printed, so the level visibly jumped around the chart.
+//   d) The origin candle recomputed on every "impulse" candle, where impulse
+//      meant nothing more than low < low[1] and close < close[1] — i.e. any
+//      ordinary bearish candle. That is why a single red candle in the middle
+//      of a rally moved the level somewhere else. As the user put it: that is
+//      not a break, that is just price moving.
 //
-// The origin candle (f_origin_low / f_origin_high above) is the correct one,
-// and it is only recomputed when a fresh impulse prints — between impulses it
-// does not move at all, which is what "the CE should not change place" means.
-// Once the break is confirmed the level is frozen (the state leaves 1/2), the
-// same way the working strategy sets allowShort := false at its BOS.
+// The actual definition (confirmed against the standard SMC one): a bullish
+// CHoCH is price closing above the last LOWER HIGH of a downtrend, and a
+// bearish CHoCH is price closing below the last HIGHER LOW of an uptrend. A
+// pullback only becomes a confirmed lower high / higher low once price prints
+// a new structural extreme past it. So the level advances on new extremes and
+// on nothing else — if price does not make a new extreme and instead closes
+// through the level, that IS the structure break, with the level exactly where
+// it was.
 //
-// sweep_hi / sweep_lo keep tracking the REACTION extreme independently; they
-// are the stop anchor, not the trigger.
+// The origin candle (f_origin_low / f_origin_high) now only seeds the level on
+// the liquidation bar itself, before any pullback exists to confirm.
+//
+// sweep_hi / sweep_lo double as the running structural extreme and the stop
+// anchor; pend_hi / pend_lo hold the pullback still forming.
+// Bear setup: price is making higher highs / higher lows, and the level to
+// break is the last HIGHER LOW. It is only confirmed as a higher low once a
+// NEW higher high forms above it — until then the pullback low is still
+// developing and nothing about the structure has changed. So the break level
+// updates on new structural extremes only.
 if state == 1 and not bear_mss
     if high > sweep_hi
+        // New higher high: the pullback that just ended is a confirmed higher
+        // low, and that is the level a bearish break must close under.
+        if not na(pend_lo)
+            mss_ref_bear := pend_lo
         sweep_hi := high
-    if impulse_up
-        org_up = f_origin_low()
-        if not na(org_up)
-            mss_ref_bear := org_up
+        pend_lo  := low
+    else
+        pend_lo := na(pend_lo) ? low : math.min(pend_lo, low)
     if not na(mss_ref_line)
         line.set_y1(mss_ref_line, mss_ref_bear)
         line.set_y2(mss_ref_line, mss_ref_bear)
         label.set_y(mss_ref_lbl, mss_ref_bear)
+// Bull setup: mirror. Lower highs / lower lows, break level is the last LOWER
+// HIGH, confirmed only once a new lower low forms below it.
 if state == 2 and not bull_mss
     if low < sweep_lo
+        if not na(pend_hi)
+            mss_ref_bull := pend_hi
         sweep_lo := low
-    if impulse_down
-        org_dn = f_origin_high()
-        if not na(org_dn)
-            mss_ref_bull := org_dn
+        pend_hi  := high
+    else
+        pend_hi := na(pend_hi) ? high : math.max(pend_hi, high)
     if not na(mss_ref_line)
         line.set_y1(mss_ref_line, mss_ref_bull)
         line.set_y2(mss_ref_line, mss_ref_bull)
@@ -1131,6 +1150,7 @@ if state == 3 and bar_index > mss_bar
             state        := 1
             org_re_b = f_origin_low()
             mss_ref_bear := na(org_re_b) ? low : org_re_b
+            pend_lo      := low
             line.delete(mss_ref_line)
             label.delete(mss_ref_lbl)
             mss_ref_line := line.new(bar_index, mss_ref_bear, bar_index + 1, mss_ref_bear, extend = extend.right, color = color.orange, style = line.style_dashed, width = 2)
@@ -1168,6 +1188,7 @@ if state == 4 and bar_index > mss_bar
             state        := 2
             org_re_u = f_origin_high()
             mss_ref_bull := na(org_re_u) ? high : org_re_u
+            pend_hi      := high
             line.delete(mss_ref_line)
             label.delete(mss_ref_lbl)
             mss_ref_line := line.new(bar_index, mss_ref_bull, bar_index + 1, mss_ref_bull, extend = extend.right, color = color.orange, style = line.style_dashed, width = 2)
