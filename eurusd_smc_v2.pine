@@ -1,8 +1,8 @@
 // This Pine Script(tm) code is subject to the terms of the Mozilla Public License 2.0
-// SMC EURUSD v4 | Sweep HTF POI > 1M MSS > FVG + Engulfing Entry
+// SMC EURUSD v4 | POI liquidated > CE on origin candle > FVG retest entry
 // HTF Bias: Monthly/Weekly/Daily/4H/1H FVG | POIs: PDH/PDL, PWH/PWL, Asia, EQH/EQL
 // Kill Zones: Asia 00:00-08:00 | London 09:00-11:00 | NY 14:00-16:30 (UTC+2)
-// Risk: Tiered non-compounded 1.00%-1.55% (+0.11/attempt) | SL=sweep wick | TP=SLxRR
+// Risk: Tiered non-compounded 1.00%-1.55% (+0.11/attempt) | SL=reaction extreme | TP=SLxRR
 // Execution: 1-minute chart only, London/NY sessions, max 2 trades per session
 
 //@version=6
@@ -67,18 +67,16 @@ use_pwhl  = input.bool(true,    "PWH / PWL (Previous Week)", group = GLIQ)
 use_asia  = input.bool(true,    "Asia Range H/L",            group = GLIQ)
 sw_len    = input.int(10,       "Swing Lookback (MSS ref)",  2, 50, group = GLIQ)
 sweep_buf = input.float(0.0002, "Sweep Buffer", 0.00005, 0.001, 0.00001, group = GLIQ)
-sweep_win = input.int(12,       "Sweep Window (bars to reject back through level)", 1, 100, group = GLIQ)
 
 var string GMSS = "MSS Settings"
 mss_max_bars = input.int(150, "Max Bars for MSS (whole cycle deadline after the sweep)", 5, 500, group = GMSS, tooltip = "How long the bot keeps hunting for the structure break after a zone is liquidated. Price often sweeps a level and then keeps running for another 50-80 bars before the actual reaction, so a short deadline kills the setup right before the trade it was waiting for.")
-mss_piv_len  = input.int(2,   "Structure Pivot Strength (candles each side)", 1, 10, group = GMSS, tooltip = "The structure level to break is the last SWING LOW (for a short setup) or SWING HIGH (for a long one) — the pullback the final push came from. This is how many candles must sit on each side of it for that swing to count. 2 finds the last minor pullback; higher values only accept larger, more significant swings.")
+ce_scan_bars = input.int(30,  "Origin Candle Scan (candles back)", 3, 100, group = GMSS, tooltip = "The level to break is the ORIGIN CANDLE: the last candle of the opposite colour before the impulse that made the recent extreme — for a short setup, the LOW of the last bearish candle of the rally. This is how far back to scan for it.")
 
 var string GFVG = "FVG / Imbalance"
 fvg_min_gap   = input.float(0.0002, "Min FVG Gap",  0.00005, 0.002, 0.00001, group = GFVG)
 fvg_max_bars  = input.int(30,       "FVG Max Age (bars to wait for the retest before cancelling)",  5, 300, group = GFVG, tooltip = "How long a locked entry zone stays valid waiting for price to come back and retest it. On 1m this is minutes. 60 was letting setups fire an hour after the structure break.")
 fvg_search_bars = input.int(8,      "Bars after MSS to find entry FVG", 1, 50, group = GFVG, tooltip = "The reaction-leg window. Imbalances are only picked up during this many bars after the structure break; the closest/newest one within it wins, and the zone is then LOCKED so it can't drift up the impulse.")
 req_close_fvg = input.bool(true,    "Entry candle must CLOSE inside FVG", group = GFVG)
-req_engulf    = input.bool(false,   "Entry candle must be ENGULFING (body covers prev body) — very restrictive", group = GFVG)
 fvg_tf_min    = input.int(1,   "Show Chart Imbalances: Min Timeframe (minutes)", 1, 1440, group = GFVG)
 fvg_tf_max    = input.int(5,   "Show Chart Imbalances: Max Timeframe (minutes)", 1, 1440, group = GFVG)
 
@@ -577,34 +575,46 @@ if use_eql and eql_tf_ok and not na(raw_swl)
     array.push(swl_hist, raw_swl)
 
 // =============================================================
-// STRUCTURE REFERENCE — the level a break must actually cross
+// STRUCTURE REFERENCE — the ORIGIN CANDLE
 // =============================================================
-// The level that defines a structure shift is the last SWING point the final
-// push came from: for a short setup after sweeping a high, the last swing LOW
-// of that rally; for a long setup after sweeping a low, the last swing HIGH of
-// that decline. Price closing through it is the break.
+// A structure shift is defined against the ORIGIN CANDLE: the last candle of
+// the opposite colour before the impulse that produced the recent extreme.
+// For a short setup that is the last BEARISH candle of the rally, and the
+// level to break is its LOW. Price closing below it is the break.
 //
-// This replaces the previous "extreme of the move" and "low of the candle that
-// made the new high" references, both of which were wrong in opposite
-// directions — the first sat so far back that the break only registered at the
-// very end of the move, the second sat so close to price that it triggered on
-// the first candle of any pullback and produced meaningless breaks.
+// Two earlier references were wrong in opposite directions, and both for the
+// same reason — they were derived from price geometry rather than from the
+// candle that originated the move:
+//   a) the extreme of the whole move since the sweep, which only breaks at the
+//      very END of the move;
+//   b) a short swing pivot, which is just some local low — it kept re-anchoring
+//      as new candles printed, so the level visibly jumped around.
+// The origin candle does neither: it is recomputed only when a fresh impulse
+// prints, and sits still in between.
 //
-// A short pivot length (mss_piv_len, default 2) finds the last minor pullback,
-// which is the level to watch. Pivots confirm mss_piv_len bars late, which is
-// unavoidable and correct: a swing is not a swing until price has moved away
-// from it. The bar index is recorded so the level can be drawn from where it
-// actually formed.
-piv_hi_raw = ta.pivothigh(high, mss_piv_len, mss_piv_len)
-piv_lo_raw = ta.pivotlow(low,   mss_piv_len, mss_piv_len)
+// This is the mechanic from the user's working "Sweep + BOS" strategy
+// (chochS/chochL), which scans back for the last opposite-coloured candle on
+// each impulse bar.
+impulse_up   = high > high[1] and close > close[1]
+impulse_down = low  < low[1]  and close < close[1]
 
-var float last_piv_hi = na
-var float last_piv_lo = na
+// Returns the low of the most recent bearish candle (the origin of an up
+// impulse), or na if none within ce_scan_bars. Mirrored by f_origin_high.
+f_origin_low() =>
+    float res = na
+    for i = 1 to ce_scan_bars
+        if close[i] < open[i]
+            res := low[i]
+            break
+    res
 
-if not na(piv_hi_raw)
-    last_piv_hi := piv_hi_raw
-if not na(piv_lo_raw)
-    last_piv_lo := piv_lo_raw
+f_origin_high() =>
+    float res = na
+    for i = 1 to ce_scan_bars
+        if close[i] > open[i]
+            res := high[i]
+            break
+    res
 
 // =============================================================
 // TIERED RISK ENGINE
@@ -629,19 +639,105 @@ poi_in_rng(float px) =>
     not na(px) and math.abs(close - px) <= max_poi_dist
 
 // =============================================================
-// CANDLE BODY + ENGULFING
+// CANDLE DIRECTION
 // =============================================================
 
 is_bull = close > open
 is_bear = close < open
-body_hi = math.max(open, close)
-body_lo = math.min(open, close)
 
-prev_body_hi = math.max(open[1], close[1])
-prev_body_lo = math.min(open[1], close[1])
+// =============================================================
+// POI LIQUIDATION STATE
+// =============================================================
+// Lives here, ABOVE the state machine, because the state machine now arms
+// off these flags: *_liq is true on the single bar price first crosses the
+// level, which is exactly the "zone liquidated" event. Kept together with the
+// swept-time/session bookkeeping the POI renderer reads further down.
 
-bear_engulf = is_bear and body_hi > prev_body_hi and body_lo < prev_body_lo
-bull_engulf = is_bull and body_hi > prev_body_hi and body_lo < prev_body_lo
+var bool pdh_swept    = false
+var bool pdl_swept    = false
+var bool pwh_swept    = false
+var bool pwl_swept    = false
+var bool asia_h_swept = false
+var bool asia_l_swept = false
+var bool eqh_swept    = false
+var bool eql_swept    = false
+
+// Liquidation time + the session it happened in. A level swept THIS session
+// stays visible, frozen at the point it was hit (not extending to "now");
+// once the session changes, it's gone — see f_poi_entry below.
+var int pdh_swept_t = na
+var int pdh_swept_s = na
+var int pdl_swept_t = na
+var int pdl_swept_s = na
+var int pwh_swept_t = na
+var int pwh_swept_s = na
+var int pwl_swept_t = na
+var int pwl_swept_s = na
+var int asia_h_swept_t = na
+var int asia_h_swept_s = na
+var int asia_l_swept_t = na
+var int asia_l_swept_s = na
+var int eqh_swept_t = na
+var int eqh_swept_s = na
+var int eql_swept_t = na
+var int eql_swept_s = na
+
+if is_new_day
+    pdh_swept := false
+    pdl_swept := false
+if is_new_week
+    pwh_swept := false
+    pwl_swept := false
+if asia_closed
+    asia_h_swept := false
+    asia_l_swept := false
+if eqh_new
+    eqh_swept := false
+if eql_new
+    eql_swept := false
+
+pdh_liq    = not na(pdh) and not pdh_swept and high >= pdh
+pdl_liq    = not na(pdl) and not pdl_swept and low <= pdl
+pwh_liq    = not na(pwh) and not pwh_swept and high >= pwh
+pwl_liq    = not na(pwl) and not pwl_swept and low <= pwl
+asiah_liq  = not na(asia_h) and not asia_h_swept and high >= asia_h
+asial_liq  = not na(asia_l) and not asia_l_swept and low <= asia_l
+eqh_liq    = not na(last_eqh) and not eqh_swept and high >= last_eqh
+eql_liq    = not na(last_eql) and not eql_swept and low <= last_eql
+
+if pdh_liq
+    pdh_swept := true
+    pdh_swept_t := time
+    pdh_swept_s := session_id
+if pdl_liq
+    pdl_swept := true
+    pdl_swept_t := time
+    pdl_swept_s := session_id
+if pwh_liq
+    pwh_swept := true
+    pwh_swept_t := time
+    pwh_swept_s := session_id
+if pwl_liq
+    pwl_swept := true
+    pwl_swept_t := time
+    pwl_swept_s := session_id
+if asiah_liq
+    asia_h_swept := true
+    asia_h_swept_t := time
+    asia_h_swept_s := session_id
+if asial_liq
+    asia_l_swept := true
+    asia_l_swept_t := time
+    asia_l_swept_s := session_id
+if eqh_liq
+    eqh_swept := true
+    eqh_swept_t := time
+    eqh_swept_s := session_id
+if eql_liq
+    eql_swept := true
+    eql_swept_t := time
+    eql_swept_s := session_id
+
 
 // =============================================================
 // STATE MACHINE
@@ -730,7 +826,6 @@ var int cnt_entry  = 0
 // visible for the checklist to render before the panel disappears.
 var bool cyc_touched   = false
 var bool cyc_close_ok  = false
-var bool cyc_engulf_ok = false
 
 // Phase visuals: sweep confirmed (the swept POI line itself turns green with
 // a check, see f_poi_entry below) -> waiting for structure break (orange MSS
@@ -754,55 +849,28 @@ var bool prev_bull_w  = false
 var bool prev_bear_m  = false
 var bool prev_bull_m  = false
 
-// ROOT CAUSE #1 of "Sweeps = 7 over years of 1m data".
-// The old test demanded, ALL ON ONE CANDLE: the wick pierces the level by
-// sweep_buf, the ENTIRE body closes back below the level, and the candle is
-// bearish. That is one specific rejection-pin pattern. A real liquidity
-// sweep almost never completes inside a single 1m candle — price pokes
-// through, often hovers above for several bars, then gets pushed back. So
-// virtually every genuine sweep (including the Asian high the user watched
-// get taken) failed this test and the bot never even entered "hunting" mode.
+// SWEEP / LIQUIDATION — the setup arms the instant price crosses the level.
 //
-// New definition: price traded beyond the level at some point within the
-// last sweep_win bars, AND the current bar closes back on the original side.
-// Edge-triggered (the "and not (prev...)" clause) so it fires once on the
-// rejection instead of every bar for as long as the condition holds.
-// ta.highest/ta.lowest are called unconditionally — Pine requires ta.*
-// to evaluate on every bar or their internal state desyncs.
-f_high_sweep(float lvl) =>
-    hh = ta.highest(high, sweep_win)
-    pierced_now   = not na(lvl) and hh    > lvl + sweep_buf
-    rejected_now  = not na(lvl) and close < lvl
-    pierced_prev  = not na(lvl) and hh[1] > lvl + sweep_buf
-    rejected_prev = not na(lvl) and close[1] < lvl
-    (pierced_now and rejected_now) and not (pierced_prev and rejected_prev)
+// The previous definition also required price to CLOSE back through the level
+// before it counted as a sweep. While price stayed beyond the zone nothing was
+// armed, so the setup only engaged when price came back and touched a second
+// time — the zone sat there liquidated with no green check and no checklist,
+// which is exactly what bar replay showed. Taking out the liquidity IS the
+// event; the reaction is what we then wait for, not part of the trigger.
+//
+// *_liq (computed above, before the state machine) is true on the single bar
+// price first trades through the level, edge-triggered by its own *_swept
+// flag — the same "if not sweepPDH and high > prevHigh" the two working
+// PDH/PDL strategies use.
+hs_pdh  = use_pdhl and pdh_liq
+hs_pwh  = use_pwhl and pwh_liq
+hs_asia = use_asia and asiah_liq
+hs_eqh  = use_eql  and eqh_liq
 
-f_low_sweep(float lvl) =>
-    ll = ta.lowest(low, sweep_win)
-    pierced_now   = not na(lvl) and ll    < lvl - sweep_buf
-    rejected_now  = not na(lvl) and close > lvl
-    pierced_prev  = not na(lvl) and ll[1] < lvl - sweep_buf
-    rejected_prev = not na(lvl) and close[1] > lvl
-    (pierced_now and rejected_now) and not (pierced_prev and rejected_prev)
-
-// WHICH bar actually took the liquidity. The sweep is only CONFIRMED on the
-// bar that closes back through the level, which can be several bars after the
-// wick that did the piercing — so marking the confirmation bar put the circle
-// on the wrong candle, visibly ahead of the one that swept. ta.highestbars /
-// ta.lowestbars give the offset back to the extreme of the same window the
-// sweep test uses, so the marker can be drawn on the real liquidating candle.
-sweep_hi_off = math.abs(ta.highestbars(high, sweep_win))
-sweep_lo_off = math.abs(ta.lowestbars(low,  sweep_win))
-
-hs_pdh  = use_pdhl and f_high_sweep(pdh)
-hs_pwh  = use_pwhl and f_high_sweep(pwh)
-hs_asia = use_asia and f_high_sweep(asia_h)
-hs_eqh  = use_eql  and f_high_sweep(last_eqh)
-
-ls_pdl  = use_pdhl and f_low_sweep(pdl)
-ls_pwl  = use_pwhl and f_low_sweep(pwl)
-ls_asia = use_asia and f_low_sweep(asia_l)
-ls_eql  = use_eql  and f_low_sweep(last_eql)
+ls_pdl  = use_pdhl and pdl_liq
+ls_pwl  = use_pwhl and pwl_liq
+ls_asia = use_asia and asial_liq
+ls_eql  = use_eql  and eql_liq
 
 htf_ok_bear = not use_htf or htf_bear
 htf_ok_bull = not use_htf or htf_bull
@@ -830,30 +898,23 @@ is_exec_tf = timeframe.period == "1"
 any_hs = (hs_pdh or hs_pwh or hs_asia or hs_eqh) and htf_ok_bear and can_trade and is_exec_tf
 any_ls = (ls_pdl or ls_pwl or ls_asia or ls_eql)  and htf_ok_bull and can_trade and is_exec_tf
 
-// The true extreme of the sweep — the wick that actually took the liquidity.
-// A sweep is only CONFIRMED on the bar that closes back through the level,
-// which is one or more bars AFTER the extreme was printed. Seeding the stop
-// from that confirmation bar's own high/low (the old `sweep_hi := high`) put
-// the stop inside the sweep wick, so the very move that defined the setup
-// could stop the trade out. ta.* must evaluate on every bar or its internal
-// state desyncs, hence computed unconditionally here at global scope.
-sweep_win_hi = ta.highest(high, sweep_win)
-sweep_win_lo = ta.lowest(low, sweep_win)
-
 if state == 0 and any_hs
     state        := 1
     sweep_bar    := bar_index
-    sweep_hi     := sweep_win_hi
-    // Structure reference = the last SWING LOW of the rally that ran into the
-    // sweep — the pullback the final push came from. Price closing below it is
-    // the structure break. Falls back to this candle's own low only if no
-    // swing has formed yet.
-    mss_ref_bear := na(last_piv_lo) ? low : last_piv_lo
+    // The liquidating candle IS the sweep candle now, so its own extreme seeds
+    // the stop anchor; it then keeps tracking the reaction extreme while the
+    // bot waits for structure (equivalent to maxAfterSweepPDH in the working
+    // PDH/PDL strategy).
+    sweep_hi     := high
+    // Structure reference = the ORIGIN CANDLE: the last bearish candle of the
+    // rally that ran into the sweep. Price closing below its low is the break.
+    // Falls back to this candle's own low only if none was found.
+    org_seed_b = f_origin_low()
+    mss_ref_bear := na(org_seed_b) ? low : org_seed_b
     state_bar    := bar_index
     cnt_sweep    += 1
     cyc_touched   := false
     cyc_close_ok  := false
-    cyc_engulf_ok := false
     // BUG FIX: fvg_top/fvg_bot were never cleared between cycles, so a brand
     // new cycle could inherit the PREVIOUS cycle's gap coordinates (a
     // completely different price level) until it happened to find its own
@@ -881,14 +942,14 @@ if state == 0 and any_hs
 if state == 0 and any_ls
     state        := 2
     sweep_bar    := bar_index
-    sweep_lo     := sweep_win_lo
-    // Mirror: the last SWING HIGH of the decline that ran into the sweep.
-    mss_ref_bull := na(last_piv_hi) ? high : last_piv_hi
+    sweep_lo     := low
+    // Mirror: the last bullish candle of the decline that ran into the sweep.
+    org_seed_u = f_origin_high()
+    mss_ref_bull := na(org_seed_u) ? high : org_seed_u
     state_bar    := bar_index
     cnt_sweep    += 1
     cyc_touched   := false
     cyc_close_ok  := false
-    cyc_engulf_ok := false
     fvg_top := na
     fvg_bot := na
     [tmp_fvg_l1, tmp_fvg_l2, tmp_fvg_lb] = f_fvg_clear()
@@ -924,36 +985,33 @@ bear_mss = state == 1 and bar_index > sweep_bar and not na(mss_ref_bear) and clo
 bull_mss = state == 2 and bar_index > sweep_bar and not na(mss_ref_bull) and close > mss_ref_bull
 
 // ROOT CAUSE #6 — the structure reference itself, which is what made the
-// break register in the wrong place. Two wrong versions preceded this one:
+// break register in the wrong place. Three references were tried before this
+// one, and all three failed for the same reason: they were derived from price
+// geometry rather than from the candle that ORIGINATED the move.
 //
-//   a) The extreme of the WHOLE move since the sweep (math.max of every high
-//      for a bull setup). When the reaction is not immediate the reference
-//      stays frozen back at the sweep area, so the break could not register
-//      until price climbed all the way back over the old high — i.e. at the
-//      END of the move. That is the LONG that fired at the top.
-//   b) The low of the candle that made each new high. That sits one candle
-//      away from price, so the first pullback candle "breaks" it. Breaks
-//      everywhere, all meaningless — the garbage CE right at the high.
+//   a) The extreme of the whole move since the sweep. Only breaks at the very
+//      END of the move — that is the LONG that fired at the top.
+//   b) The low of the candle that made each new high. Sits one candle from
+//      price, so the first pullback candle breaks it: breaks everywhere, all
+//      meaningless.
+//   c) A short swing pivot. Just some local low, and it re-anchored as new
+//      candles printed, so the level visibly jumped around the chart.
 //
-// Both failed for the same reason: they were derived from individual candles
-// rather than from STRUCTURE. The level that defines a structure shift is the
-// last SWING LOW the final push came from (mirrored for longs), which is what
-// gets drawn as the break level and is the level price must close through.
-// Handled by last_piv_lo / last_piv_hi above.
-//
-// While still waiting for the break, a newly confirmed swing in the direction
-// of the ongoing move re-anchors the reference: if price keeps rallying and
-// forms a higher swing low, THAT becomes the level to break. It never moves
-// against the setup — for a short the reference only ever moves UP, never
-// down, so an extended rally cannot drag the trigger further and further away.
+// The origin candle (f_origin_low / f_origin_high above) is the correct one,
+// and it is only recomputed when a fresh impulse prints — between impulses it
+// does not move at all, which is what "the CE should not change place" means.
+// Once the break is confirmed the level is frozen (the state leaves 1/2), the
+// same way the working strategy sets allowShort := false at its BOS.
 //
 // sweep_hi / sweep_lo keep tracking the REACTION extreme independently; they
 // are the stop anchor, not the trigger.
 if state == 1 and not bear_mss
     if high > sweep_hi
         sweep_hi := high
-    if not na(piv_lo_raw) and (na(mss_ref_bear) or piv_lo_raw > mss_ref_bear)
-        mss_ref_bear := piv_lo_raw
+    if impulse_up
+        org_up = f_origin_low()
+        if not na(org_up)
+            mss_ref_bear := org_up
     if not na(mss_ref_line)
         line.set_y1(mss_ref_line, mss_ref_bear)
         line.set_y2(mss_ref_line, mss_ref_bear)
@@ -961,8 +1019,10 @@ if state == 1 and not bear_mss
 if state == 2 and not bull_mss
     if low < sweep_lo
         sweep_lo := low
-    if not na(piv_hi_raw) and (na(mss_ref_bull) or piv_hi_raw < mss_ref_bull)
-        mss_ref_bull := piv_hi_raw
+    if impulse_down
+        org_dn = f_origin_high()
+        if not na(org_dn)
+            mss_ref_bull := org_dn
     if not na(mss_ref_line)
         line.set_y1(mss_ref_line, mss_ref_bull)
         line.set_y2(mss_ref_line, mss_ref_bull)
@@ -1069,7 +1129,8 @@ if state == 3 and bar_index > mss_bar
             // Back to hunting for the real structure break, reference re-seeded
             // at this bar so it tracks the move from here on.
             state        := 1
-            mss_ref_bear := na(last_piv_lo) ? low : last_piv_lo
+            org_re_b = f_origin_low()
+            mss_ref_bear := na(org_re_b) ? low : org_re_b
             line.delete(mss_ref_line)
             label.delete(mss_ref_lbl)
             mss_ref_line := line.new(bar_index, mss_ref_bear, bar_index + 1, mss_ref_bear, extend = extend.right, color = color.orange, style = line.style_dashed, width = 2)
@@ -1105,7 +1166,8 @@ if state == 4 and bar_index > mss_bar
         ce_lbl := na
         if rearm_ok
             state        := 2
-            mss_ref_bull := na(last_piv_hi) ? high : last_piv_hi
+            org_re_u = f_origin_high()
+            mss_ref_bull := na(org_re_u) ? high : org_re_u
             line.delete(mss_ref_line)
             label.delete(mss_ref_lbl)
             mss_ref_line := line.new(bar_index, mss_ref_bull, bar_index + 1, mss_ref_bull, extend = extend.right, color = color.orange, style = line.style_dashed, width = 2)
@@ -1126,14 +1188,12 @@ touched_bull = in_bull_fvg and low  <= fvg_top and high >= fvg_bot
 
 close_ok_bear  = req_close_fvg ? (close >= fvg_bot and close <= fvg_top and is_bear) : is_bear
 close_ok_bull  = req_close_fvg ? (close >= fvg_bot and close <= fvg_top and is_bull) : is_bull
-engulf_ok_bear = not req_engulf or bear_engulf
-engulf_ok_bull = not req_engulf or bull_engulf
 
 // can_trade_entry (not the bare can_trade) — actual order placement is
 // restricted to London/NY sessions, session-capped, on top of the daily cap
 // and being flat. Sweep tracking above stays session-agnostic on purpose.
-short_signal = touched_bear and close_ok_bear and engulf_ok_bear and can_trade_entry
-long_signal  = touched_bull and close_ok_bull  and engulf_ok_bull and can_trade_entry
+short_signal = touched_bear and close_ok_bear and can_trade_entry
+long_signal  = touched_bull and close_ok_bull  and can_trade_entry
 
 // Checklist progress for the current cycle — "ever true so far this cycle",
 // not "true on this exact bar" (entry still needs all three aligned on the
@@ -1142,8 +1202,6 @@ if touched_bear or touched_bull
     cyc_touched := true
 if (touched_bear and close_ok_bear) or (touched_bull and close_ok_bull)
     cyc_close_ok := true
-if (touched_bear and engulf_ok_bear) or (touched_bull and engulf_ok_bull)
-    cyc_engulf_ok := true
 
 // =============================================================
 // ORDER EXECUTION
@@ -1258,90 +1316,6 @@ if show_ny_box
 var line[]  managed_poi_lines  = array.new<line>(0)
 var label[] managed_poi_labels = array.new<label>(0)
 
-var bool pdh_swept    = false
-var bool pdl_swept    = false
-var bool pwh_swept    = false
-var bool pwl_swept    = false
-var bool asia_h_swept = false
-var bool asia_l_swept = false
-var bool eqh_swept    = false
-var bool eql_swept    = false
-
-// Liquidation time + the session it happened in. A level swept THIS session
-// stays visible, frozen at the point it was hit (not extending to "now");
-// once the session changes, it's gone — see f_poi_entry below.
-var int pdh_swept_t = na
-var int pdh_swept_s = na
-var int pdl_swept_t = na
-var int pdl_swept_s = na
-var int pwh_swept_t = na
-var int pwh_swept_s = na
-var int pwl_swept_t = na
-var int pwl_swept_s = na
-var int asia_h_swept_t = na
-var int asia_h_swept_s = na
-var int asia_l_swept_t = na
-var int asia_l_swept_s = na
-var int eqh_swept_t = na
-var int eqh_swept_s = na
-var int eql_swept_t = na
-var int eql_swept_s = na
-
-if is_new_day
-    pdh_swept := false
-    pdl_swept := false
-if is_new_week
-    pwh_swept := false
-    pwl_swept := false
-if asia_closed
-    asia_h_swept := false
-    asia_l_swept := false
-if eqh_new
-    eqh_swept := false
-if eql_new
-    eql_swept := false
-
-pdh_liq    = not na(pdh) and not pdh_swept and high >= pdh
-pdl_liq    = not na(pdl) and not pdl_swept and low <= pdl
-pwh_liq    = not na(pwh) and not pwh_swept and high >= pwh
-pwl_liq    = not na(pwl) and not pwl_swept and low <= pwl
-asiah_liq  = not na(asia_h) and not asia_h_swept and high >= asia_h
-asial_liq  = not na(asia_l) and not asia_l_swept and low <= asia_l
-eqh_liq    = not na(last_eqh) and not eqh_swept and high >= last_eqh
-eql_liq    = not na(last_eql) and not eql_swept and low <= last_eql
-
-if pdh_liq
-    pdh_swept := true
-    pdh_swept_t := time
-    pdh_swept_s := session_id
-if pdl_liq
-    pdl_swept := true
-    pdl_swept_t := time
-    pdl_swept_s := session_id
-if pwh_liq
-    pwh_swept := true
-    pwh_swept_t := time
-    pwh_swept_s := session_id
-if pwl_liq
-    pwl_swept := true
-    pwl_swept_t := time
-    pwl_swept_s := session_id
-if asiah_liq
-    asia_h_swept := true
-    asia_h_swept_t := time
-    asia_h_swept_s := session_id
-if asial_liq
-    asia_l_swept := true
-    asia_l_swept_t := time
-    asia_l_swept_s := session_id
-if eqh_liq
-    eqh_swept := true
-    eqh_swept_t := time
-    eqh_swept_s := session_id
-if eql_liq
-    eql_swept := true
-    eql_swept_t := time
-    eql_swept_s := session_id
 
 // Fires the instant each zone is actually crossed (not just approached) —
 // "POI Liquidado: <zone>" as the alert() message doubles as the alert
@@ -2057,21 +2031,10 @@ if show_levels or show_fvg_vis
             array.push(managed_poi_lines,  new_l)
             array.push(managed_poi_labels, new_lb)
 
-// Sweep markers
-// Drawn as labels, not plotshape: plotshape can only mark the bar it is
-// evaluated on, which is the CONFIRMATION bar (the one closing back through
-// the level), not the candle whose wick actually took the liquidity several
-// bars earlier. sweep_hi_off / sweep_lo_off give that offset, so the marker
-// lands on the real liquidating candle. Kept in a capped ring so a long
-// backtest can't exhaust the label budget.
-var label[] sweep_marks = array.new<label>(0)
-
-if show_sweep and (any_hs or any_ls)
-    mk_off = any_hs ? sweep_hi_off : sweep_lo_off
-    mk = label.new(bar_index - mk_off, close, "", yloc = any_hs ? yloc.abovebar : yloc.belowbar, style = label.style_circle, color = any_hs ? color.new(color.red, 0) : color.new(color.teal, 0), size = size.tiny)
-    array.push(sweep_marks, mk)
-    if array.size(sweep_marks) > 60
-        label.delete(array.shift(sweep_marks))
+// Sweep markers — the bar this evaluates on IS the candle that crossed the
+// level, so no offset is needed any more.
+plotshape(show_sweep and any_hs, title = "Sweep HIGH", style = shape.circle, location = location.abovebar, color = color.new(color.red,  0), size = size.tiny)
+plotshape(show_sweep and any_ls, title = "Sweep LOW",  style = shape.circle, location = location.belowbar, color = color.new(color.teal, 0), size = size.tiny)
 
 // Structure break ("CE") is now a managed label (ce_lbl, created above at
 // the bear_mss/bull_mss transition, cleared at every cycle reset) instead
@@ -2162,7 +2125,7 @@ if barstate.islast and show_info_tbl
     // setups are being cut off (no sweeps = HTF bias/kill zone too strict,
     // sweeps but no MSS = mss_max_bars too short, MSS but no FVG = gap too
     // small at the break, FVG but no entry = retest never happened / too
-    // strict close+engulfing requirement).
+    // strict close-inside-FVG requirement).
     table.cell(tbl, 0, 9,  "Sweeps",   text_color = color.gray, text_size = size.small)
     table.cell(tbl, 1, 9,  str.tostring(cnt_sweep), text_color = color.white, text_size = size.small)
     table.cell(tbl, 0, 10, "MSS Confirmed", text_color = color.gray, text_size = size.small)
@@ -2237,7 +2200,7 @@ if barstate.islast and show_stats_tbl
 // yet" is visible on the chart instead of a guessing game.
 // =============================================================
 
-var table checklist = table.new(position.bottom_right, 2, 7, bgcolor = color.new(color.black, 75), border_width = 1, border_color = color.gray)
+var table checklist = table.new(position.bottom_right, 2, 6, bgcolor = color.new(color.black, 75), border_width = 1, border_color = color.gray)
 
 f_chk_cell(bool done, bool applicable) =>
     txt = not applicable ? "N/D" : done ? "✓" : "⏳"
@@ -2273,10 +2236,6 @@ if barstate.islast and show_checklist and state != 0
     table.cell(checklist, 0, 5, "Cierre Confirmación", text_color = color.gray, text_size = size.small)
     table.cell(checklist, 1, 5, c5txt, text_color = c5col, text_size = size.small)
 
-    [c6txt, c6col] = f_chk_cell(cyc_engulf_ok, mss_done and req_engulf)
-    table.cell(checklist, 0, 6, "Vela Envolvente",     text_color = color.gray, text_size = size.small)
-    table.cell(checklist, 1, 6, c6txt, text_color = c6col, text_size = size.small)
-
 // =============================================================
 // ALERTS
 // =============================================================
@@ -2285,8 +2244,8 @@ alertcondition(any_hs,       title = "Sweep HIGH",         message = "Sweep HIGH
 alertcondition(any_ls,       title = "Sweep LOW",          message = "Sweep LOW - watch for bullish MSS")
 alertcondition(bear_mss,     title = "MSS Bear Confirmed", message = "Bearish MSS confirmed - FVG active")
 alertcondition(bull_mss,     title = "MSS Bull Confirmed", message = "Bullish MSS confirmed - FVG active")
-alertcondition(short_valid, title = "SHORT Entry",        message = "SMC SHORT | Engulfing FVG retest | Entry: {{close}}")
-alertcondition(long_valid,  title = "LONG Entry",         message = "SMC LONG  | Engulfing FVG retest | Entry: {{close}}")
+alertcondition(short_valid, title = "SHORT Entry",        message = "SMC SHORT | FVG retest | Entry: {{close}}")
+alertcondition(long_valid,  title = "LONG Entry",         message = "SMC LONG  | FVG retest | Entry: {{close}}")
 alertcondition(eqh_new,      title = "EQH Formed",         message = "Equal High detected - liquidity pool above")
 alertcondition(eql_new,      title = "EQL Formed",         message = "Equal Low detected - liquidity pool below")
 
