@@ -91,12 +91,12 @@ cap_sl_to_max = input.bool(true, "Cap SL at Max Distance instead of skipping tra
 fixed_cap  = input.float(100000, "Fixed Capital (non-compounded)",       group = GRSK)
 
 var string GTR = "Tiered Risk (% of Fixed Capital)"
-r1 = input.float(0.7, "Attempt 1 (%)", 0.1, 5.0, 0.1, group = GTR) / 100
-r2 = input.float(0.8, "Attempt 2 (%)", 0.1, 5.0, 0.1, group = GTR) / 100
-r3 = input.float(1.2, "Attempt 3 (%)", 0.1, 5.0, 0.1, group = GTR) / 100
-r4 = input.float(1.5, "Attempt 4 (%)", 0.1, 5.0, 0.1, group = GTR) / 100
-r5 = input.float(1.8, "Attempt 5 (%)", 0.1, 5.0, 0.1, group = GTR) / 100
-r6 = input.float(2.0, "Attempt 6 (%)", 0.1, 5.0, 0.1, group = GTR) / 100
+r1 = input.float(1.00, "Attempt 1 (%)", 0.1, 5.0, 0.01, group = GTR) / 100
+r2 = input.float(1.11, "Attempt 2 (%)", 0.1, 5.0, 0.01, group = GTR) / 100
+r3 = input.float(1.22, "Attempt 3 (%)", 0.1, 5.0, 0.01, group = GTR) / 100
+r4 = input.float(1.33, "Attempt 4 (%)", 0.1, 5.0, 0.01, group = GTR) / 100
+r5 = input.float(1.44, "Attempt 5 (%)", 0.1, 5.0, 0.01, group = GTR) / 100
+r6 = input.float(1.55, "Attempt 6 (%)", 0.1, 5.0, 0.01, group = GTR) / 100
 
 var string GEQL = "Equal Highs / Lows (Liquidity Pools)"
 use_eql      = input.bool(true,    "Detect and show EQH / EQL",        group = GEQL)
@@ -129,6 +129,7 @@ var string GALR = "Proximity Alerts"
 use_near_alert       = input.bool(true, "Alert when price nears a POI zone", group = GALR)
 near_alert_pct       = input.float(0.20, "Create Alert at Distance (% of price) — forex baseline; auto x2 on futures", 0.02, 2.0, 0.01, group = GALR)
 near_alert_reset_pct = input.float(1.00, "Remove Alert Beyond Distance (% of price)", 0.10, 5.0, 0.10, group = GALR)
+use_sweep_alert      = input.bool(true, "Alert the instant a POI zone is liquidated (price crosses it)", group = GALR)
 
 // Scale the visible distance down on lower chart timeframes (e.g. 1m) so wide
 // HTF boxes (Weekly/Monthly) don't force the visible price range to stretch and
@@ -1149,38 +1150,69 @@ if eqh_new
 if eql_new
     eql_swept := false
 
-if not na(pdh) and not pdh_swept and high >= pdh
+pdh_liq    = not na(pdh) and not pdh_swept and high >= pdh
+pdl_liq    = not na(pdl) and not pdl_swept and low <= pdl
+pwh_liq    = not na(pwh) and not pwh_swept and high >= pwh
+pwl_liq    = not na(pwl) and not pwl_swept and low <= pwl
+asiah_liq  = not na(asia_h) and not asia_h_swept and high >= asia_h
+asial_liq  = not na(asia_l) and not asia_l_swept and low <= asia_l
+eqh_liq    = not na(last_eqh) and not eqh_swept and high >= last_eqh
+eql_liq    = not na(last_eql) and not eql_swept and low <= last_eql
+
+if pdh_liq
     pdh_swept := true
     pdh_swept_t := time
     pdh_swept_s := session_id
-if not na(pdl) and not pdl_swept and low <= pdl
+if pdl_liq
     pdl_swept := true
     pdl_swept_t := time
     pdl_swept_s := session_id
-if not na(pwh) and not pwh_swept and high >= pwh
+if pwh_liq
     pwh_swept := true
     pwh_swept_t := time
     pwh_swept_s := session_id
-if not na(pwl) and not pwl_swept and low <= pwl
+if pwl_liq
     pwl_swept := true
     pwl_swept_t := time
     pwl_swept_s := session_id
-if not na(asia_h) and not asia_h_swept and high >= asia_h
+if asiah_liq
     asia_h_swept := true
     asia_h_swept_t := time
     asia_h_swept_s := session_id
-if not na(asia_l) and not asia_l_swept and low <= asia_l
+if asial_liq
     asia_l_swept := true
     asia_l_swept_t := time
     asia_l_swept_s := session_id
-if not na(last_eqh) and not eqh_swept and high >= last_eqh
+if eqh_liq
     eqh_swept := true
     eqh_swept_t := time
     eqh_swept_s := session_id
-if not na(last_eql) and not eql_swept and low <= last_eql
+if eql_liq
     eql_swept := true
     eql_swept_t := time
     eql_swept_s := session_id
+
+// Fires the instant each zone is actually crossed (not just approached) —
+// "POI Liquidado: <zone>" as the alert() message doubles as the alert
+// title when the user creates a TradingView alert on "Any alert() function
+// call", and each alertcondition() below (near the rest of the
+// alertconditions) gives its own title too when picked individually.
+if use_sweep_alert and pdh_liq
+    alert("POI Liquidado: PDH (Previous Day High) @ " + str.tostring(pdh, "#.#####"), alert.freq_once_per_bar)
+if use_sweep_alert and pdl_liq
+    alert("POI Liquidado: PDL (Previous Day Low) @ " + str.tostring(pdl, "#.#####"), alert.freq_once_per_bar)
+if use_sweep_alert and pwh_liq
+    alert("POI Liquidado: PWH (Previous Week High) @ " + str.tostring(pwh, "#.#####"), alert.freq_once_per_bar)
+if use_sweep_alert and pwl_liq
+    alert("POI Liquidado: PWL (Previous Week Low) @ " + str.tostring(pwl, "#.#####"), alert.freq_once_per_bar)
+if use_sweep_alert and asiah_liq
+    alert("POI Liquidado: Asia High @ " + str.tostring(asia_h, "#.#####"), alert.freq_once_per_bar)
+if use_sweep_alert and asial_liq
+    alert("POI Liquidado: Asia Low @ " + str.tostring(asia_l, "#.#####"), alert.freq_once_per_bar)
+if use_sweep_alert and eqh_liq
+    alert("POI Liquidado: Equal Highs @ " + str.tostring(last_eqh, "#.#####"), alert.freq_once_per_bar)
+if use_sweep_alert and eql_liq
+    alert("POI Liquidado: Equal Lows @ " + str.tostring(last_eql, "#.#####"), alert.freq_once_per_bar)
 
 // =============================================================
 // PROXIMITY ALERTS — hysteresis armed/disarmed per zone:
@@ -2104,3 +2136,15 @@ alertcondition(asiah_near_alert, title = "Price near Asia H",  message = "Price 
 alertcondition(asial_near_alert, title = "Price near Asia L",  message = "Price approaching Asia Range Low")
 alertcondition(eqh_near_alert,   title = "Price near EQH",     message = "Price approaching Equal Highs liquidity pool")
 alertcondition(eql_near_alert,   title = "Price near EQL",     message = "Price approaching Equal Lows liquidity pool")
+
+// Liquidation alerts - the exact bar a POI zone gets crossed/filled. The
+// "title" here becomes the alert's default name in TradingView, so a push
+// notification from one of these shows the zone that just got liquidated.
+alertcondition(pdh_liq,   title = "POI Liquidado: PDH",      message = "POI Liquidado: PDH (Previous Day High)")
+alertcondition(pdl_liq,   title = "POI Liquidado: PDL",      message = "POI Liquidado: PDL (Previous Day Low)")
+alertcondition(pwh_liq,   title = "POI Liquidado: PWH",      message = "POI Liquidado: PWH (Previous Week High)")
+alertcondition(pwl_liq,   title = "POI Liquidado: PWL",      message = "POI Liquidado: PWL (Previous Week Low)")
+alertcondition(asiah_liq, title = "POI Liquidado: Asia H",   message = "POI Liquidado: Asia High")
+alertcondition(asial_liq, title = "POI Liquidado: Asia L",   message = "POI Liquidado: Asia Low")
+alertcondition(eqh_liq,   title = "POI Liquidado: EQH",      message = "POI Liquidado: Equal Highs")
+alertcondition(eql_liq,   title = "POI Liquidado: EQL",      message = "POI Liquidado: Equal Lows")
