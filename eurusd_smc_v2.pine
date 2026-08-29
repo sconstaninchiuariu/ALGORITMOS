@@ -2096,7 +2096,7 @@ if not use_fvg_entry and (state == 3 or state == 4) and bar_index > mss_bar
 var table tbl = table.new(position.top_right, 2, 15, bgcolor = color.new(color.black, 75), border_width = 1, border_color = color.gray)
 
 if barstate.islast and show_info_tbl
-    table.cell(tbl, 0, 0, "SMC v4 EURUSD", text_color = color.white, bgcolor = color.new(color.navy, 50), text_size = size.normal)
+    table.cell(tbl, 0, 0, "Liquidity Algo", text_color = color.white, bgcolor = color.new(color.navy, 50), text_size = size.normal)
     table.cell(tbl, 1, 0, "",               text_color = color.white, bgcolor = color.new(color.navy, 50), text_size = size.normal)
 
     st_str = switch state
