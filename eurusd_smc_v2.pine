@@ -71,6 +71,7 @@ sweep_win = input.int(12,       "Sweep Window (bars to reject back through level
 
 var string GMSS = "MSS Settings"
 mss_max_bars = input.int(150, "Max Bars for MSS (whole cycle deadline after the sweep)", 5, 500, group = GMSS, tooltip = "How long the bot keeps hunting for the structure break after a zone is liquidated. Price often sweeps a level and then keeps running for another 50-80 bars before the actual reaction, so a short deadline kills the setup right before the trade it was waiting for.")
+mss_piv_len  = input.int(2,   "Structure Pivot Strength (candles each side)", 1, 10, group = GMSS, tooltip = "The structure level to break is the last SWING LOW (for a short setup) or SWING HIGH (for a long one) — the pullback the final push came from. This is how many candles must sit on each side of it for that swing to count. 2 finds the last minor pullback; higher values only accept larger, more significant swings.")
 
 var string GFVG = "FVG / Imbalance"
 fvg_min_gap   = input.float(0.0002, "Min FVG Gap",  0.00005, 0.002, 0.00001, group = GFVG)
@@ -576,6 +577,36 @@ if use_eql and eql_tf_ok and not na(raw_swl)
     array.push(swl_hist, raw_swl)
 
 // =============================================================
+// STRUCTURE REFERENCE — the level a break must actually cross
+// =============================================================
+// The level that defines a structure shift is the last SWING point the final
+// push came from: for a short setup after sweeping a high, the last swing LOW
+// of that rally; for a long setup after sweeping a low, the last swing HIGH of
+// that decline. Price closing through it is the break.
+//
+// This replaces the previous "extreme of the move" and "low of the candle that
+// made the new high" references, both of which were wrong in opposite
+// directions — the first sat so far back that the break only registered at the
+// very end of the move, the second sat so close to price that it triggered on
+// the first candle of any pullback and produced meaningless breaks.
+//
+// A short pivot length (mss_piv_len, default 2) finds the last minor pullback,
+// which is the level to watch. Pivots confirm mss_piv_len bars late, which is
+// unavoidable and correct: a swing is not a swing until price has moved away
+// from it. The bar index is recorded so the level can be drawn from where it
+// actually formed.
+piv_hi_raw = ta.pivothigh(high, mss_piv_len, mss_piv_len)
+piv_lo_raw = ta.pivotlow(low,   mss_piv_len, mss_piv_len)
+
+var float last_piv_hi = na
+var float last_piv_lo = na
+
+if not na(piv_hi_raw)
+    last_piv_hi := piv_hi_raw
+if not na(piv_lo_raw)
+    last_piv_lo := piv_lo_raw
+
+// =============================================================
 // TIERED RISK ENGINE
 // =============================================================
 
@@ -754,6 +785,15 @@ f_low_sweep(float lvl) =>
     rejected_prev = not na(lvl) and close[1] > lvl
     (pierced_now and rejected_now) and not (pierced_prev and rejected_prev)
 
+// WHICH bar actually took the liquidity. The sweep is only CONFIRMED on the
+// bar that closes back through the level, which can be several bars after the
+// wick that did the piercing — so marking the confirmation bar put the circle
+// on the wrong candle, visibly ahead of the one that swept. ta.highestbars /
+// ta.lowestbars give the offset back to the extreme of the same window the
+// sweep test uses, so the marker can be drawn on the real liquidating candle.
+sweep_hi_off = math.abs(ta.highestbars(high, sweep_win))
+sweep_lo_off = math.abs(ta.lowestbars(low,  sweep_win))
+
 hs_pdh  = use_pdhl and f_high_sweep(pdh)
 hs_pwh  = use_pwhl and f_high_sweep(pwh)
 hs_asia = use_asia and f_high_sweep(asia_h)
@@ -804,12 +844,11 @@ if state == 0 and any_hs
     state        := 1
     sweep_bar    := bar_index
     sweep_hi     := sweep_win_hi
-    // Structure reference = the low of the last candle to make a new high
-    // (see the re-anchor block below the MSS check), seeded here at the
-    // confirmation candle's own low. It is a LOCAL reference that follows
-    // price into the extreme of the move, not a distant swing pivot and not
-    // the extreme of the whole leg — see ROOT CAUSE #6 below.
-    mss_ref_bear := low
+    // Structure reference = the last SWING LOW of the rally that ran into the
+    // sweep — the pullback the final push came from. Price closing below it is
+    // the structure break. Falls back to this candle's own low only if no
+    // swing has formed yet.
+    mss_ref_bear := na(last_piv_lo) ? low : last_piv_lo
     state_bar    := bar_index
     cnt_sweep    += 1
     cyc_touched   := false
@@ -843,7 +882,8 @@ if state == 0 and any_ls
     state        := 2
     sweep_bar    := bar_index
     sweep_lo     := sweep_win_lo
-    mss_ref_bull := high
+    // Mirror: the last SWING HIGH of the decline that ran into the sweep.
+    mss_ref_bull := na(last_piv_hi) ? high : last_piv_hi
     state_bar    := bar_index
     cnt_sweep    += 1
     cyc_touched   := false
@@ -874,48 +914,55 @@ if (state == 1 or state == 2) and (bar_index - sweep_bar) > mss_max_bars
 // Checked BEFORE the reference is re-anchored with this bar's own extreme,
 // so "close breaks the structure formed so far" and "this bar becomes the new
 // structure point" can never both be true on the same bar.
-bear_mss = state == 1 and not na(mss_ref_bear) and close < mss_ref_bear
-bull_mss = state == 2 and not na(mss_ref_bull) and close > mss_ref_bull
+// bar_index > sweep_bar: the break must happen on a LATER candle than the
+// sweep. Without it, a sweep candle that already closes past the last swing
+// (a steep rally whose final pullback sits close to the level) would register
+// the sweep and the structure break on the very same candle, which is not a
+// reaction to anything. Taken from the working PDH/PDL strategy, which guards
+// its BOS the same way.
+bear_mss = state == 1 and bar_index > sweep_bar and not na(mss_ref_bear) and close < mss_ref_bear
+bull_mss = state == 2 and bar_index > sweep_bar and not na(mss_ref_bull) and close > mss_ref_bull
 
-// ROOT CAUSE #6 — "the entry fires at the very top of the move, nowhere near
-// the break". THE reason the two previous fixes didn't move it: the problem
-// was one phase earlier, in the structure reference itself.
+// ROOT CAUSE #6 — the structure reference itself, which is what made the
+// break register in the wrong place. Two wrong versions preceded this one:
 //
-// The reference used to trail to the EXTREME OF THE WHOLE MOVE since the
-// sweep (math.max of every high for a bull setup, math.min of every low for a
-// bear one). If the reaction is not immediate — price sweeps PDL and then
-// keeps falling for another forty bars, which is the normal case — that
-// reference stays frozen way back up at the sweep area. `close > mss_ref_bull`
-// then cannot be satisfied until price climbs all the way back above the old
-// high, i.e. at the END of the rally. The structure "break" was therefore
-// registered at the top of the move, and everything downstream (the FVG hunt,
-// the entry, the stop) was anchored there. Exactly the LONG marker in the
-// screenshots.
+//   a) The extreme of the WHOLE move since the sweep (math.max of every high
+//      for a bull setup). When the reaction is not immediate the reference
+//      stays frozen back at the sweep area, so the break could not register
+//      until price climbed all the way back over the old high — i.e. at the
+//      END of the move. That is the LONG that fired at the top.
+//   b) The low of the candle that made each new high. That sits one candle
+//      away from price, so the first pullback candle "breaks" it. Breaks
+//      everywhere, all meaningless — the garbage CE right at the high.
 //
-// The operative definition is "break the last bearish candle before the
-// reaction" — a LOCAL reference that follows price down and sits right at the
-// reaction low. So on every NEW extreme the reference re-anchors to that
-// candle's opposite side: each new low re-arms the bull trigger to that
-// candle's high, each new high re-arms the bear trigger to that candle's low.
-// Once the reaction starts (no new extreme) the reference is frozen at the
-// last down candle, and the first close through it is the break — at the
-// bottom of the move, where it belongs.
+// Both failed for the same reason: they were derived from individual candles
+// rather than from STRUCTURE. The level that defines a structure shift is the
+// last SWING LOW the final push came from (mirrored for longs), which is what
+// gets drawn as the break level and is the level price must close through.
+// Handled by last_piv_lo / last_piv_hi above.
 //
-// The running extreme doubles as the stop anchor: sweep_lo/sweep_hi track the
-// REACTION extreme, not just the original sweep wick, so the stop sits under
-// the actual low the move turned from.
+// While still waiting for the break, a newly confirmed swing in the direction
+// of the ongoing move re-anchors the reference: if price keeps rallying and
+// forms a higher swing low, THAT becomes the level to break. It never moves
+// against the setup — for a short the reference only ever moves UP, never
+// down, so an extended rally cannot drag the trigger further and further away.
+//
+// sweep_hi / sweep_lo keep tracking the REACTION extreme independently; they
+// are the stop anchor, not the trigger.
 if state == 1 and not bear_mss
     if high > sweep_hi
-        sweep_hi     := high
-        mss_ref_bear := low
+        sweep_hi := high
+    if not na(piv_lo_raw) and (na(mss_ref_bear) or piv_lo_raw > mss_ref_bear)
+        mss_ref_bear := piv_lo_raw
     if not na(mss_ref_line)
         line.set_y1(mss_ref_line, mss_ref_bear)
         line.set_y2(mss_ref_line, mss_ref_bear)
         label.set_y(mss_ref_lbl, mss_ref_bear)
 if state == 2 and not bull_mss
     if low < sweep_lo
-        sweep_lo     := low
-        mss_ref_bull := high
+        sweep_lo := low
+    if not na(piv_hi_raw) and (na(mss_ref_bull) or piv_hi_raw < mss_ref_bull)
+        mss_ref_bull := piv_hi_raw
     if not na(mss_ref_line)
         line.set_y1(mss_ref_line, mss_ref_bull)
         line.set_y2(mss_ref_line, mss_ref_bull)
@@ -1022,7 +1069,7 @@ if state == 3 and bar_index > mss_bar
             // Back to hunting for the real structure break, reference re-seeded
             // at this bar so it tracks the move from here on.
             state        := 1
-            mss_ref_bear := low
+            mss_ref_bear := na(last_piv_lo) ? low : last_piv_lo
             line.delete(mss_ref_line)
             label.delete(mss_ref_lbl)
             mss_ref_line := line.new(bar_index, mss_ref_bear, bar_index + 1, mss_ref_bear, extend = extend.right, color = color.orange, style = line.style_dashed, width = 2)
@@ -1058,7 +1105,7 @@ if state == 4 and bar_index > mss_bar
         ce_lbl := na
         if rearm_ok
             state        := 2
-            mss_ref_bull := high
+            mss_ref_bull := na(last_piv_hi) ? high : last_piv_hi
             line.delete(mss_ref_line)
             label.delete(mss_ref_lbl)
             mss_ref_line := line.new(bar_index, mss_ref_bull, bar_index + 1, mss_ref_bull, extend = extend.right, color = color.orange, style = line.style_dashed, width = 2)
@@ -2011,8 +2058,20 @@ if show_levels or show_fvg_vis
             array.push(managed_poi_labels, new_lb)
 
 // Sweep markers
-plotshape(show_sweep and any_hs, title = "Sweep HIGH", style = shape.circle, location = location.abovebar, color = color.new(color.red,  0), size = size.tiny)
-plotshape(show_sweep and any_ls, title = "Sweep LOW",  style = shape.circle, location = location.belowbar, color = color.new(color.teal, 0), size = size.tiny)
+// Drawn as labels, not plotshape: plotshape can only mark the bar it is
+// evaluated on, which is the CONFIRMATION bar (the one closing back through
+// the level), not the candle whose wick actually took the liquidity several
+// bars earlier. sweep_hi_off / sweep_lo_off give that offset, so the marker
+// lands on the real liquidating candle. Kept in a capped ring so a long
+// backtest can't exhaust the label budget.
+var label[] sweep_marks = array.new<label>(0)
+
+if show_sweep and (any_hs or any_ls)
+    mk_off = any_hs ? sweep_hi_off : sweep_lo_off
+    mk = label.new(bar_index - mk_off, close, "", yloc = any_hs ? yloc.abovebar : yloc.belowbar, style = label.style_circle, color = any_hs ? color.new(color.red, 0) : color.new(color.teal, 0), size = size.tiny)
+    array.push(sweep_marks, mk)
+    if array.size(sweep_marks) > 60
+        label.delete(array.shift(sweep_marks))
 
 // Structure break ("CE") is now a managed label (ce_lbl, created above at
 // the bear_mss/bull_mss transition, cleared at every cycle reset) instead
