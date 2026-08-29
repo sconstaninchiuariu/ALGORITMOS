@@ -70,7 +70,7 @@ sweep_buf = input.float(0.0002, "Sweep Buffer", 0.00005, 0.001, 0.00001, group =
 sweep_win = input.int(12,       "Sweep Window (bars to reject back through level)", 1, 100, group = GLIQ)
 
 var string GMSS = "MSS Settings"
-mss_max_bars = input.int(80, "Max Bars for MSS", 5, 300, group = GMSS)
+mss_max_bars = input.int(150, "Max Bars for MSS (whole cycle deadline after the sweep)", 5, 500, group = GMSS, tooltip = "How long the bot keeps hunting for the structure break after a zone is liquidated. Price often sweeps a level and then keeps running for another 50-80 bars before the actual reaction, so a short deadline kills the setup right before the trade it was waiting for.")
 
 var string GFVG = "FVG / Imbalance"
 fvg_min_gap   = input.float(0.0002, "Min FVG Gap",  0.00005, 0.002, 0.00001, group = GFVG)
@@ -620,6 +620,12 @@ bull_engulf = is_bull and body_hi > prev_body_hi and body_lo < prev_body_lo
 
 var int   state        = 0
 var int   state_bar    = 0
+// Bar of the SWEEP that opened the current cycle. state_bar gets overwritten
+// at the MSS, so this is the one deadline that bounds the whole cycle: a
+// structure break that fails to produce an entry re-arms back to the "waiting
+// for structure" phase (see the re-arm blocks) rather than killing the setup,
+// and this is what stops that from looping forever.
+var int   sweep_bar    = 0
 var float sweep_hi     = na
 var float sweep_lo     = na
 var float mss_ref_bear = na
@@ -796,13 +802,13 @@ sweep_win_lo = ta.lowest(low, sweep_win)
 
 if state == 0 and any_hs
     state        := 1
+    sweep_bar    := bar_index
     sweep_hi     := sweep_win_hi
-    // Structure reference = a trailing low, seeded at the sweep candle's own
-    // low and pulled down each bar that DOESN'T break it (see the trailing
-    // update below the MSS check). This is "the low of the pullback since
-    // the sweep" — the last bearish structure point before the reaction —
-    // not a distant swing pivot from sw_len bars back, which could sit far
-    // away or on the wrong side of price and made MSS unreachable.
+    // Structure reference = the low of the last candle to make a new high
+    // (see the re-anchor block below the MSS check), seeded here at the
+    // confirmation candle's own low. It is a LOCAL reference that follows
+    // price into the extreme of the move, not a distant swing pivot and not
+    // the extreme of the whole leg — see ROOT CAUSE #6 below.
     mss_ref_bear := low
     state_bar    := bar_index
     cnt_sweep    += 1
@@ -835,6 +841,7 @@ if state == 0 and any_hs
 
 if state == 0 and any_ls
     state        := 2
+    sweep_bar    := bar_index
     sweep_lo     := sweep_win_lo
     mss_ref_bull := high
     state_bar    := bar_index
@@ -854,7 +861,7 @@ if state == 0 and any_ls
     mss_ref_line := line.new(bar_index, mss_ref_bull, bar_index + 1, mss_ref_bull, extend = extend.right, color = color.orange, style = line.style_dashed, width = 2)
     mss_ref_lbl  := label.new(bar_index, mss_ref_bull, "Ruptura p/ CE Alcista", style = label.style_none, textcolor = color.orange, size = size.normal)
 
-if (state == 1 or state == 2) and (bar_index - state_bar) > mss_max_bars
+if (state == 1 or state == 2) and (bar_index - sweep_bar) > mss_max_bars
     state := 0
     active_sweep_px := na
     label.delete(ce_lbl)
@@ -864,20 +871,51 @@ if (state == 1 or state == 2) and (bar_index - state_bar) > mss_max_bars
     mss_ref_line    := na
     mss_ref_lbl     := na
 
-// Checked BEFORE the trailing reference is extended with this bar's own
-// low/high, so "close breaks the structure formed so far" and "today's low
-// becomes the new structure point" can never both be true on the same bar.
+// Checked BEFORE the reference is re-anchored with this bar's own extreme,
+// so "close breaks the structure formed so far" and "this bar becomes the new
+// structure point" can never both be true on the same bar.
 bear_mss = state == 1 and not na(mss_ref_bear) and close < mss_ref_bear
 bull_mss = state == 2 and not na(mss_ref_bull) and close > mss_ref_bull
 
+// ROOT CAUSE #6 — "the entry fires at the very top of the move, nowhere near
+// the break". THE reason the two previous fixes didn't move it: the problem
+// was one phase earlier, in the structure reference itself.
+//
+// The reference used to trail to the EXTREME OF THE WHOLE MOVE since the
+// sweep (math.max of every high for a bull setup, math.min of every low for a
+// bear one). If the reaction is not immediate — price sweeps PDL and then
+// keeps falling for another forty bars, which is the normal case — that
+// reference stays frozen way back up at the sweep area. `close > mss_ref_bull`
+// then cannot be satisfied until price climbs all the way back above the old
+// high, i.e. at the END of the rally. The structure "break" was therefore
+// registered at the top of the move, and everything downstream (the FVG hunt,
+// the entry, the stop) was anchored there. Exactly the LONG marker in the
+// screenshots.
+//
+// The operative definition is "break the last bearish candle before the
+// reaction" — a LOCAL reference that follows price down and sits right at the
+// reaction low. So on every NEW extreme the reference re-anchors to that
+// candle's opposite side: each new low re-arms the bull trigger to that
+// candle's high, each new high re-arms the bear trigger to that candle's low.
+// Once the reaction starts (no new extreme) the reference is frozen at the
+// last down candle, and the first close through it is the break — at the
+// bottom of the move, where it belongs.
+//
+// The running extreme doubles as the stop anchor: sweep_lo/sweep_hi track the
+// REACTION extreme, not just the original sweep wick, so the stop sits under
+// the actual low the move turned from.
 if state == 1 and not bear_mss
-    mss_ref_bear := math.min(mss_ref_bear, low)
+    if high > sweep_hi
+        sweep_hi     := high
+        mss_ref_bear := low
     if not na(mss_ref_line)
         line.set_y1(mss_ref_line, mss_ref_bear)
         line.set_y2(mss_ref_line, mss_ref_bear)
         label.set_y(mss_ref_lbl, mss_ref_bear)
 if state == 2 and not bull_mss
-    mss_ref_bull := math.max(mss_ref_bull, high)
+    if low < sweep_lo
+        sweep_lo     := low
+        mss_ref_bull := high
     if not na(mss_ref_line)
         line.set_y1(mss_ref_line, mss_ref_bull)
         line.set_y2(mss_ref_line, mss_ref_bull)
@@ -940,9 +978,18 @@ if bull_mss
 //
 // So: the FIRST qualifying gap after the MSS wins and the zone is then
 // LOCKED — no re-anchoring at all. The search is additionally confined to
-// fvg_search_bars bars after the MSS; if the reaction leaves no gap in that
-// window the cycle is cancelled rather than waiting for a later, unrelated
-// one.
+// fvg_search_bars bars after the MSS.
+//
+// When that window passes with no gap, or the locked zone is never retested,
+// the cycle RE-ARMS to the "waiting for structure" phase instead of dying.
+// This is required by the local structure reference (ROOT CAUSE #6): a local
+// reference legitimately triggers on intermediate bounces during a long move
+// down to the real reaction low. Killing the cycle on the first such break
+// would leave the bot disarmed by the time the real reaction arrives — the
+// sweep is edge-triggered and will not fire again — so it would simply never
+// take the trade. Re-arming keeps it hunting until either a valid entry
+// appears or the whole cycle times out mss_max_bars after the sweep.
+rearm_ok = (bar_index - sweep_bar) <= mss_max_bars
 if state == 3 and bar_index > mss_bar
     in_search_window = (bar_index - mss_bar) <= fvg_search_bars
     if na(fvg_top) and in_search_window
@@ -961,20 +1008,28 @@ if state == 3 and bar_index > mss_bar
             fvg_top_line := tmp_fvg_d1
             fvg_bot_line := tmp_fvg_d2
             fvg_lbl := tmp_fvg_db
-    if na(fvg_top) and (bar_index - mss_bar) >= fvg_search_bars
-        state := 0
-        active_sweep_px := na
-        label.delete(ce_lbl)
-        ce_lbl := na
-    else if not na(fvg_top) and (bar_index - mss_bar) > fvg_max_bars
+    bear_failed = (na(fvg_top) and (bar_index - mss_bar) >= fvg_search_bars) or (not na(fvg_top) and (bar_index - mss_bar) > fvg_max_bars)
+    if bear_failed
         [tmp_fvg_l1, tmp_fvg_l2, tmp_fvg_lb] = f_fvg_clear()
         fvg_top_line := tmp_fvg_l1
         fvg_bot_line := tmp_fvg_l2
         fvg_lbl := tmp_fvg_lb
-        state := 0
-        active_sweep_px := na
+        fvg_top := na
+        fvg_bot := na
         label.delete(ce_lbl)
         ce_lbl := na
+        if rearm_ok
+            // Back to hunting for the real structure break, reference re-seeded
+            // at this bar so it tracks the move from here on.
+            state        := 1
+            mss_ref_bear := low
+            line.delete(mss_ref_line)
+            label.delete(mss_ref_lbl)
+            mss_ref_line := line.new(bar_index, mss_ref_bear, bar_index + 1, mss_ref_bear, extend = extend.right, color = color.orange, style = line.style_dashed, width = 2)
+            mss_ref_lbl  := label.new(bar_index, mss_ref_bear, "Ruptura p/ CE Bajista", style = label.style_none, textcolor = color.orange, size = size.normal)
+        else
+            state := 0
+            active_sweep_px := na
 
 if state == 4 and bar_index > mss_bar
     in_search_window = (bar_index - mss_bar) <= fvg_search_bars
@@ -991,20 +1046,26 @@ if state == 4 and bar_index > mss_bar
             fvg_top_line := tmp_fvg_d1
             fvg_bot_line := tmp_fvg_d2
             fvg_lbl := tmp_fvg_db
-    if na(fvg_top) and (bar_index - mss_bar) >= fvg_search_bars
-        state := 0
-        active_sweep_px := na
-        label.delete(ce_lbl)
-        ce_lbl := na
-    else if not na(fvg_top) and (bar_index - mss_bar) > fvg_max_bars
+    bull_failed = (na(fvg_top) and (bar_index - mss_bar) >= fvg_search_bars) or (not na(fvg_top) and (bar_index - mss_bar) > fvg_max_bars)
+    if bull_failed
         [tmp_fvg_l1, tmp_fvg_l2, tmp_fvg_lb] = f_fvg_clear()
         fvg_top_line := tmp_fvg_l1
         fvg_bot_line := tmp_fvg_l2
         fvg_lbl := tmp_fvg_lb
-        state := 0
-        active_sweep_px := na
+        fvg_top := na
+        fvg_bot := na
         label.delete(ce_lbl)
         ce_lbl := na
+        if rearm_ok
+            state        := 2
+            mss_ref_bull := high
+            line.delete(mss_ref_line)
+            label.delete(mss_ref_lbl)
+            mss_ref_line := line.new(bar_index, mss_ref_bull, bar_index + 1, mss_ref_bull, extend = extend.right, color = color.orange, style = line.style_dashed, width = 2)
+            mss_ref_lbl  := label.new(bar_index, mss_ref_bull, "Ruptura p/ CE Alcista", style = label.style_none, textcolor = color.orange, size = size.normal)
+        else
+            state := 0
+            active_sweep_px := na
 
 // =============================================================
 // ENTRY CONDITIONS
