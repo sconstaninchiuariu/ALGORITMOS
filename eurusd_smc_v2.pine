@@ -1159,7 +1159,7 @@ if use_fvg_entry and state == 3 and bar_index > mss_bar
             state        := 1
             org_re_b = na(last_sw_lo) ? f_origin_low() : last_sw_lo
             mss_ref_bear := na(org_re_b) ? low : org_re_b
-                    line.delete(mss_ref_line)
+            line.delete(mss_ref_line)
             label.delete(mss_ref_lbl)
             mss_ref_line := line.new(bar_index, mss_ref_bear, bar_index + 1, mss_ref_bear, extend = extend.right, color = color.yellow, style = line.style_solid, width = 2)
             mss_ref_lbl  := label.new(bar_index, mss_ref_bear, "CE", style = label.style_none, textcolor = color.yellow, size = size.normal)
@@ -1196,7 +1196,7 @@ if use_fvg_entry and state == 4 and bar_index > mss_bar
             state        := 2
             org_re_u = na(last_sw_hi) ? f_origin_high() : last_sw_hi
             mss_ref_bull := na(org_re_u) ? high : org_re_u
-                    line.delete(mss_ref_line)
+            line.delete(mss_ref_line)
             label.delete(mss_ref_lbl)
             mss_ref_line := line.new(bar_index, mss_ref_bull, bar_index + 1, mss_ref_bull, extend = extend.right, color = color.yellow, style = line.style_solid, width = 2)
             mss_ref_lbl  := label.new(bar_index, mss_ref_bull, "CE", style = label.style_none, textcolor = color.yellow, size = size.normal)
