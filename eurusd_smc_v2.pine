@@ -2,7 +2,8 @@
 // SMC EURUSD v4 | Sweep HTF POI > 1M MSS > FVG + Engulfing Entry
 // HTF Bias: Monthly/Weekly/Daily/4H/1H FVG | POIs: PDH/PDL, PWH/PWL, Asia, EQH/EQL
 // Kill Zones: Asia 00:00-08:00 | London 09:00-11:00 | NY 14:00-16:30 (UTC+2)
-// Risk: Tiered non-compounded 0.7%-2.0% | SL=sweep wick | TP=SLxRR
+// Risk: Tiered non-compounded 1.00%-1.55% (+0.11/attempt) | SL=sweep wick | TP=SLxRR
+// Execution: 1-minute chart only, London/NY sessions, max 2 trades per session
 
 //@version=6
 strategy(
@@ -17,7 +18,15 @@ strategy(
     commission_value  = 0.00005,
     slippage          = 2,
     pyramiding        = 0,
-    max_bars_back     = 500)
+    max_bars_back     = 500,
+    // Pine defaults to 50 of each. The POI manager alone can hold a dozen
+    // lines + labels at once, plus the entry-FVG pair, the MSS reference and
+    // the session boxes — over a long backtest / bar replay the oldest
+    // drawings get silently evicted at the default cap, which looks like
+    // "zones randomly disappearing". Explicit headroom avoids that.
+    max_lines_count   = 500,
+    max_labels_count  = 500,
+    max_boxes_count   = 500)
 
 // =============================================================
 // INPUTS
@@ -342,12 +351,17 @@ in_london = h_utc >= kz_lon_open and h_utc < kz_lon_close
 in_ny     = h_utc >= kz_ny_open and not ny_closed
 in_kz     = in_london or in_ny
 
-// Increments once at the start of every London/NY session — used to tell
-// "swept this session" (still show, frozen at the liquidation point) from
-// "swept in an earlier session" (fully remove) for the 8 structural POI
+// Increments on EVERY London/NY session boundary — open AND close — used to
+// tell "swept this session" (still show, frozen at the liquidation point)
+// from "swept in an earlier session" (fully remove) for the 8 structural POI
 // lines below.
+// Incrementing only on session OPEN was wrong: a level swept during NY kept
+// matching the live session_id all the way until London opened the next day,
+// so frozen liquidated lines stayed on the chart hours after NY had closed.
+// Counting the close as a boundary too means the moment a session ends, its
+// liquidated zones stop matching and are dropped, which is the intent.
 var int session_id = 0
-if (in_london and not in_london[1]) or (in_ny and not in_ny[1])
+if in_london != in_london[1] or in_ny != in_ny[1]
     session_id += 1
 
 eql_tf_ok = timeframe.in_seconds() >= 900
