@@ -121,8 +121,8 @@ show_levels  = input.bool(true, "POI Lines",   group = GVIS, inline = "show1")
 show_fvg_vis = input.bool(true, "Imbalances",  group = GVIS, inline = "show1")
 show_sweep   = input.bool(true, "Sweep Marks", group = GVIS, inline = "show2")
 show_checklist = input.bool(true, "Setup Checklist", group = GVIS, inline = "show2")
-show_info_tbl  = input.bool(true, "Info Table",  group = GVIS, inline = "show3")
-show_stats_tbl = input.bool(true, "Stats Table", group = GVIS, inline = "show3")
+show_info_tbl  = input.bool(false, "Info Table",  group = GVIS, inline = "show3")
+show_stats_tbl = input.bool(false, "Stats Table", group = GVIS, inline = "show3")
 
 poi_line_col    = input.color(color.white, "POI Line Color", group = GVIS,
      tooltip = "One flat color for every POI line (PDH/PDL, PWH/PWL, Asia, EQH/EQL) — always solid, straight. The active swept level still turns green while its trade cycle is live.")
@@ -141,13 +141,16 @@ near_alert_pct       = input.float(0.20, "Create Alert at Distance (% of price) 
 near_alert_reset_pct = input.float(1.00, "Remove Alert Beyond Distance (% of price)", 0.10, 5.0, 0.10, group = GALR)
 use_sweep_alert      = input.bool(true, "Alert the instant a POI zone is liquidated (price crosses it)", group = GALR)
 
-// Scale the visible distance down on lower chart timeframes (e.g. 1m) so wide
-// HTF boxes (Weekly/Monthly) don't force the visible price range to stretch and
-// shrink the candles. At 1H+ the full % applies; below that it shrinks toward
-// a 15% floor as the chart timeframe gets smaller.
-tf_sec       = timeframe.in_seconds(timeframe.period)
-tf_scale     = math.min(1.0, math.max(0.15, tf_sec / 3600.0))
-poi_pct_eff  = (syminfo.type == "futures" ? max_poi_pct * 2.0 : max_poi_pct) * tf_scale
+// REMOVED: this used to shrink the distance on lower timeframes (down to a
+// 15% floor, e.g. 0.40% -> 0.06% on 1m) with the stated intent of stopping
+// wide HTF boxes from stretching the y-axis. But zones are drawn as thin
+// LINES here, not boxes — nothing about a line's distance test affects the
+// price-axis auto-scale — so that concern doesn't apply to this codebase,
+// and the scaling had no real justification left except to make zones
+// vanish almost entirely on 1m, which is exactly the EXECUTION timeframe
+// the whole strategy operates on and the one where zones matter most. Now
+// flat: the same max_poi_pct distance applies at every timeframe.
+poi_pct_eff  = syminfo.type == "futures" ? max_poi_pct * 2.0 : max_poi_pct
 max_poi_dist = close * poi_pct_eff / 100.0
 
 near_pct_eff       = syminfo.type == "futures" ? near_alert_pct * 2.0 : near_alert_pct
