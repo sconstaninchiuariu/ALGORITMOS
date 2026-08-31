@@ -121,8 +121,8 @@ show_levels  = input.bool(true, "POI Lines",   group = GVIS, inline = "show1")
 show_fvg_vis = input.bool(true, "Imbalances",  group = GVIS, inline = "show1")
 show_sweep   = input.bool(true, "Sweep Marks", group = GVIS, inline = "show2")
 show_checklist = input.bool(true, "Setup Checklist", group = GVIS, inline = "show2")
-show_info_tbl  = input.bool(false, "Info Table",  group = GVIS, inline = "show3")
-show_stats_tbl = input.bool(false, "Stats Table", group = GVIS, inline = "show3")
+show_info_tbl  = input.bool(true, "Info Table",  group = GVIS, inline = "show3")
+show_stats_tbl = input.bool(true, "Stats Table", group = GVIS, inline = "show3")
 
 poi_line_col    = input.color(color.white, "POI Line Color", group = GVIS,
      tooltip = "One flat color for every POI line (PDH/PDL, PWH/PWL, Asia, EQH/EQL) — always solid, straight. The active swept level still turns green while its trade cycle is live.")
@@ -987,7 +987,7 @@ if state == 0 and any_hs
     label.delete(mss_ref_lbl)
     label.delete(mss_ref_org)
     mss_ref_line := line.new(nz(mss_ref_bar, bar_index), mss_ref_bear, bar_index + 1, mss_ref_bear, extend = extend.right, color = color.yellow, style = line.style_solid, width = 2)
-    mss_ref_lbl  := label.new(bar_index, mss_ref_bear, "CE", style = label.style_none, textcolor = color.yellow, size = size.normal)
+    mss_ref_lbl  := label.new(bar_index, mss_ref_bear, "", style = label.style_none, textcolor = color.yellow, size = size.normal)
     mss_ref_org  := label.new(nz(mss_ref_bar, bar_index), mss_ref_bear, "•", xloc = xloc.bar_index, style = label.style_none, textcolor = color.yellow, size = size.tiny)
 
 if state == 0 and any_ls
@@ -1014,7 +1014,7 @@ if state == 0 and any_ls
     label.delete(mss_ref_lbl)
     label.delete(mss_ref_org)
     mss_ref_line := line.new(nz(mss_ref_bar, bar_index), mss_ref_bull, bar_index + 1, mss_ref_bull, extend = extend.right, color = color.yellow, style = line.style_solid, width = 2)
-    mss_ref_lbl  := label.new(bar_index, mss_ref_bull, "CE", style = label.style_none, textcolor = color.yellow, size = size.normal)
+    mss_ref_lbl  := label.new(bar_index, mss_ref_bull, "", style = label.style_none, textcolor = color.yellow, size = size.normal)
     mss_ref_org  := label.new(nz(mss_ref_bar, bar_index), mss_ref_bull, "•", xloc = xloc.bar_index, style = label.style_none, textcolor = color.yellow, size = size.tiny)
 
 if (state == 1 or state == 2) and (bar_index - sweep_bar) > mss_max_bars
@@ -1217,7 +1217,7 @@ if use_fvg_entry and state == 3 and bar_index > mss_bar
             label.delete(mss_ref_lbl)
             label.delete(mss_ref_org)
             mss_ref_line := line.new(nz(mss_ref_bar, bar_index), mss_ref_bear, bar_index + 1, mss_ref_bear, extend = extend.right, color = color.yellow, style = line.style_solid, width = 2)
-            mss_ref_lbl  := label.new(bar_index, mss_ref_bear, "CE", style = label.style_none, textcolor = color.yellow, size = size.normal)
+            mss_ref_lbl  := label.new(bar_index, mss_ref_bear, "", style = label.style_none, textcolor = color.yellow, size = size.normal)
             mss_ref_org  := label.new(nz(mss_ref_bar, bar_index), mss_ref_bear, "•", xloc = xloc.bar_index, style = label.style_none, textcolor = color.yellow, size = size.tiny)
         else
             state := 0
@@ -1258,7 +1258,7 @@ if use_fvg_entry and state == 4 and bar_index > mss_bar
             label.delete(mss_ref_lbl)
             label.delete(mss_ref_org)
             mss_ref_line := line.new(nz(mss_ref_bar, bar_index), mss_ref_bull, bar_index + 1, mss_ref_bull, extend = extend.right, color = color.yellow, style = line.style_solid, width = 2)
-            mss_ref_lbl  := label.new(bar_index, mss_ref_bull, "CE", style = label.style_none, textcolor = color.yellow, size = size.normal)
+            mss_ref_lbl  := label.new(bar_index, mss_ref_bull, "", style = label.style_none, textcolor = color.yellow, size = size.normal)
             mss_ref_org  := label.new(nz(mss_ref_bar, bar_index), mss_ref_bull, "•", xloc = xloc.bar_index, style = label.style_none, textcolor = color.yellow, size = size.tiny)
         else
             state := 0
