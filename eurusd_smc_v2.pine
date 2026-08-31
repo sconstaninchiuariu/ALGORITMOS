@@ -604,14 +604,22 @@ sw_lo_raw = ta.pivotlow(low,   ce_piv, ce_piv)
 
 var float last_sw_hi = na
 var float last_sw_lo = na
+// The bar each swing actually printed on — a pivot confirms ce_piv bars after
+// the fact, so the swing candle itself is ce_piv bars back from here. Lets the
+// CE line originate at the real swing candle instead of the liquidation bar.
+var int   last_sw_hi_bar = na
+var int   last_sw_lo_bar = na
 
 if not na(sw_hi_raw)
-    last_sw_hi := sw_hi_raw
+    last_sw_hi     := sw_hi_raw
+    last_sw_hi_bar := bar_index - ce_piv
 if not na(sw_lo_raw)
-    last_sw_lo := sw_lo_raw
+    last_sw_lo     := sw_lo_raw
+    last_sw_lo_bar := bar_index - ce_piv
 
 // Returns the low of the most recent bearish candle, or na if none within
-// ce_scan_bars. Mirrored by f_origin_high.
+// ce_scan_bars. Mirrored by f_origin_high. f_origin_low_bar / f_origin_high_bar
+// run the same scan to report which bar it was found on, for the same reason.
 f_origin_low() =>
     float res = na
     for i = 1 to ce_scan_bars
@@ -625,6 +633,22 @@ f_origin_high() =>
     for i = 1 to ce_scan_bars
         if close[i] > open[i]
             res := high[i]
+            break
+    res
+
+f_origin_low_bar() =>
+    int res = na
+    for i = 1 to ce_scan_bars
+        if close[i] < open[i]
+            res := bar_index - i
+            break
+    res
+
+f_origin_high_bar() =>
+    int res = na
+    for i = 1 to ce_scan_bars
+        if close[i] > open[i]
+            res := bar_index - i
             break
     res
 
@@ -769,6 +793,9 @@ var float sweep_hi     = na
 var float sweep_lo     = na
 var float mss_ref_bear = na
 var float mss_ref_bull = na
+// Bar the CE level actually printed on (the swing/origin candle), so the line
+// can be drawn starting there instead of at the liquidation bar.
+var int   mss_ref_bar  = na
 var float fvg_top      = na
 var float fvg_bot      = na
 var int   fvg_bar      = 0
@@ -921,8 +948,10 @@ if state == 0 and any_hs
     // Structure reference = the ORIGIN CANDLE: the last bearish candle of the
     // rally that ran into the sweep. Price closing below its low is the break.
     // Falls back to this candle's own low only if none was found.
-    org_seed_b = na(last_sw_lo) ? f_origin_low() : last_sw_lo
+    org_seed_b     = na(last_sw_lo) ? f_origin_low() : last_sw_lo
+    org_seed_b_bar = na(last_sw_lo) ? f_origin_low_bar() : last_sw_lo_bar
     mss_ref_bear := na(org_seed_b) ? low : org_seed_b
+    mss_ref_bar  := na(org_seed_b_bar) ? bar_index : org_seed_b_bar
     state_bar    := bar_index
     cnt_sweep    += 1
     cyc_touched   := false
@@ -948,7 +977,7 @@ if state == 0 and any_hs
     // a bearish structure shift.
     line.delete(mss_ref_line)
     label.delete(mss_ref_lbl)
-    mss_ref_line := line.new(bar_index, mss_ref_bear, bar_index + 1, mss_ref_bear, extend = extend.right, color = color.yellow, style = line.style_solid, width = 2)
+    mss_ref_line := line.new(nz(mss_ref_bar, bar_index), mss_ref_bear, bar_index + 1, mss_ref_bear, extend = extend.right, color = color.yellow, style = line.style_solid, width = 2)
     mss_ref_lbl  := label.new(bar_index, mss_ref_bear, "CE", style = label.style_none, textcolor = color.yellow, size = size.normal)
 
 if state == 0 and any_ls
@@ -956,8 +985,10 @@ if state == 0 and any_ls
     sweep_bar    := bar_index
     sweep_lo     := low
     // Mirror: the last bullish candle of the decline that ran into the sweep.
-    org_seed_u = na(last_sw_hi) ? f_origin_high() : last_sw_hi
+    org_seed_u     = na(last_sw_hi) ? f_origin_high() : last_sw_hi
+    org_seed_u_bar = na(last_sw_hi) ? f_origin_high_bar() : last_sw_hi_bar
     mss_ref_bull := na(org_seed_u) ? high : org_seed_u
+    mss_ref_bar  := na(org_seed_u_bar) ? bar_index : org_seed_u_bar
     state_bar    := bar_index
     cnt_sweep    += 1
     cyc_touched   := false
@@ -971,7 +1002,7 @@ if state == 0 and any_ls
     active_sweep_px := ls_pdl ? pdl : ls_pwl ? pwl : ls_asia ? asia_l : last_eql
     line.delete(mss_ref_line)
     label.delete(mss_ref_lbl)
-    mss_ref_line := line.new(bar_index, mss_ref_bull, bar_index + 1, mss_ref_bull, extend = extend.right, color = color.yellow, style = line.style_solid, width = 2)
+    mss_ref_line := line.new(nz(mss_ref_bar, bar_index), mss_ref_bull, bar_index + 1, mss_ref_bull, extend = extend.right, color = color.yellow, style = line.style_solid, width = 2)
     mss_ref_lbl  := label.new(bar_index, mss_ref_bull, "CE", style = label.style_none, textcolor = color.yellow, size = size.normal)
 
 if (state == 1 or state == 2) and (bar_index - sweep_bar) > mss_max_bars
@@ -1036,6 +1067,7 @@ if state == 1 and not bear_mss
         // same leg confirm no swing, so the level does not move.
         if not na(last_sw_lo) and last_sw_lo != mss_ref_bear and last_sw_lo < high
             mss_ref_bear := last_sw_lo
+            mss_ref_bar  := nz(last_sw_lo_bar, bar_index)
     if not na(mss_ref_line)
         line.set_y1(mss_ref_line, mss_ref_bear)
         line.set_y2(mss_ref_line, mss_ref_bear)
@@ -1047,6 +1079,7 @@ if state == 2 and not bull_mss
         sweep_lo := low
         if not na(last_sw_hi) and last_sw_hi != mss_ref_bull and last_sw_hi > low
             mss_ref_bull := last_sw_hi
+            mss_ref_bar  := nz(last_sw_hi_bar, bar_index)
     if not na(mss_ref_line)
         line.set_y1(mss_ref_line, mss_ref_bull)
         line.set_y2(mss_ref_line, mss_ref_bull)
@@ -1157,11 +1190,13 @@ if use_fvg_entry and state == 3 and bar_index > mss_bar
             // Back to hunting for the real structure break, reference re-seeded
             // at this bar so it tracks the move from here on.
             state        := 1
-            org_re_b = na(last_sw_lo) ? f_origin_low() : last_sw_lo
+            org_re_b     = na(last_sw_lo) ? f_origin_low() : last_sw_lo
+            org_re_b_bar = na(last_sw_lo) ? f_origin_low_bar() : last_sw_lo_bar
             mss_ref_bear := na(org_re_b) ? low : org_re_b
+            mss_ref_bar  := na(org_re_b_bar) ? bar_index : org_re_b_bar
             line.delete(mss_ref_line)
             label.delete(mss_ref_lbl)
-            mss_ref_line := line.new(bar_index, mss_ref_bear, bar_index + 1, mss_ref_bear, extend = extend.right, color = color.yellow, style = line.style_solid, width = 2)
+            mss_ref_line := line.new(nz(mss_ref_bar, bar_index), mss_ref_bear, bar_index + 1, mss_ref_bear, extend = extend.right, color = color.yellow, style = line.style_solid, width = 2)
             mss_ref_lbl  := label.new(bar_index, mss_ref_bear, "CE", style = label.style_none, textcolor = color.yellow, size = size.normal)
         else
             state := 0
@@ -1194,11 +1229,13 @@ if use_fvg_entry and state == 4 and bar_index > mss_bar
         ce_lbl := na
         if rearm_ok
             state        := 2
-            org_re_u = na(last_sw_hi) ? f_origin_high() : last_sw_hi
+            org_re_u     = na(last_sw_hi) ? f_origin_high() : last_sw_hi
+            org_re_u_bar = na(last_sw_hi) ? f_origin_high_bar() : last_sw_hi_bar
             mss_ref_bull := na(org_re_u) ? high : org_re_u
+            mss_ref_bar  := na(org_re_u_bar) ? bar_index : org_re_u_bar
             line.delete(mss_ref_line)
             label.delete(mss_ref_lbl)
-            mss_ref_line := line.new(bar_index, mss_ref_bull, bar_index + 1, mss_ref_bull, extend = extend.right, color = color.yellow, style = line.style_solid, width = 2)
+            mss_ref_line := line.new(nz(mss_ref_bar, bar_index), mss_ref_bull, bar_index + 1, mss_ref_bull, extend = extend.right, color = color.yellow, style = line.style_solid, width = 2)
             mss_ref_lbl  := label.new(bar_index, mss_ref_bull, "CE", style = label.style_none, textcolor = color.yellow, size = size.normal)
         else
             state := 0
@@ -1737,21 +1774,22 @@ array.clear(managed_poi_labels)
 // A swept level that triggered the CURRENT active sweep->MSS->entry cycle
 // turns green with a "✓" instead of just disappearing, and stays visible
 // regardless of distance (it's part of the active setup, not just a
-// passive structural level) until the cycle resets to state 0.
+// passive structural level) until the cycle resets to state 0 — the ✓ and
+// green color are the only things that track the active cycle now.
 //
-// Any OTHER swept level: if it was hit THIS session (same session_id),
-// still show it, but FROZEN — the line stops at the moment it was
-// liquidated instead of continuing to extend toward "now" (extend=none,
-// x2 = the liquidation time). If it was hit in an earlier session, it's
-// fully removed.
+// Any swept level FREEZES THE INSTANT IT'S HIT, active cycle or not: the line
+// stops right at the liquidating candle (extend=none, x2 = the liquidation
+// time) instead of continuing to extend across the candles that follow while
+// the trade plays out, which is what was overlapping the CE line and price
+// action in the screenshot. Still shown only if it was hit THIS session
+// (same session_id) — if it was hit in an earlier session, it's fully removed.
 f_poi_entry(float lvl, bool swept, int sw_t, int sw_s, string nm) =>
     is_active = swept and lvl == active_sweep_px and state != 0
     same_sess = swept and not na(sw_s) and sw_s == session_id
-    frozen    = swept and same_sess and not is_active
-    show      = (poi_in_rng(lvl) and not swept) or is_active or frozen
+    show      = (poi_in_rng(lvl) and not swept) or same_sess
     nm2       = is_active ? nm + " ✓" : nm
-    end_t     = frozen and not na(sw_t) ? sw_t : time
-    [show, nm2, is_active, frozen, end_t]
+    end_t     = same_sess and not na(sw_t) ? sw_t : time
+    [show, nm2, is_active, same_sess, end_t]
 
 // One flat color for every POI line and one for every imbalance line — no
 // more per-level palette. poi_line_col: the line itself, always solid,
