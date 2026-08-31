@@ -70,6 +70,7 @@ sweep_buf = input.float(0.0002, "Sweep Buffer", 0.00005, 0.001, 0.00001, group =
 
 var string GMSS = "MSS Settings"
 mss_max_bars = input.int(150, "Max Bars for MSS (whole cycle deadline after the sweep)", 5, 500, group = GMSS, tooltip = "How long the bot keeps hunting for the structure break after a zone is liquidated. Price often sweeps a level and then keeps running for another 50-80 bars before the actual reaction, so a short deadline kills the setup right before the trade it was waiting for.")
+entry_wait_max_bars = input.int(300, "Max Bars Waiting for Session After Break", 10, 1000, group = GMSS, tooltip = "The sweep and the structure break are detected 24/7 (on purpose — a break at 2 AM is still a real break), but the ORDER only ever fires in London/NY. If the break happens outside those hours, this is how long the bot keeps the level pending, waiting for the next session to open, before giving up. 300 bars (~5h on 1m) comfortably spans the London-close-to-NY-open gap.")
 ce_scan_bars = input.int(30,  "Origin Candle Scan (fallback, candles back)", 3, 100, group = GMSS, tooltip = "Fallback only, used at the liquidation bar when no swing has been confirmed yet: the last candle of the opposite colour. This is how far back to scan for it.")
 
 var string GFVG = "FVG / Imbalance"
@@ -1265,14 +1266,26 @@ touched_bull = in_bull_fvg and low  <= fvg_top and high >= fvg_bot
 close_ok_bear  = req_close_fvg ? (close >= fvg_bot and close <= fvg_top and is_bear) : is_bear
 close_ok_bull  = req_close_fvg ? (close >= fvg_bot and close <= fvg_top and is_bull) : is_bull
 
-// Default path: liquidity taken, CE level broken, order on THAT candle. The
-// imbalance-retest path is kept intact behind use_fvg_entry for later.
+// Default path: liquidity taken, CE level broken, order on the first bar that
+// is ALSO inside London/NY. This used to be gated on bear_mss/bull_mss
+// directly — the one bar the break itself happens on — which meant a break
+// outside session hours (most of the day, since sweeps and breaks are
+// detected 24/7 on purpose) missed can_trade_entry on that single bar and the
+// setup was gone for good, closed one bar later by the cleanup below. Since
+// the sweep/break detection is deliberately session-agnostic, the vast
+// majority of setups were being thrown away exactly where the strategy is
+// supposed to catch them. Checking "we are PENDING an entry" (state == 3/4)
+// instead of the one-bar edge lets a break that happens overnight sit and
+// wait — sl/tp stay anchored to sweep_hi/sweep_lo, frozen the moment the
+// break confirmed — and fire the moment the next London or NY session opens.
 //
 // can_trade_entry (not the bare can_trade) — actual order placement is
 // restricted to London/NY sessions, session-capped, on top of the daily cap
 // and being flat. Sweep tracking above stays session-agnostic on purpose.
-short_signal = (use_fvg_entry ? (touched_bear and close_ok_bear) : bear_mss) and can_trade_entry
-long_signal  = (use_fvg_entry ? (touched_bull and close_ok_bull) : bull_mss) and can_trade_entry
+pending_short = use_fvg_entry ? (touched_bear and close_ok_bear) : state == 3
+pending_long  = use_fvg_entry ? (touched_bull and close_ok_bull) : state == 4
+short_signal = pending_short and can_trade_entry
+long_signal  = pending_long  and can_trade_entry
 
 // Checklist progress for the current cycle — "ever true so far this cycle",
 // not "true on this exact bar" (entry still needs all three aligned on the
@@ -2130,11 +2143,17 @@ plotshape(show_sweep and any_ls, title = "Sweep LOW",  style = shape.circle, loc
 plotshape(short_valid, title = "Short Entry", style = shape.labeldown, location = location.abovebar, color = color.red,  textcolor = color.white, text = "SHORT", size = size.small)
 plotshape(long_valid,  title = "Long Entry",  style = shape.labelup,   location = location.belowbar, color = color.teal, textcolor = color.white, text = "LONG",  size = size.small)
 
-// Default mode: the break IS the entry, so if the order did not go in on the
-// break candle (session closed, stop too wide, size rounded to zero) there is
-// nothing left to wait for — close the cycle instead of leaving it parked in
-// state 3/4, which only the imbalance path knows how to unwind.
-if not use_fvg_entry and (state == 3 or state == 4) and bar_index > mss_bar
+// Default mode: if the break happened inside session hours, short_valid/
+// long_valid already fired and reset state to 0 above — this only ever runs
+// for a break still PENDING a session to open in. Bounded by
+// entry_wait_max_bars measured from the break bar (mss_bar), not the sweep
+// bar, so waiting overnight for the next session doesn't eat into the
+// separate mss_max_bars budget that governs the earlier sweep-to-break hunt.
+// A pending setup that runs out the clock without ever seeing a session is
+// abandoned here — sl/qty rejection (stop too wide, size rounded to zero) is
+// the other, immediate way out, already handled by short_valid/long_valid
+// being false forever after a session-open bar that still fails validation.
+if not use_fvg_entry and (state == 3 or state == 4) and (bar_index - mss_bar) > entry_wait_max_bars
     state := 0
     active_sweep_px := na
 
