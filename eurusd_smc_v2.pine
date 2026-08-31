@@ -765,6 +765,13 @@ var int   state_bar    = 0
 var int   sweep_bar    = 0
 var float sweep_hi     = na
 var float sweep_lo     = na
+// Body-only counterparts, used ONLY to decide whether a candle "created a
+// bigger move" for CE-relocation purposes. sweep_hi/sweep_lo (wick) stay the
+// stop anchor — the stop must sit beyond the real price reached, wick
+// included. A long wick with a tiny body hasn't actually moved the market,
+// so it must not be able to trigger a CE relocation on its own.
+var float sweep_hi_body = na
+var float sweep_lo_body = na
 var float mss_ref_bear = na
 var float mss_ref_bull = na
 // Bar the CE level actually printed on (the swing/origin candle), so the line
@@ -923,6 +930,7 @@ if state == 0 and any_hs
     // bot waits for structure (equivalent to maxAfterSweepPDH in the working
     // PDH/PDL strategy).
     sweep_hi     := high
+    sweep_hi_body := math.max(open, close)
     // Structure reference = the ORIGIN CANDLE: the last bearish candle of the
     // rally that ran into the sweep. Price closing below its low is the break.
     // Falls back to this candle's own low only if none was found.
@@ -964,6 +972,7 @@ if state == 0 and any_ls
     state        := 2
     sweep_bar    := bar_index
     sweep_lo     := low
+    sweep_lo_body := math.min(open, close)
     // Mirror: the last bullish candle of the decline that ran into the sweep.
     org_seed_u     = f_origin_high()
     org_seed_u_bar = f_origin_high_bar()
@@ -1053,8 +1062,16 @@ bull_mss = state == 2 and bar_index > sweep_bar and not na(mss_ref_bull) and clo
 // sweep_hi / sweep_lo double as the running structural extreme and the stop
 // anchor.
 if state == 1 and not bear_mss
+    // sweep_hi (wick) always tracks the real extreme reached, for the stop.
     if high > sweep_hi
         sweep_hi := high
+    // The CE-relocation trigger is BODY-only: a long wick with a tiny body
+    // hasn't actually moved the market, so it can't count as "a bigger move"
+    // and can't drag the CE to a nonsense candle just because it poked
+    // slightly higher.
+    body_hi = math.max(open, close)
+    if body_hi > sweep_hi_body
+        sweep_hi_body := body_hi
         org_now     = f_origin_low()
         org_now_bar = f_origin_low_bar()
         if not na(org_now) and org_now != mss_ref_bear and org_now < high
@@ -1075,6 +1092,9 @@ if state == 1 and not bear_mss
 if state == 2 and not bull_mss
     if low < sweep_lo
         sweep_lo := low
+    body_lo = math.min(open, close)
+    if body_lo < sweep_lo_body
+        sweep_lo_body := body_lo
         org_now     = f_origin_high()
         org_now_bar = f_origin_high_bar()
         if not na(org_now) and org_now != mss_ref_bull and org_now > low
@@ -1202,6 +1222,7 @@ if use_fvg_entry and state == 3 and bar_index > mss_bar
             org_re_b_bar = f_origin_low_bar()
             mss_ref_bear := na(org_re_b) ? low : org_re_b
             mss_ref_bar  := na(org_re_b_bar) ? bar_index : org_re_b_bar
+            sweep_hi_body := math.max(open, close)
             line.delete(mss_ref_line)
             label.delete(mss_ref_lbl)
             label.delete(mss_ref_org)
@@ -1243,6 +1264,7 @@ if use_fvg_entry and state == 4 and bar_index > mss_bar
             org_re_u_bar = f_origin_high_bar()
             mss_ref_bull := na(org_re_u) ? high : org_re_u
             mss_ref_bar  := na(org_re_u_bar) ? bar_index : org_re_u_bar
+            sweep_lo_body := math.min(open, close)
             line.delete(mss_ref_line)
             label.delete(mss_ref_lbl)
             label.delete(mss_ref_org)
