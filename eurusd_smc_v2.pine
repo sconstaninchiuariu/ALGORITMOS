@@ -69,8 +69,8 @@ sw_len    = input.int(10,       "Swing Lookback (MSS ref)",  2, 50, group = GLIQ
 sweep_buf = input.float(0.0002, "Sweep Buffer", 0.00005, 0.001, 0.00001, group = GLIQ)
 
 var string GMSS = "MSS Settings"
-mss_max_bars = input.int(150, "Max Bars for MSS (whole cycle deadline after the sweep)", 5, 500, group = GMSS, tooltip = "How long the bot keeps hunting for the structure break after a zone is liquidated. Price often sweeps a level and then keeps running for another 50-80 bars before the actual reaction, so a short deadline kills the setup right before the trade it was waiting for.")
-entry_wait_max_bars = input.int(300, "Max Bars Waiting for Session After Break", 10, 1000, group = GMSS, tooltip = "The sweep and the structure break are detected 24/7 (on purpose — a break at 2 AM is still a real break), but the ORDER only ever fires in London/NY. If the break happens outside those hours, this is how long the bot keeps the level pending, waiting for the next session to open, before giving up. 300 bars (~5h on 1m) comfortably spans the London-close-to-NY-open gap.")
+mss_max_bars = input.int(150, "Max Bars for MSS (whole cycle deadline after the sweep)", 5, 500, group = GMSS, tooltip = "How long the bot keeps hunting for the structure break after a zone is liquidated. Price often sweeps a level and then keeps running for another 50-80 bars before the actual reaction, so a short deadline kills the setup right before the trade it was waiting for. This same deadline also bounds how long a CONFIRMED break can wait for a London/NY session to open before the setup is abandoned.")
+ce_piv       = input.int(2,   "CE Swing Strength (candles each side)", 1, 10, group = GMSS, tooltip = "The CE level is the last confirmed SWING point of the move — for a short setup, the last swing LOW before the push that took the liquidity. A swing only exists if price actually pulled back, which is what stops the level from jumping on every marginal new extreme.")
 ce_scan_bars = input.int(30,  "Origin Candle Scan (fallback, candles back)", 3, 100, group = GMSS, tooltip = "Fallback only, used at the liquidation bar when no swing has been confirmed yet: the last candle of the opposite colour. This is how far back to scan for it.")
 
 var string GFVG = "FVG / Imbalance"
@@ -591,6 +591,32 @@ if use_eql and eql_tf_ok and not na(raw_swl)
 // into the sweep. For a short setup, the LOW of the last bearish candle of the
 // rally. Taken from the user's working "Sweep + BOS" strategy (chochS/chochL).
 
+// CONFIRMED SWINGS — what the CE level actually is.
+//
+// A pivot only exists if price genuinely pulled back, and it confirms ce_piv
+// bars later. That property is the whole point: during a straight run with no
+// bounce NO new pivot appears, so there is nothing for the level to move to.
+// This is what "a lower low only matters if it created a new break point"
+// means mechanically — marginal new extremes inside the same leg create no
+// swing, so the CE line stays exactly where it was.
+sw_hi_raw = ta.pivothigh(high, ce_piv, ce_piv)
+sw_lo_raw = ta.pivotlow(low,   ce_piv, ce_piv)
+
+var float last_sw_hi = na
+var float last_sw_lo = na
+// The bar each swing actually printed on — a pivot confirms ce_piv bars after
+// the fact, so the swing candle itself is ce_piv bars back from here. Lets the
+// CE line originate at the real swing candle instead of the liquidation bar.
+var int   last_sw_hi_bar = na
+var int   last_sw_lo_bar = na
+
+if not na(sw_hi_raw)
+    last_sw_hi     := sw_hi_raw
+    last_sw_hi_bar := bar_index - ce_piv
+if not na(sw_lo_raw)
+    last_sw_lo     := sw_lo_raw
+    last_sw_lo_bar := bar_index - ce_piv
+
 // Returns the low of the most recent bearish candle, or na if none within
 // ce_scan_bars. Mirrored by f_origin_high. f_origin_low_bar / f_origin_high_bar
 // run the same scan to report which bar it was found on, for the same reason.
@@ -761,17 +787,12 @@ var int   state_bar    = 0
 // at the MSS, so this is the one deadline that bounds the whole cycle: a
 // structure break that fails to produce an entry re-arms back to the "waiting
 // for structure" phase (see the re-arm blocks) rather than killing the setup,
-// and this is what stops that from looping forever.
+// and this is what stops that from looping forever. It also now bounds a
+// CONFIRMED break that is simply waiting for a London/NY session to open in
+// (see the entry-signal / cleanup logic below).
 var int   sweep_bar    = 0
 var float sweep_hi     = na
 var float sweep_lo     = na
-// Body-only counterparts, used ONLY to decide whether a candle "created a
-// bigger move" for CE-relocation purposes. sweep_hi/sweep_lo (wick) stay the
-// stop anchor — the stop must sit beyond the real price reached, wick
-// included. A long wick with a tiny body hasn't actually moved the market,
-// so it must not be able to trigger a CE relocation on its own.
-var float sweep_hi_body = na
-var float sweep_lo_body = na
 var float mss_ref_bear = na
 var float mss_ref_bull = na
 // Bar the CE level actually printed on (the swing/origin candle), so the line
@@ -848,13 +869,15 @@ var bool cyc_touched   = false
 var bool cyc_close_ok  = false
 
 // Phase visuals: sweep confirmed (the swept POI line itself turns green with
-// a check, see f_poi_entry below) -> waiting for structure break (orange MSS
+// a check, see f_poi_entry below) -> waiting for structure break (yellow CE
 // level line) -> structure broken, entry FVG marked (below).
 var line  mss_ref_line    = na
 var label mss_ref_lbl     = na
 // Small discreet marker AT the exact candle currently used as the CE origin —
 // the line only shows the price level, not which candle it came from, so this
-// answers "which candle is it actually counting as CE" at a glance.
+// answers "which candle is it actually counting as CE" at a glance. A plain
+// small dot glyph (style_none) rather than label.style_circle's built-in
+// circle shape, which renders noticeably larger even at size.tiny.
 var label mss_ref_org     = na
 
 // Structure-break ("CE") marker: only the CURRENT cycle's, only while the
@@ -930,12 +953,11 @@ if state == 0 and any_hs
     // bot waits for structure (equivalent to maxAfterSweepPDH in the working
     // PDH/PDL strategy).
     sweep_hi     := high
-    sweep_hi_body := math.max(open, close)
     // Structure reference = the ORIGIN CANDLE: the last bearish candle of the
     // rally that ran into the sweep. Price closing below its low is the break.
     // Falls back to this candle's own low only if none was found.
-    org_seed_b     = f_origin_low()
-    org_seed_b_bar = f_origin_low_bar()
+    org_seed_b     = na(last_sw_lo) ? f_origin_low() : last_sw_lo
+    org_seed_b_bar = na(last_sw_lo) ? f_origin_low_bar() : last_sw_lo_bar
     mss_ref_bear := na(org_seed_b) ? low : org_seed_b
     mss_ref_bar  := na(org_seed_b_bar) ? bar_index : org_seed_b_bar
     state_bar    := bar_index
@@ -966,16 +988,15 @@ if state == 0 and any_hs
     label.delete(mss_ref_org)
     mss_ref_line := line.new(nz(mss_ref_bar, bar_index), mss_ref_bear, bar_index + 1, mss_ref_bear, extend = extend.right, color = color.yellow, style = line.style_solid, width = 2)
     mss_ref_lbl  := label.new(bar_index, mss_ref_bear, "CE", style = label.style_none, textcolor = color.yellow, size = size.normal)
-    mss_ref_org  := label.new(nz(mss_ref_bar, bar_index), mss_ref_bear, "•", xloc = xloc.bar_index, style = label.style_circle, color = color.new(color.yellow, 40), textcolor = color.yellow, size = size.tiny)
+    mss_ref_org  := label.new(nz(mss_ref_bar, bar_index), mss_ref_bear, "•", xloc = xloc.bar_index, style = label.style_none, textcolor = color.yellow, size = size.tiny)
 
 if state == 0 and any_ls
     state        := 2
     sweep_bar    := bar_index
     sweep_lo     := low
-    sweep_lo_body := math.min(open, close)
     // Mirror: the last bullish candle of the decline that ran into the sweep.
-    org_seed_u     = f_origin_high()
-    org_seed_u_bar = f_origin_high_bar()
+    org_seed_u     = na(last_sw_hi) ? f_origin_high() : last_sw_hi
+    org_seed_u_bar = na(last_sw_hi) ? f_origin_high_bar() : last_sw_hi_bar
     mss_ref_bull := na(org_seed_u) ? high : org_seed_u
     mss_ref_bar  := na(org_seed_u_bar) ? bar_index : org_seed_u_bar
     state_bar    := bar_index
@@ -994,7 +1015,7 @@ if state == 0 and any_ls
     label.delete(mss_ref_org)
     mss_ref_line := line.new(nz(mss_ref_bar, bar_index), mss_ref_bull, bar_index + 1, mss_ref_bull, extend = extend.right, color = color.yellow, style = line.style_solid, width = 2)
     mss_ref_lbl  := label.new(bar_index, mss_ref_bull, "CE", style = label.style_none, textcolor = color.yellow, size = size.normal)
-    mss_ref_org  := label.new(nz(mss_ref_bar, bar_index), mss_ref_bull, "•", xloc = xloc.bar_index, style = label.style_circle, color = color.new(color.yellow, 40), textcolor = color.yellow, size = size.tiny)
+    mss_ref_org  := label.new(nz(mss_ref_bar, bar_index), mss_ref_bull, "•", xloc = xloc.bar_index, style = label.style_none, textcolor = color.yellow, size = size.tiny)
 
 if (state == 1 or state == 2) and (bar_index - sweep_bar) > mss_max_bars
     state := 0
@@ -1042,92 +1063,64 @@ bull_mss = state == 2 and bar_index > sweep_bar and not na(mss_ref_bull) and clo
 // is price closing above the last LOWER HIGH of a downtrend, a bearish CHoCH
 // is price closing below the last HIGHER LOW of an uptrend. The operative
 // refinement is that a new extreme only RELOCATES the level if it created a
-// new break point. Price grinding to marginal new extremes inside one leg
-// must leave the level alone.
+// new break point — a confirmed swing. Price grinding to marginal new
+// extremes inside one leg creates no swing and must leave the level alone.
 //
-// ROOT CAUSE #7 — a real pullback existed (a small opposite candle right
-// before the new extreme) but the CE did not relocate to it. The relocation
-// used to require a CONFIRMED ta.pivothigh/pivotlow, which only confirms
-// ce_piv bars AFTER it prints. A fast, tiny pullback — one candle down, then
-// straight back up into a new high — has its pivot confirm too late: by the
-// time it would confirm, the new high has already happened and been checked,
-// so the relocation compared against a stale, older level and missed it
-// entirely. f_origin_low/f_origin_high (used for the seed) have no such lag —
-// they scan backward for the last opposite candle right now — so relocation
-// now uses the exact same scan, freshly, at the moment of each new extreme.
-// A run with no opposite candle at all still leaves the level alone: the scan
-// then returns the SAME old candle (or na past ce_scan_bars), which the
-// "differs from the current anchor" guard rejects.
+// So both conditions must hold together: a new structural extreme AND a swing
+// confirmed since the current anchor. f_origin_low / f_origin_high now only
+// seed the level on the liquidation bar, when no swing is confirmed yet.
 //
 // sweep_hi / sweep_lo double as the running structural extreme and the stop
 // anchor.
 if state == 1 and not bear_mss
-    // sweep_hi (wick) always tracks the real extreme reached, for the stop.
     if high > sweep_hi
         sweep_hi := high
-    // The CE-relocation trigger is BODY-only: a long wick with a tiny body
-    // hasn't actually moved the market, so it can't count as "a bigger move"
-    // and can't drag the CE to a nonsense candle just because it poked
-    // slightly higher.
-    body_hi = math.max(open, close)
-    if body_hi > sweep_hi_body
-        sweep_hi_body := body_hi
-        org_now     = f_origin_low()
-        org_now_bar = f_origin_low_bar()
-        if not na(org_now) and org_now != mss_ref_bear and org_now < high
-            mss_ref_bear := org_now
-            mss_ref_bar  := nz(org_now_bar, bar_index)
+        // A new higher high only RELOCATES the CE if a new swing low has been
+        // confirmed since the current anchor — i.e. if price actually pulled
+        // back and created another break point. Marginal new highs inside the
+        // same leg confirm no swing, so the level does not move.
+        if not na(last_sw_lo) and last_sw_lo != mss_ref_bear and last_sw_lo < high
+            mss_ref_bear := last_sw_lo
+            mss_ref_bar  := nz(last_sw_lo_bar, bar_index)
     if not na(mss_ref_line)
         // x1 must move too — a relocation moves the CE to a DIFFERENT candle,
         // not just a different price, so the line's start needs to follow.
-        // The "CE" text stays centered on the line at all times, live or not.
         line.set_x1(mss_ref_line, mss_ref_bar)
         line.set_y1(mss_ref_line, mss_ref_bear)
         line.set_y2(mss_ref_line, mss_ref_bear)
-        ce_center_b = int(math.round((mss_ref_bar + bar_index) / 2.0))
-        label.set_xy(mss_ref_lbl, ce_center_b, mss_ref_bear)
+        label.set_y(mss_ref_lbl, mss_ref_bear)
         label.set_xy(mss_ref_org, mss_ref_bar, mss_ref_bear)
 // Bull setup: mirror. Lower highs / lower lows, break level is the last LOWER
 // HIGH, confirmed only once a new lower low forms below it.
 if state == 2 and not bull_mss
     if low < sweep_lo
         sweep_lo := low
-    body_lo = math.min(open, close)
-    if body_lo < sweep_lo_body
-        sweep_lo_body := body_lo
-        org_now     = f_origin_high()
-        org_now_bar = f_origin_high_bar()
-        if not na(org_now) and org_now != mss_ref_bull and org_now > low
-            mss_ref_bull := org_now
-            mss_ref_bar  := nz(org_now_bar, bar_index)
+        if not na(last_sw_hi) and last_sw_hi != mss_ref_bull and last_sw_hi > low
+            mss_ref_bull := last_sw_hi
+            mss_ref_bar  := nz(last_sw_hi_bar, bar_index)
     if not na(mss_ref_line)
         line.set_x1(mss_ref_line, mss_ref_bar)
         line.set_y1(mss_ref_line, mss_ref_bull)
         line.set_y2(mss_ref_line, mss_ref_bull)
-        ce_center_b = int(math.round((mss_ref_bar + bar_index) / 2.0))
-        label.set_xy(mss_ref_lbl, ce_center_b, mss_ref_bull)
+        label.set_y(mss_ref_lbl, mss_ref_bull)
         label.set_xy(mss_ref_org, mss_ref_bar, mss_ref_bull)
 
 // use_fvg_entry OFF (default): the break IS the entry, so the cycle goes
-// straight to execution rather than into the FVG-hunting states. State still
-// advances to 3/4 for one bar so the order block below can read the direction;
-// it is reset to 0 right after the order goes in.
+// straight to a PENDING-entry phase rather than into the FVG-hunting states.
+//
+// Structure confirmed broken: FREEZE the reference line instead of deleting
+// it — it now shows exactly what CE means (origin candle to structure break)
+// and stays on the chart, unmoving, until the next cycle's fresh line
+// replaces it. Deleting it here (the old behaviour) is exactly the
+// "disappears the moment structure breaks" the user didn't want.
 if bear_mss
     mss_bar      := bar_index
     state        := 3
     state_bar    := bar_index
     cnt_mss      += 1
-    // Structure confirmed broken: FREEZE the reference line here instead of
-    // deleting it — the whole point of tracking mss_ref_bar was so the line
-    // can show exactly what CE means: origin candle to structure break. It
-    // stops extending and stays on the chart until the next cycle's fresh
-    // line replaces it (deleted at that seed). The swept POI line stays green
-    // (active_sweep_px is only cleared once state returns to 0).
     if not na(mss_ref_line)
         line.set_x2(mss_ref_line, bar_index)
         line.set_extend(mss_ref_line, extend.none)
-        ce_center_b = int(math.round((mss_ref_bar + bar_index) / 2.0))
-        label.set_xy(mss_ref_lbl, ce_center_b, mss_ref_bear)
     label.delete(ce_lbl)
     ce_lbl := label.new(bar_index, high, "CE", style = label.style_label_down, color = color.orange, textcolor = color.black, size = size.small)
 
@@ -1139,8 +1132,6 @@ if bull_mss
     if not na(mss_ref_line)
         line.set_x2(mss_ref_line, bar_index)
         line.set_extend(mss_ref_line, extend.none)
-        ce_center_b = int(math.round((mss_ref_bar + bar_index) / 2.0))
-        label.set_xy(mss_ref_lbl, ce_center_b, mss_ref_bull)
     label.delete(ce_lbl)
     ce_lbl := label.new(bar_index, low, "CE", style = label.style_label_up, color = color.orange, textcolor = color.black, size = size.small)
 
@@ -1218,17 +1209,16 @@ if use_fvg_entry and state == 3 and bar_index > mss_bar
             // Back to hunting for the real structure break, reference re-seeded
             // at this bar so it tracks the move from here on.
             state        := 1
-            org_re_b     = f_origin_low()
-            org_re_b_bar = f_origin_low_bar()
+            org_re_b     = na(last_sw_lo) ? f_origin_low() : last_sw_lo
+            org_re_b_bar = na(last_sw_lo) ? f_origin_low_bar() : last_sw_lo_bar
             mss_ref_bear := na(org_re_b) ? low : org_re_b
             mss_ref_bar  := na(org_re_b_bar) ? bar_index : org_re_b_bar
-            sweep_hi_body := math.max(open, close)
             line.delete(mss_ref_line)
             label.delete(mss_ref_lbl)
             label.delete(mss_ref_org)
             mss_ref_line := line.new(nz(mss_ref_bar, bar_index), mss_ref_bear, bar_index + 1, mss_ref_bear, extend = extend.right, color = color.yellow, style = line.style_solid, width = 2)
             mss_ref_lbl  := label.new(bar_index, mss_ref_bear, "CE", style = label.style_none, textcolor = color.yellow, size = size.normal)
-            mss_ref_org  := label.new(nz(mss_ref_bar, bar_index), mss_ref_bear, "•", xloc = xloc.bar_index, style = label.style_circle, color = color.new(color.yellow, 40), textcolor = color.yellow, size = size.tiny)
+            mss_ref_org  := label.new(nz(mss_ref_bar, bar_index), mss_ref_bear, "•", xloc = xloc.bar_index, style = label.style_none, textcolor = color.yellow, size = size.tiny)
         else
             state := 0
             active_sweep_px := na
@@ -1260,17 +1250,16 @@ if use_fvg_entry and state == 4 and bar_index > mss_bar
         ce_lbl := na
         if rearm_ok
             state        := 2
-            org_re_u     = f_origin_high()
-            org_re_u_bar = f_origin_high_bar()
+            org_re_u     = na(last_sw_hi) ? f_origin_high() : last_sw_hi
+            org_re_u_bar = na(last_sw_hi) ? f_origin_high_bar() : last_sw_hi_bar
             mss_ref_bull := na(org_re_u) ? high : org_re_u
             mss_ref_bar  := na(org_re_u_bar) ? bar_index : org_re_u_bar
-            sweep_lo_body := math.min(open, close)
             line.delete(mss_ref_line)
             label.delete(mss_ref_lbl)
             label.delete(mss_ref_org)
             mss_ref_line := line.new(nz(mss_ref_bar, bar_index), mss_ref_bull, bar_index + 1, mss_ref_bull, extend = extend.right, color = color.yellow, style = line.style_solid, width = 2)
             mss_ref_lbl  := label.new(bar_index, mss_ref_bull, "CE", style = label.style_none, textcolor = color.yellow, size = size.normal)
-            mss_ref_org  := label.new(nz(mss_ref_bar, bar_index), mss_ref_bull, "•", xloc = xloc.bar_index, style = label.style_circle, color = color.new(color.yellow, 40), textcolor = color.yellow, size = size.tiny)
+            mss_ref_org  := label.new(nz(mss_ref_bar, bar_index), mss_ref_bull, "•", xloc = xloc.bar_index, style = label.style_none, textcolor = color.yellow, size = size.tiny)
         else
             state := 0
             active_sweep_px := na
@@ -1288,26 +1277,25 @@ touched_bull = in_bull_fvg and low  <= fvg_top and high >= fvg_bot
 close_ok_bear  = req_close_fvg ? (close >= fvg_bot and close <= fvg_top and is_bear) : is_bear
 close_ok_bull  = req_close_fvg ? (close >= fvg_bot and close <= fvg_top and is_bull) : is_bull
 
-// Default path: liquidity taken, CE level broken, order on the first bar that
-// is ALSO inside London/NY. This used to be gated on bear_mss/bull_mss
-// directly — the one bar the break itself happens on — which meant a break
-// outside session hours (most of the day, since sweeps and breaks are
-// detected 24/7 on purpose) missed can_trade_entry on that single bar and the
-// setup was gone for good, closed one bar later by the cleanup below. Since
-// the sweep/break detection is deliberately session-agnostic, the vast
-// majority of setups were being thrown away exactly where the strategy is
-// supposed to catch them. Checking "we are PENDING an entry" (state == 3/4)
-// instead of the one-bar edge lets a break that happens overnight sit and
-// wait — sl/tp stay anchored to sweep_hi/sweep_lo, frozen the moment the
-// break confirmed — and fire the moment the next London or NY session opens.
+// Default path: liquidity taken, CE level broken, order goes in the moment
+// London/NY is open. The imbalance-retest path is kept intact behind
+// use_fvg_entry for later.
 //
-// can_trade_entry (not the bare can_trade) — actual order placement is
-// restricted to London/NY sessions, session-capped, on top of the daily cap
-// and being flat. Sweep tracking above stays session-agnostic on purpose.
-pending_short = use_fvg_entry ? (touched_bear and close_ok_bear) : state == 3
-pending_long  = use_fvg_entry ? (touched_bull and close_ok_bull) : state == 4
-short_signal = pending_short and can_trade_entry
-long_signal  = pending_long  and can_trade_entry
+// PENDING ENTRY: short_signal/long_signal check "are we sitting in the
+// post-break, waiting-for-entry phase" (state == 3/4) rather than the
+// one-bar bear_mss/bull_mss edge. The break itself is detected 24/7 on
+// purpose (a break at 3 AM is still structurally real) but the ORDER only
+// ever fires in London/NY (can_trade_entry). Tying the signal to the single
+// break bar meant a break outside session hours missed can_trade_entry on
+// that one bar and the setup was gone for good — the vast majority of
+// breaks happen outside the ~4.5 session hours in a day. Checking the
+// PHASE instead lets a break that happens overnight sit parked (sl/tp
+// already frozen to sweep_hi/sweep_lo the moment the break confirmed) and
+// fire the instant the next session opens, bounded by the existing
+// mss_max_bars deadline below (measured from the original sweep, so it
+// can't wait forever either).
+short_signal = (use_fvg_entry ? (touched_bear and close_ok_bear) : state == 3) and can_trade_entry
+long_signal  = (use_fvg_entry ? (touched_bull and close_ok_bull) : state == 4) and can_trade_entry
 
 // Checklist progress for the current cycle — "ever true so far this cycle",
 // not "true on this exact bar" (entry still needs all three aligned on the
@@ -1362,9 +1350,9 @@ if short_valid
         ny_session_trades += 1
     state := 0
     active_sweep_px := na
-    // ce_lbl is deliberately left on the chart: in the default mode the break
-    // and the entry are the SAME candle, and that label is the visual proof of
-    // why the order went in. The next cycle's break replaces it.
+    // ce_lbl is deliberately left on the chart, as is mss_ref_line (now
+    // frozen origin-candle-to-break-candle): the visual proof of why the
+    // order went in. The next cycle's break replaces both.
     [tmp_fvg_l1, tmp_fvg_l2, tmp_fvg_lb] = f_fvg_clear()
     fvg_top_line := tmp_fvg_l1
     fvg_bot_line := tmp_fvg_l2
@@ -1381,9 +1369,9 @@ if long_valid
         ny_session_trades += 1
     state := 0
     active_sweep_px := na
-    // ce_lbl is deliberately left on the chart: in the default mode the break
-    // and the entry are the SAME candle, and that label is the visual proof of
-    // why the order went in. The next cycle's break replaces it.
+    // ce_lbl is deliberately left on the chart, as is mss_ref_line (now
+    // frozen origin-candle-to-break-candle): the visual proof of why the
+    // order went in. The next cycle's break replaces both.
     [tmp_fvg_l1, tmp_fvg_l2, tmp_fvg_lb] = f_fvg_clear()
     fvg_top_line := tmp_fvg_l1
     fvg_bot_line := tmp_fvg_l2
@@ -2166,16 +2154,16 @@ plotshape(short_valid, title = "Short Entry", style = shape.labeldown, location 
 plotshape(long_valid,  title = "Long Entry",  style = shape.labelup,   location = location.belowbar, color = color.teal, textcolor = color.white, text = "LONG",  size = size.small)
 
 // Default mode: if the break happened inside session hours, short_valid/
-// long_valid already fired and reset state to 0 above — this only ever runs
-// for a break still PENDING a session to open in. Bounded by
-// entry_wait_max_bars measured from the break bar (mss_bar), not the sweep
-// bar, so waiting overnight for the next session doesn't eat into the
-// separate mss_max_bars budget that governs the earlier sweep-to-break hunt.
-// A pending setup that runs out the clock without ever seeing a session is
-// abandoned here — sl/qty rejection (stop too wide, size rounded to zero) is
-// the other, immediate way out, already handled by short_valid/long_valid
-// being false forever after a session-open bar that still fails validation.
-if not use_fvg_entry and (state == 3 or state == 4) and (bar_index - mss_bar) > entry_wait_max_bars
+// long_valid already fired and reset state to 0 above — this only ever
+// runs for a break still PENDING a session to open in. Bounded by the same
+// mss_max_bars deadline used for the sweep-to-break hunt (measured from
+// sweep_bar, not mss_bar), so it stays a single simple knob instead of a
+// second input — a pending setup that runs the clock out without ever
+// seeing a session is abandoned here. Stop-too-wide / size-rounded-to-zero
+// rejection is the other, immediate way out, already handled by
+// short_valid/long_valid being false forever after a session-open bar that
+// still fails validation.
+if not use_fvg_entry and (state == 3 or state == 4) and (bar_index - sweep_bar) > mss_max_bars
     state := 0
     active_sweep_px := na
 
@@ -2370,9 +2358,13 @@ if barstate.islast and show_checklist and state != 0
         table.cell(checklist, 0, 5, "Cierre Confirmación", text_color = color.gray, text_size = size.small)
         table.cell(checklist, 1, 5, c5txt, text_color = c5col, text_size = size.small)
     else
-        [c3txt, c3col] = f_chk_cell(mss_done, true)
-        table.cell(checklist, 0, 3, "ENTRADA",             text_color = color.gray, text_size = size.small)
+        [c3txt, c3col] = f_chk_cell(state == 3 or state == 4, true)
+        table.cell(checklist, 0, 3, "ENTRADA PENDIENTE",   text_color = color.gray, text_size = size.small)
         table.cell(checklist, 1, 3, c3txt, text_color = c3col, text_size = size.small)
+
+        [c4txt, c4col] = f_chk_cell(can_trade_entry, state == 3 or state == 4)
+        table.cell(checklist, 0, 4, "Sesión Abierta",      text_color = color.gray, text_size = size.small)
+        table.cell(checklist, 1, 4, c4txt, text_color = c4col, text_size = size.small)
 
 // =============================================================
 // ALERTS
