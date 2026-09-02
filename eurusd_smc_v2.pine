@@ -697,33 +697,58 @@ if use_eql and not na(eql_swl_raw)
 // never miss the real extreme regardless of which candle's body happens to
 // close which way. f_origin_low_bar / f_origin_high_bar run the same scan to
 // report which bar it was found on.
-f_origin_low() =>
+//
+// ROOT CAUSE #8 — a setup entered correctly at the reaction low the first
+// time it was watched, then later (same cycle, no code change) entered way
+// up near the top of the move instead. The scan window above was always
+// "the last ce_scan_bars candles counted back from RIGHT NOW", with no
+// relation to when the sweep that started this cycle actually happened. In
+// an uptrend that keeps grinding, ANY later relocation trigger — even a
+// perfectly legitimate one, a minor pullback confirmed by body — re-scans
+// that flat window from the CURRENT bar, which by then can sit dozens of
+// candles past the original reaction. The window silently slides into
+// unrelated, more recent price action near the top of the move and finds
+// an extreme that has nothing to do with this setup.
+//
+// The SEED (at the sweep bar itself) is NOT affected by this — it looks
+// backward from the sweep for the pre-sweep origin candle exactly once, so
+// the full ce_scan_bars window is correct and intentional there. Only a
+// RELOCATION (evaluated on some LATER bar, potentially many candles after
+// the sweep) needs the window capped at sweep_bar, so it can never drift
+// past the start of the current reaction into unrelated later price action.
+// Both call f_origin_low/f_origin_high with an explicit scan limit —
+// ce_scan_bars for a seed, f_relocate_limit() for a relocation — so the two
+// cases can never be conflated again.
+f_relocate_limit() =>
+    math.max(1, math.min(ce_scan_bars, bar_index - sweep_bar))
+
+f_origin_low(int lim) =>
     float res = na
-    for i = 1 to ce_scan_bars
+    for i = 1 to lim
         if na(res) or low[i] < res
             res := low[i]
     res
 
-f_origin_high() =>
+f_origin_high(int lim) =>
     float res = na
-    for i = 1 to ce_scan_bars
+    for i = 1 to lim
         if na(res) or high[i] > res
             res := high[i]
     res
 
-f_origin_low_bar() =>
+f_origin_low_bar(int lim) =>
     float res = na
     int   res_i = na
-    for i = 1 to ce_scan_bars
+    for i = 1 to lim
         if na(res) or low[i] < res
             res := low[i]
             res_i := i
     na(res_i) ? na : bar_index - res_i
 
-f_origin_high_bar() =>
+f_origin_high_bar(int lim) =>
     float res = na
     int   res_i = na
-    for i = 1 to ce_scan_bars
+    for i = 1 to lim
         if na(res) or high[i] > res
             res := high[i]
             res_i := i
@@ -1084,8 +1109,8 @@ if state == 0 and any_hs
     // Structure reference = the ORIGIN CANDLE: the last bearish candle of the
     // rally that ran into the sweep. Price closing below its low is the break.
     // Falls back to this candle's own low only if none was found.
-    org_seed_b     = f_origin_low()
-    org_seed_b_bar = f_origin_low_bar()
+    org_seed_b     = f_origin_low(ce_scan_bars)
+    org_seed_b_bar = f_origin_low_bar(ce_scan_bars)
     mss_ref_bear := na(org_seed_b) ? low : org_seed_b
     mss_ref_bar  := na(org_seed_b_bar) ? bar_index : org_seed_b_bar
     state_bar    := bar_index
@@ -1124,8 +1149,8 @@ if state == 0 and any_ls
     sweep_lo     := low
     sweep_lo_body := math.min(open, close)
     // Mirror: the last bullish candle of the decline that ran into the sweep.
-    org_seed_u     = f_origin_high()
-    org_seed_u_bar = f_origin_high_bar()
+    org_seed_u     = f_origin_high(ce_scan_bars)
+    org_seed_u_bar = f_origin_high_bar(ce_scan_bars)
     mss_ref_bull := na(org_seed_u) ? high : org_seed_u
     mss_ref_bar  := na(org_seed_u_bar) ? bar_index : org_seed_u_bar
     state_bar    := bar_index
@@ -1213,8 +1238,8 @@ if state == 1 and not bear_mss
     body_hi = math.max(open, close)
     if body_hi > sweep_hi_body
         sweep_hi_body := body_hi
-        org_now     = f_origin_low()
-        org_now_bar = f_origin_low_bar()
+        org_now     = f_origin_low(f_relocate_limit())
+        org_now_bar = f_origin_low_bar(f_relocate_limit())
         if not na(org_now) and org_now != mss_ref_bear and org_now < high
             mss_ref_bear := org_now
             mss_ref_bar  := nz(org_now_bar, bar_index)
@@ -1233,8 +1258,8 @@ if state == 2 and not bull_mss
     body_lo = math.min(open, close)
     if body_lo < sweep_lo_body
         sweep_lo_body := body_lo
-        org_now     = f_origin_high()
-        org_now_bar = f_origin_high_bar()
+        org_now     = f_origin_high(f_relocate_limit())
+        org_now_bar = f_origin_high_bar(f_relocate_limit())
         if not na(org_now) and org_now != mss_ref_bull and org_now > low
             mss_ref_bull := org_now
             mss_ref_bar  := nz(org_now_bar, bar_index)
@@ -1349,8 +1374,8 @@ if use_fvg_entry and state == 3 and bar_index > mss_bar
             // Back to hunting for the real structure break, reference re-seeded
             // at this bar so it tracks the move from here on.
             state        := 1
-            org_re_b     = f_origin_low()
-            org_re_b_bar = f_origin_low_bar()
+            org_re_b     = f_origin_low(ce_scan_bars)
+            org_re_b_bar = f_origin_low_bar(ce_scan_bars)
             mss_ref_bear := na(org_re_b) ? low : org_re_b
             mss_ref_bar  := na(org_re_b_bar) ? bar_index : org_re_b_bar
             sweep_hi_body := math.max(open, close)
@@ -1391,8 +1416,8 @@ if use_fvg_entry and state == 4 and bar_index > mss_bar
         ce_lbl := na
         if rearm_ok
             state        := 2
-            org_re_u     = f_origin_high()
-            org_re_u_bar = f_origin_high_bar()
+            org_re_u     = f_origin_high(ce_scan_bars)
+            org_re_u_bar = f_origin_high_bar(ce_scan_bars)
             mss_ref_bull := na(org_re_u) ? high : org_re_u
             mss_ref_bar  := na(org_re_u_bar) ? bar_index : org_re_u_bar
             sweep_lo_body := math.min(open, close)

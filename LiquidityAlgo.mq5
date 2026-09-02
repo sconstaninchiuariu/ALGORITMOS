@@ -328,25 +328,41 @@ void UpdateEqlOnNewRefBar()
 // Mirrors the final, validated Pine fix exactly.
 //======================================================================
 
-double OriginLow()
+// lim caps how many M1 candles back to scan. The SEED (right at the sweep
+// bar) always passes CeScanBars, since it's looking BACKWARD from the sweep
+// for the pre-sweep origin candle — a one-time lookup, no drift risk. A
+// RELOCATION (evaluated on some LATER bar, once the reaction is already
+// under way) must instead pass a limit bounded at the sweep bar itself
+// (see RelocateLimit below) — otherwise, in a move that keeps grinding, a
+// later relocation trigger re-scans "the last CeScanBars candles from right
+// now", which by then can sit well past the original reaction and land on
+// unrelated, more recent price action near the current extreme instead of
+// the actual reaction low/high. This mirrors the Pine port's identical fix.
+double OriginLow(int lim)
   {
    double res = -1;
-   for(int i=1;i<=CeScanBars;i++)
+   for(int i=1;i<=lim;i++)
      {
       M1Bar b; if(!GetM1(i, b)) break;
       if(res < 0 || b.l < res) res = b.l;
      }
    return res;
   }
-double OriginHigh()
+double OriginHigh(int lim)
   {
    double res = -1;
-   for(int i=1;i<=CeScanBars;i++)
+   for(int i=1;i<=lim;i++)
      {
       M1Bar b; if(!GetM1(i, b)) break;
       if(res < 0 || b.h > res) res = b.h;
      }
    return res;
+  }
+int RelocateLimit(datetime curBarTime)
+  {
+   int barsSinceSweep = BarsBetween(sweepBarTime, curBarTime);
+   int lim = MathMin(CeScanBars, barsSinceSweep);
+   return MathMax(1, lim);
   }
 
 //======================================================================
@@ -472,7 +488,7 @@ void ProcessNewM1Bar(const M1Bar &bar)
          state = 1;
          sweepBarTime = bar.t;
          sweepHi = bar.h; sweepHiBody = MathMax(bar.o, bar.c);
-         double org = OriginLow();
+         double org = OriginLow(CeScanBars);
          mssRefBear = (org > 0) ? org : bar.l;
          mssRefBarTime = bar.t;
          activeSweepPx = lvl;
@@ -482,7 +498,7 @@ void ProcessNewM1Bar(const M1Bar &bar)
          state = 2;
          sweepBarTime = bar.t;
          sweepLo = bar.l; sweepLoBody = MathMin(bar.o, bar.c);
-         double org = OriginHigh();
+         double org = OriginHigh(CeScanBars);
          mssRefBull = (org > 0) ? org : bar.h;
          mssRefBarTime = bar.t;
          activeSweepPx = lvl;
@@ -506,7 +522,7 @@ void ProcessNewM1Bar(const M1Bar &bar)
       if(bodyHi > sweepHiBody)
         {
          sweepHiBody = bodyHi;
-         double org = OriginLow();
+         double org = OriginLow(RelocateLimit(bar.t));
          if(org > 0 && org != mssRefBear && org < bar.h) { mssRefBear = org; mssRefBarTime = bar.t; }
         }
       if(bar.t > sweepBarTime && bar.c < mssRefBear) bearMss = true;
@@ -518,7 +534,7 @@ void ProcessNewM1Bar(const M1Bar &bar)
       if(bodyLo < sweepLoBody)
         {
          sweepLoBody = bodyLo;
-         double org = OriginHigh();
+         double org = OriginHigh(RelocateLimit(bar.t));
          if(org > 0 && org != mssRefBull && org > bar.l) { mssRefBull = org; mssRefBarTime = bar.t; }
         }
       if(bar.t > sweepBarTime && bar.c > mssRefBull) bullMss = true;
