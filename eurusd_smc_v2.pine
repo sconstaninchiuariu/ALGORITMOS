@@ -18,6 +18,28 @@ strategy(
     commission_value  = 0.00005,
     slippage          = 2,
     pyramiding        = 0,
+    // THE reason zero trades were ever reaching the Strategy Tester despite
+    // valid signals firing and the on-chart markers rendering correctly.
+    // Pine v6 defaults margin_long/margin_short to 100% when left unset —
+    // i.e. it simulates a CASH account that must hold the full notional
+    // value of a position, no leverage. Our position sizing (f_qty) computes
+    // qty from real risk management (1-1.55% of fixed_cap divided by the
+    // stop distance in price), which for a tight stop routinely comes out to
+    // hundreds of thousands or millions of units of EURUSD — a notional
+    // value of hundreds of thousands to millions of USD, against a $100,000
+    // initial_capital. At 100% margin that is never affordable, so every
+    // single strategy.entry() call was being silently rejected by the
+    // simulated broker: no error banner, the order simply never fills, which
+    // is exactly "the marker shows on the chart but nothing is in the trade
+    // list" — the marker only reflects the SIGNAL (short_valid/long_valid),
+    // not whether the order actually executed. This is forex traded on
+    // leverage, not a cash account buying shares, so margin_long/short = 0
+    // removes that constraint entirely and lets qty reflect pure leveraged
+    // exposure — our own risk-per-trade sizing is already the real risk
+    // control, TradingView's cash-margin model was never the right model
+    // for this instrument.
+    margin_long       = 0,
+    margin_short      = 0,
     max_bars_back     = 500,
     // Pine defaults to 50 of each. The POI manager alone can hold a dozen
     // lines + labels at once, plus the entry-FVG pair, the MSS reference and
@@ -137,6 +159,8 @@ max_poi_pct = input.float(0.40, "Max Distance (%) — POI lines AND imbalances",
      tooltip = "ONE distance rule for everything: POI lines and imbalances alike hide once price is farther than this % away. Auto x2 on futures. (Used to be two separate settings — a leftover 1% imbalance threshold was why imbalances weren't respecting the same limit as POI lines.)")
 merge_tol   = input.float(0.0005, "Zone Merge Tolerance", 0.00010, 0.005, 0.00010, group = GVIS,
      tooltip = "Zones within this price distance of each other collapse into one line, names joined with \"+\".")
+require_origin_visible = input.bool(true, "Hide zones whose origin candle is off-screen", group = GVIS,
+     tooltip = "A zone within the % distance above can still start way off to the left, outside what's currently on screen — a flat line running across the whole chart with no visible origin gives no context and just compresses the price axis. With this on, a zone only shows once you've scrolled/zoomed so its origin candle is actually in view. Costs a full recalculation on every pan/zoom/timeframe change (a Pine limitation — chart.left_visible_bar_time is the only way to know the visible range), so turn it off if that redraw lag bothers you more than the extra lines.")
 
 var string GALR = "Proximity Alerts"
 use_near_alert       = input.bool(true, "Alert when price nears a POI zone", group = GALR)
@@ -192,16 +216,13 @@ chart_tf_lbl = f_tf_label(timeframe.period)
 chart_tf_minutes = timeframe.in_seconds(timeframe.period) / 60.0
 fvg_tf_ok         = chart_tf_minutes >= fvg_tf_min and chart_tf_minutes <= fvg_tf_max
 
-// NOTE ON VIEWPORT-BASED HIDING (removed): an earlier version hid zones
-// outside the visible price range using chart.left_visible_bar_time /
-// chart.right_visible_bar_time. That's the ONLY way Pine can know anything
-// about the visible range at all, but referencing those variables forces a
-// full script recalculation on every pan/zoom/timeframe change — there is
-// no incremental update. That's what caused everything to disappear and
-// take a few seconds to redraw when scrolling or resizing the chart. Since
-// that trade-off wasn't worth it, visibility now goes back to depending
-// only on price distance (max_poi_dist / imb_dist below), which updates
-// smoothly every bar with no extra recalculation cost.
+// VIEWPORT-BASED HIDING is back, gated behind require_origin_visible
+// (default on). chart.left_visible_bar_time is the only way Pine can know
+// the visible range, and referencing it forces a full recalculation on every
+// pan/zoom/timeframe change instead of updating incrementally — that lag is
+// a real cost, which is why this is a toggle rather than baked in
+// unconditionally. Applied once, at the final render loop below, rather
+// than duplicated into every zone's individual show/hide logic.
 
 // =============================================================
 // HTF BIAS  (no-repainting)
@@ -2312,19 +2333,26 @@ if show_levels or show_fvg_vis
                     array.set(used_flags, sj, true)
                 jj := jj + 1
 
-            // xloc=xloc.bar_time (not bar_index): an unmitigated imbalance
-            // can sit unresolved for tens of thousands of bars, and Pine's
-            // bar-index x1 has a hard "too far from current bar" limit that
-            // crashes the script once history gets long enough. Time-based
-            // coordinates have no such limit.
-            // g_ext=false (a POI swept this session) freezes the line at
-            // g_end (the liquidation time) instead of extending to "now".
-            // g_hi (max/high zone): label.style_label_down places text ABOVE
-            // the line. Low/min zone: label.style_label_up places it BELOW.
-            new_l  = line.new(g_bar, g_px, g_end, g_px, xloc = xloc.bar_time, extend = g_ext ? extend.right : extend.none, color = g_cl, style = line.style_solid, width = 1)
-            new_lb = label.new(g_end, g_px, g_nm, xloc = xloc.bar_time, style = g_hi ? label.style_label_down : label.style_label_up, color = color.new(color.black, 100), textcolor = g_tx, size = size.small)
-            array.push(managed_poi_lines,  new_l)
-            array.push(managed_poi_labels, new_lb)
+            // A zone whose ORIGIN candle is off-screen to the left gives no
+            // context — just a flat line crossing the whole visible chart
+            // with no visible start — so it's dropped entirely rather than
+            // drawn truncated. Skipped when require_origin_visible is off.
+            origin_visible = not require_origin_visible or g_bar >= chart.left_visible_bar_time
+            if origin_visible
+                // xloc=xloc.bar_time (not bar_index): an unmitigated imbalance
+                // can sit unresolved for tens of thousands of bars, and Pine's
+                // bar-index x1 has a hard "too far from current bar" limit that
+                // crashes the script once history gets long enough. Time-based
+                // coordinates have no such limit.
+                // g_ext=false (a POI swept this session) freezes the line at
+                // g_end (the liquidation time) instead of extending to "now".
+                // g_hi (max/high zone): label.style_label_down places text
+                // ABOVE the line. Low/min zone: label.style_label_up places
+                // it BELOW.
+                new_l  = line.new(g_bar, g_px, g_end, g_px, xloc = xloc.bar_time, extend = g_ext ? extend.right : extend.none, color = g_cl, style = line.style_solid, width = 1)
+                new_lb = label.new(g_end, g_px, g_nm, xloc = xloc.bar_time, style = g_hi ? label.style_label_down : label.style_label_up, color = color.new(color.black, 100), textcolor = g_tx, size = size.small)
+                array.push(managed_poi_lines,  new_l)
+                array.push(managed_poi_labels, new_lb)
 
 // Sweep markers — the bar this evaluates on IS the candle that crossed the
 // level, so no offset is needed any more.
