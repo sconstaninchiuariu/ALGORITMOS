@@ -1057,18 +1057,48 @@ var bool prev_bull_m  = false
 // price first trades through the level, edge-triggered by its own *_swept
 // flag — the same "if not sweepPDH and high > prevHigh" the two working
 // PDH/PDL strategies use.
+// London/NY H-L are session extremes, not structural highs/lows the way
+// PDH/PDL, PWH/PWL, and Asia H/L are — every session has SOME high and SOME
+// low, but that alone doesn't make it a real liquidity pool the way it does
+// for a daily/weekly range or the pre-market Asian range. Per the user's
+// call: a London/NY H-L only counts as tradeable liquidity — able to arm
+// the sweep -> CE -> entry cycle — when it's REINFORCED, i.e. it lands
+// within merge_tol of a confirmed EQH/EQL or an active HTF FVG zone
+// (1H/4H/D/W/M). Reused merge_tol rather than a new input since this is the
+// exact same "close enough to be the same real level" tolerance the merge
+// system already applies everywhere else. Unreinforced, the level still
+// shows on the chart as a swept/frozen context line (f_poi_entry doesn't
+// care about this at all) — it just can't fire a trade on its own.
+f_reinforced_high(float lvl) =>
+    not na(lvl) and (
+         (not na(last_eqh) and math.abs(lvl - last_eqh) <= merge_tol) or
+         (htf_bear_1h_ok and not na(htf_b1h_edge) and math.abs(lvl - htf_b1h_edge) <= merge_tol) or
+         (htf_bear_4h_ok and not na(htf_b4h_edge) and math.abs(lvl - htf_b4h_edge) <= merge_tol) or
+         (htf_bear_d_ok  and not na(htf_bd_edge)  and math.abs(lvl - htf_bd_edge)  <= merge_tol) or
+         (htf_bear_w_ok  and not na(htf_bw_edge)  and math.abs(lvl - htf_bw_edge)  <= merge_tol) or
+         (htf_bear_m_ok  and not na(htf_bm_edge)  and math.abs(lvl - htf_bm_edge)  <= merge_tol))
+
+f_reinforced_low(float lvl) =>
+    not na(lvl) and (
+         (not na(last_eql) and math.abs(lvl - last_eql) <= merge_tol) or
+         (htf_bull_1h_ok and not na(htf_u1h_edge) and math.abs(lvl - htf_u1h_edge) <= merge_tol) or
+         (htf_bull_4h_ok and not na(htf_u4h_edge) and math.abs(lvl - htf_u4h_edge) <= merge_tol) or
+         (htf_bull_d_ok  and not na(htf_ud_edge)  and math.abs(lvl - htf_ud_edge)  <= merge_tol) or
+         (htf_bull_w_ok  and not na(htf_uw_edge)  and math.abs(lvl - htf_uw_edge)  <= merge_tol) or
+         (htf_bull_m_ok  and not na(htf_um_edge)  and math.abs(lvl - htf_um_edge)  <= merge_tol))
+
 hs_pdh  = use_pdhl and pdh_liq
 hs_pwh  = use_pwhl and pwh_liq
 hs_asia = use_asia and asiah_liq
-hs_lon  = use_lon_hl and lonh_liq
-hs_ny   = use_ny_hl and nyh_liq
+hs_lon  = use_lon_hl and lonh_liq and f_reinforced_high(lon_h)
+hs_ny   = use_ny_hl and nyh_liq and f_reinforced_high(ny_h)
 hs_eqh  = use_eql  and eqh_liq
 
 ls_pdl  = use_pdhl and pdl_liq
 ls_pwl  = use_pwhl and pwl_liq
 ls_asia = use_asia and asial_liq
-ls_lon  = use_lon_hl and lonl_liq
-ls_ny   = use_ny_hl and nyl_liq
+ls_lon  = use_lon_hl and lonl_liq and f_reinforced_low(lon_l)
+ls_ny   = use_ny_hl and nyl_liq and f_reinforced_low(ny_l)
 ls_eql  = use_eql  and eql_liq
 
 htf_ok_bear = not use_htf or htf_bear
