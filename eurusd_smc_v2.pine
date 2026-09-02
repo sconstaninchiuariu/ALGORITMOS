@@ -7,8 +7,8 @@
 
 //@version=6
 strategy(
-    title             = "Liquidity Algo",
-    shorttitle        = "Liquidity Algo",
+    title             = "Liquidity Algo v2",
+    shorttitle        = "Liquidity Algo v2",
     overlay           = true,
     default_qty_type  = strategy.fixed,
     default_qty_value = 1,
@@ -65,6 +65,8 @@ var string GLIQ = "Liquidity Levels (HTF POIs)"
 use_pdhl  = input.bool(true,    "PDH / PDL (Previous Day)",  group = GLIQ)
 use_pwhl  = input.bool(true,    "PWH / PWL (Previous Week)", group = GLIQ)
 use_asia  = input.bool(true,    "Asia Range H/L",            group = GLIQ)
+use_lon_hl = input.bool(true,   "Previous London Session H/L", group = GLIQ, tooltip = "The high/low of the PREVIOUS completed London session, treated as a liquidity pool the same way PDH/PDL and Asia H/L are — session extremes attract equal-highs/equal-lows behaviour just like any other range.")
+use_ny_hl  = input.bool(true,   "Previous New York Session H/L", group = GLIQ)
 sw_len    = input.int(10,       "Swing Lookback (MSS ref)",  2, 50, group = GLIQ)
 sweep_buf = input.float(0.0002, "Sweep Buffer", 0.00005, 0.001, 0.00001, group = GLIQ)
 
@@ -80,7 +82,7 @@ fvg_max_bars  = input.int(30,       "FVG Max Age (bars to wait for the retest be
 fvg_search_bars = input.int(8,      "Bars after MSS to find entry FVG", 1, 50, group = GFVG, tooltip = "The reaction-leg window. Imbalances are only picked up during this many bars after the structure break; the closest/newest one within it wins, and the zone is then LOCKED so it can't drift up the impulse.")
 req_close_fvg = input.bool(true,    "Entry candle must CLOSE inside FVG", group = GFVG)
 fvg_tf_min    = input.int(1,   "Show Chart Imbalances: Min Timeframe (minutes)", 1, 1440, group = GFVG)
-fvg_tf_max    = input.int(5,   "Show Chart Imbalances: Max Timeframe (minutes)", 1, 1440, group = GFVG)
+fvg_tf_max    = input.int(1440, "Show Chart Imbalances: Max Timeframe (minutes)", 1, 1440, group = GFVG, tooltip = "Default 1440 = a full day's worth of minutes, so an imbalance from any intraday timeframe up to daily still qualifies. Lower this to hide imbalances from higher timeframes.")
 
 var string GHTF = "HTF Context Filter"
 use_htf     = input.bool(false, "Require HTF FVG alignment (at least one active TF) — heavy filter", group = GHTF)
@@ -372,25 +374,64 @@ eql_tf_ok = timeframe.in_seconds() >= 900
 
 // Running high/low while each kill zone session is in progress, so the
 // session can be drawn as a box (its actual traded range) instead of a
-// flat background strip.
+// flat background strip. Also frozen into lon_h/lon_l and ny_h/ny_l the
+// instant each session ends (mirrors the Asia H/L pattern below exactly) —
+// the PREVIOUS session's high/low is liquidity too, the same as PDH/PDL.
 var float lon_live_h = na
 var float lon_live_l = na
-var float ny_live_h  = na
-var float ny_live_l  = na
+var int   lon_live_h_bar = na
+var int   lon_live_l_bar = na
+var float lon_h       = na
+var float lon_l       = na
+var int   lon_h_bar    = na
+var int   lon_l_bar    = na
 
 if in_london
-    lon_live_h := na(lon_live_h) ? high : math.max(lon_live_h, high)
-    lon_live_l := na(lon_live_l) ? low  : math.min(lon_live_l, low)
-else
-    lon_live_h := na
-    lon_live_l := na
+    if na(lon_live_h) or high > lon_live_h
+        lon_live_h     := high
+        lon_live_h_bar := time
+    if na(lon_live_l) or low < lon_live_l
+        lon_live_l     := low
+        lon_live_l_bar := time
+else if in_london[1]
+    lon_h          := lon_live_h
+    lon_l          := lon_live_l
+    lon_h_bar      := lon_live_h_bar
+    lon_l_bar      := lon_live_l_bar
+    lon_live_h     := na
+    lon_live_l     := na
+    lon_live_h_bar := na
+    lon_live_l_bar := na
+
+lon_closed = not in_london and in_london[1]
+
+var float ny_live_h  = na
+var float ny_live_l  = na
+var int   ny_live_h_bar = na
+var int   ny_live_l_bar = na
+var float ny_h        = na
+var float ny_l        = na
+var int   ny_h_bar     = na
+var int   ny_l_bar     = na
 
 if in_ny
-    ny_live_h := na(ny_live_h) ? high : math.max(ny_live_h, high)
-    ny_live_l := na(ny_live_l) ? low  : math.min(ny_live_l, low)
-else
-    ny_live_h := na
-    ny_live_l := na
+    if na(ny_live_h) or high > ny_live_h
+        ny_live_h     := high
+        ny_live_h_bar := time
+    if na(ny_live_l) or low < ny_live_l
+        ny_live_l     := low
+        ny_live_l_bar := time
+else if in_ny[1]
+    ny_h          := ny_live_h
+    ny_l          := ny_live_l
+    ny_h_bar      := ny_live_h_bar
+    ny_l_bar      := ny_live_l_bar
+    ny_live_h     := na
+    ny_live_l     := na
+    ny_live_h_bar := na
+    ny_live_l_bar := na
+
+ny_sess_closed = not in_ny and in_ny[1]
 
 // =============================================================
 // DAILY + PER-SESSION TRADE COUNTERS
@@ -698,6 +739,10 @@ var bool pwh_swept    = false
 var bool pwl_swept    = false
 var bool asia_h_swept = false
 var bool asia_l_swept = false
+var bool lon_h_swept  = false
+var bool lon_l_swept  = false
+var bool ny_h_swept   = false
+var bool ny_l_swept   = false
 var bool eqh_swept    = false
 var bool eql_swept    = false
 
@@ -716,6 +761,14 @@ var int asia_h_swept_t = na
 var int asia_h_swept_s = na
 var int asia_l_swept_t = na
 var int asia_l_swept_s = na
+var int lon_h_swept_t = na
+var int lon_h_swept_s = na
+var int lon_l_swept_t = na
+var int lon_l_swept_s = na
+var int ny_h_swept_t = na
+var int ny_h_swept_s = na
+var int ny_l_swept_t = na
+var int ny_l_swept_s = na
 var int eqh_swept_t = na
 var int eqh_swept_s = na
 var int eql_swept_t = na
@@ -730,6 +783,12 @@ if is_new_week
 if asia_closed
     asia_h_swept := false
     asia_l_swept := false
+if lon_closed
+    lon_h_swept := false
+    lon_l_swept := false
+if ny_sess_closed
+    ny_h_swept := false
+    ny_l_swept := false
 if eqh_new
     eqh_swept := false
 if eql_new
@@ -741,6 +800,10 @@ pwh_liq    = not na(pwh) and not pwh_swept and high >= pwh
 pwl_liq    = not na(pwl) and not pwl_swept and low <= pwl
 asiah_liq  = not na(asia_h) and not asia_h_swept and high >= asia_h
 asial_liq  = not na(asia_l) and not asia_l_swept and low <= asia_l
+lonh_liq   = not na(lon_h) and not lon_h_swept and high >= lon_h
+lonl_liq   = not na(lon_l) and not lon_l_swept and low <= lon_l
+nyh_liq    = not na(ny_h) and not ny_h_swept and high >= ny_h
+nyl_liq    = not na(ny_l) and not ny_l_swept and low <= ny_l
 eqh_liq    = not na(last_eqh) and not eqh_swept and high >= last_eqh
 eql_liq    = not na(last_eql) and not eql_swept and low <= last_eql
 
@@ -768,6 +831,22 @@ if asial_liq
     asia_l_swept := true
     asia_l_swept_t := time
     asia_l_swept_s := session_id
+if lonh_liq
+    lon_h_swept := true
+    lon_h_swept_t := time
+    lon_h_swept_s := session_id
+if lonl_liq
+    lon_l_swept := true
+    lon_l_swept_t := time
+    lon_l_swept_s := session_id
+if nyh_liq
+    ny_h_swept := true
+    ny_h_swept_t := time
+    ny_h_swept_s := session_id
+if nyl_liq
+    ny_l_swept := true
+    ny_l_swept_t := time
+    ny_l_swept_s := session_id
 if eqh_liq
     eqh_swept := true
     eqh_swept_t := time
@@ -915,11 +994,15 @@ var bool prev_bull_m  = false
 hs_pdh  = use_pdhl and pdh_liq
 hs_pwh  = use_pwhl and pwh_liq
 hs_asia = use_asia and asiah_liq
+hs_lon  = use_lon_hl and lonh_liq
+hs_ny   = use_ny_hl and nyh_liq
 hs_eqh  = use_eql  and eqh_liq
 
 ls_pdl  = use_pdhl and pdl_liq
 ls_pwl  = use_pwhl and pwl_liq
 ls_asia = use_asia and asial_liq
+ls_lon  = use_lon_hl and lonl_liq
+ls_ny   = use_ny_hl and nyl_liq
 ls_eql  = use_eql  and eql_liq
 
 htf_ok_bear = not use_htf or htf_bear
@@ -945,8 +1028,8 @@ htf_ok_bull = not use_htf or htf_bull
 // nothing extra needed at each of those call sites.
 is_exec_tf = timeframe.period == "1"
 
-any_hs = (hs_pdh or hs_pwh or hs_asia or hs_eqh) and htf_ok_bear and can_trade and is_exec_tf
-any_ls = (ls_pdl or ls_pwl or ls_asia or ls_eql)  and htf_ok_bull and can_trade and is_exec_tf
+any_hs = (hs_pdh or hs_pwh or hs_asia or hs_lon or hs_ny or hs_eqh) and htf_ok_bear and can_trade and is_exec_tf
+any_ls = (ls_pdl or ls_pwl or ls_asia or ls_lon or ls_ny or ls_eql)  and htf_ok_bull and can_trade and is_exec_tf
 
 if state == 0 and any_hs
     state        := 1
@@ -982,7 +1065,7 @@ if state == 0 and any_hs
     fvg_top_line := tmp_fvg_l1
     fvg_bot_line := tmp_fvg_l2
     fvg_lbl := tmp_fvg_lb
-    active_sweep_px := hs_pdh ? pdh : hs_pwh ? pwh : hs_asia ? asia_h : last_eqh
+    active_sweep_px := hs_pdh ? pdh : hs_pwh ? pwh : hs_asia ? asia_h : hs_lon ? lon_h : hs_ny ? ny_h : last_eqh
     // Phase 1: zone liquidated (its own line turns green with a check via
     // f_poi_entry), then show the level price must break through to confirm
     // a bearish structure shift.
@@ -1012,7 +1095,7 @@ if state == 0 and any_ls
     fvg_top_line := tmp_fvg_l1
     fvg_bot_line := tmp_fvg_l2
     fvg_lbl := tmp_fvg_lb
-    active_sweep_px := ls_pdl ? pdl : ls_pwl ? pwl : ls_asia ? asia_l : last_eql
+    active_sweep_px := ls_pdl ? pdl : ls_pwl ? pwl : ls_asia ? asia_l : ls_lon ? lon_l : ls_ny ? ny_l : last_eql
     line.delete(mss_ref_line)
     label.delete(mss_ref_lbl)
     label.delete(mss_ref_org)
@@ -1441,6 +1524,14 @@ if use_sweep_alert and asiah_liq
     alert("POI Liquidado: Asia High @ " + str.tostring(asia_h, "#.#####"), alert.freq_once_per_bar)
 if use_sweep_alert and asial_liq
     alert("POI Liquidado: Asia Low @ " + str.tostring(asia_l, "#.#####"), alert.freq_once_per_bar)
+if use_sweep_alert and lonh_liq
+    alert("POI Liquidado: London High @ " + str.tostring(lon_h, "#.#####"), alert.freq_once_per_bar)
+if use_sweep_alert and lonl_liq
+    alert("POI Liquidado: London Low @ " + str.tostring(lon_l, "#.#####"), alert.freq_once_per_bar)
+if use_sweep_alert and nyh_liq
+    alert("POI Liquidado: NY High @ " + str.tostring(ny_h, "#.#####"), alert.freq_once_per_bar)
+if use_sweep_alert and nyl_liq
+    alert("POI Liquidado: NY Low @ " + str.tostring(ny_l, "#.#####"), alert.freq_once_per_bar)
 if use_sweep_alert and eqh_liq
     alert("POI Liquidado: Equal Highs @ " + str.tostring(last_eqh, "#.#####"), alert.freq_once_per_bar)
 if use_sweep_alert and eql_liq
@@ -1470,6 +1561,10 @@ var bool pwh_armed   = true
 var bool pwl_armed   = true
 var bool asiah_armed = true
 var bool asial_armed = true
+var bool lonh_armed  = true
+var bool lonl_armed  = true
+var bool nyh_armed   = true
+var bool nyl_armed   = true
 var bool eqh_armed   = true
 var bool eql_armed   = true
 
@@ -1482,6 +1577,12 @@ if is_new_week
 if asia_closed
     asiah_armed := true
     asial_armed := true
+if lon_closed
+    lonh_armed := true
+    lonl_armed := true
+if ny_sess_closed
+    nyh_armed := true
+    nyl_armed := true
 if eqh_new
     eqh_armed   := true
 if eql_new
@@ -1493,6 +1594,10 @@ pwh_cond   = use_near_alert and use_pwhl and not pwh_swept    and f_near(pwh)
 pwl_cond   = use_near_alert and use_pwhl and not pwl_swept    and f_near(pwl)
 asiah_cond = use_near_alert and use_asia and not asia_h_swept and f_near(asia_h)
 asial_cond = use_near_alert and use_asia and not asia_l_swept and f_near(asia_l)
+lonh_cond  = use_near_alert and use_lon_hl and not lon_h_swept and f_near(lon_h)
+lonl_cond  = use_near_alert and use_lon_hl and not lon_l_swept and f_near(lon_l)
+nyh_cond   = use_near_alert and use_ny_hl and not ny_h_swept and f_near(ny_h)
+nyl_cond   = use_near_alert and use_ny_hl and not ny_l_swept and f_near(ny_l)
 eqh_cond   = use_near_alert and use_eql  and eql_tf_ok and not eqh_swept and f_near(last_eqh)
 eql_cond   = use_near_alert and use_eql  and eql_tf_ok and not eql_swept and f_near(last_eql)
 
@@ -1502,6 +1607,10 @@ pwh_near_alert   = pwh_armed   and pwh_cond
 pwl_near_alert   = pwl_armed   and pwl_cond
 asiah_near_alert = asiah_armed and asiah_cond
 asial_near_alert = asial_armed and asial_cond
+lonh_near_alert  = lonh_armed  and lonh_cond
+lonl_near_alert  = lonl_armed  and lonl_cond
+nyh_near_alert   = nyh_armed   and nyh_cond
+nyl_near_alert   = nyl_armed   and nyl_cond
 eqh_near_alert   = eqh_armed   and eqh_cond
 eql_near_alert   = eql_armed   and eql_cond
 
@@ -1517,6 +1626,14 @@ if asiah_near_alert
     asiah_armed := false
 if asial_near_alert
     asial_armed := false
+if lonh_near_alert
+    lonh_armed := false
+if lonl_near_alert
+    lonl_armed := false
+if nyh_near_alert
+    nyh_armed := false
+if nyl_near_alert
+    nyl_armed := false
 if eqh_near_alert
     eqh_armed   := false
 if eql_near_alert
@@ -1534,6 +1651,14 @@ if f_far(asia_h)
     asiah_armed := true
 if f_far(asia_l)
     asial_armed := true
+if f_far(lon_h)
+    lonh_armed := true
+if f_far(lon_l)
+    lonl_armed := true
+if f_far(ny_h)
+    nyh_armed := true
+if f_far(ny_l)
+    nyl_armed := true
 if f_far(last_eqh)
     eqh_armed   := true
 if f_far(last_eql)
@@ -1551,6 +1676,14 @@ if asiah_near_alert
     alert("Price approaching Asia Range High - " + str.tostring(asia_h, "#.#####"), alert.freq_once_per_bar)
 if asial_near_alert
     alert("Price approaching Asia Range Low - " + str.tostring(asia_l, "#.#####"), alert.freq_once_per_bar)
+if lonh_near_alert
+    alert("Price approaching Previous London High - " + str.tostring(lon_h, "#.#####"), alert.freq_once_per_bar)
+if lonl_near_alert
+    alert("Price approaching Previous London Low - " + str.tostring(lon_l, "#.#####"), alert.freq_once_per_bar)
+if nyh_near_alert
+    alert("Price approaching Previous NY High - " + str.tostring(ny_h, "#.#####"), alert.freq_once_per_bar)
+if nyl_near_alert
+    alert("Price approaching Previous NY Low - " + str.tostring(ny_l, "#.#####"), alert.freq_once_per_bar)
 if eqh_near_alert
     alert("Price approaching Equal Highs liquidity pool - " + str.tostring(last_eqh, "#.#####"), alert.freq_once_per_bar)
 if eql_near_alert
@@ -1919,6 +2052,52 @@ if show_levels or show_fvg_vis
             array.push(poi_bar, nz(asia_l_bar, time))
             array.push(poi_ext, not frz_al)
             array.push(poi_end, end_al)
+            array.push(poi_hi, false)
+    if show_levels and use_lon_hl
+        [show_lh, nm_lh, act_lh, frz_lh, end_lh] = f_poi_entry(lon_h, lon_h_swept, lon_h_swept_t, lon_h_swept_s, "London H")
+        if show_lh
+            array.push(poi_px, lon_h)
+            array.push(poi_nm, nm_lh)
+            array.push(poi_cl, act_lh ? active_col : poi_line_solid)
+            array.push(poi_tx, act_lh ? active_col : poi_line_solid)
+            array.push(poi_pr, 32)
+            array.push(poi_bar, nz(lon_h_bar, time))
+            array.push(poi_ext, not frz_lh)
+            array.push(poi_end, end_lh)
+            array.push(poi_hi, true)
+        [show_ll, nm_ll, act_ll, frz_ll, end_ll] = f_poi_entry(lon_l, lon_l_swept, lon_l_swept_t, lon_l_swept_s, "London L")
+        if show_ll
+            array.push(poi_px, lon_l)
+            array.push(poi_nm, nm_ll)
+            array.push(poi_cl, act_ll ? active_col : poi_line_solid)
+            array.push(poi_tx, act_ll ? active_col : poi_line_solid)
+            array.push(poi_pr, 33)
+            array.push(poi_bar, nz(lon_l_bar, time))
+            array.push(poi_ext, not frz_ll)
+            array.push(poi_end, end_ll)
+            array.push(poi_hi, false)
+    if show_levels and use_ny_hl
+        [show_nh, nm_nh, act_nh, frz_nh, end_nh] = f_poi_entry(ny_h, ny_h_swept, ny_h_swept_t, ny_h_swept_s, "NY H")
+        if show_nh
+            array.push(poi_px, ny_h)
+            array.push(poi_nm, nm_nh)
+            array.push(poi_cl, act_nh ? active_col : poi_line_solid)
+            array.push(poi_tx, act_nh ? active_col : poi_line_solid)
+            array.push(poi_pr, 34)
+            array.push(poi_bar, nz(ny_h_bar, time))
+            array.push(poi_ext, not frz_nh)
+            array.push(poi_end, end_nh)
+            array.push(poi_hi, true)
+        [show_nl, nm_nl, act_nl, frz_nl, end_nl] = f_poi_entry(ny_l, ny_l_swept, ny_l_swept_t, ny_l_swept_s, "NY L")
+        if show_nl
+            array.push(poi_px, ny_l)
+            array.push(poi_nm, nm_nl)
+            array.push(poi_cl, act_nl ? active_col : poi_line_solid)
+            array.push(poi_tx, act_nl ? active_col : poi_line_solid)
+            array.push(poi_pr, 35)
+            array.push(poi_bar, nz(ny_l_bar, time))
+            array.push(poi_ext, not frz_nl)
+            array.push(poi_end, end_nl)
             array.push(poi_hi, false)
     if show_levels and use_eql and eql_tf_ok
         [show_eqh, nm_eqh, act_eqh, frz_eqh, end_eqh] = f_poi_entry(last_eqh, eqh_swept, eqh_swept_t, eqh_swept_s, "EQH")
@@ -2389,6 +2568,10 @@ alertcondition(pwh_near_alert,   title = "Price near PWH",     message = "Price 
 alertcondition(pwl_near_alert,   title = "Price near PWL",     message = "Price approaching PWL (Previous Week Low)")
 alertcondition(asiah_near_alert, title = "Price near Asia H",  message = "Price approaching Asia Range High")
 alertcondition(asial_near_alert, title = "Price near Asia L",  message = "Price approaching Asia Range Low")
+alertcondition(lonh_near_alert,  title = "Price near London H", message = "Price approaching Previous London High")
+alertcondition(lonl_near_alert,  title = "Price near London L", message = "Price approaching Previous London Low")
+alertcondition(nyh_near_alert,   title = "Price near NY H",     message = "Price approaching Previous NY High")
+alertcondition(nyl_near_alert,   title = "Price near NY L",     message = "Price approaching Previous NY Low")
 alertcondition(eqh_near_alert,   title = "Price near EQH",     message = "Price approaching Equal Highs liquidity pool")
 alertcondition(eql_near_alert,   title = "Price near EQL",     message = "Price approaching Equal Lows liquidity pool")
 
@@ -2401,5 +2584,9 @@ alertcondition(pwh_liq,   title = "POI Liquidado: PWH",      message = "POI Liqu
 alertcondition(pwl_liq,   title = "POI Liquidado: PWL",      message = "POI Liquidado: PWL (Previous Week Low)")
 alertcondition(asiah_liq, title = "POI Liquidado: Asia H",   message = "POI Liquidado: Asia High")
 alertcondition(asial_liq, title = "POI Liquidado: Asia L",   message = "POI Liquidado: Asia Low")
+alertcondition(lonh_liq,  title = "POI Liquidado: London H", message = "POI Liquidado: Previous London High")
+alertcondition(lonl_liq,  title = "POI Liquidado: London L", message = "POI Liquidado: Previous London Low")
+alertcondition(nyh_liq,   title = "POI Liquidado: NY H",     message = "POI Liquidado: Previous NY High")
+alertcondition(nyl_liq,   title = "POI Liquidado: NY L",     message = "POI Liquidado: Previous NY Low")
 alertcondition(eqh_liq,   title = "POI Liquidado: EQH",      message = "POI Liquidado: Equal Highs")
 alertcondition(eql_liq,   title = "POI Liquidado: EQL",      message = "POI Liquidado: Equal Lows")
