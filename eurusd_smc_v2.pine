@@ -155,12 +155,12 @@ imb_line_col    = input.color(color.white, "Imbalance Color", group = GVIS, inli
      tooltip = "One flat color for every imbalance line (HTF and chart-native). The line uses the transparency below; its label text is always fully solid.")
 imb_line_transp = input.int(10, "Transp %", 0, 90, group = GVIS, inline = "imbcol")
 
-max_poi_pct = input.float(0.40, "Max Distance (%) — POI lines AND imbalances", 0.05, 5.0, 0.05, group = GVIS,
-     tooltip = "ONE distance rule for everything: POI lines and imbalances alike hide once price is farther than this % away. Auto x2 on futures. (Used to be two separate settings — a leftover 1% imbalance threshold was why imbalances weren't respecting the same limit as POI lines.)")
+vis_range_ref  = input.string("Day", "Visibility Range Reference", options = ["Day", "Week"], group = GVIS,
+     tooltip = "Zones show/hide based on distance from price, scaled to how much price actually moved recently — the PREVIOUS completed day's (or week's) full high-low range, fetched via request.security so it's the same real range no matter what timeframe the chart itself is on.")
+vis_range_mult = input.float(1.5, "Visibility Range Multiplier", 0.3, 5.0, 0.1, group = GVIS,
+     tooltip = "A zone shows while price is within this many multiples of the reference range above/below it. On a calm day/week that's a tight window; on a volatile one it widens automatically — no fixed percentage to retune, and no dependence on the visible chart viewport (which would force a full recalculation, and a noticeable redraw lag, on every pan/zoom/timeframe change).")
 merge_tol   = input.float(0.0005, "Zone Merge Tolerance", 0.00010, 0.005, 0.00010, group = GVIS,
      tooltip = "Zones within this price distance of each other collapse into one line, names joined with \"+\".")
-require_origin_visible = input.bool(true, "Hide zones whose origin candle is off-screen", group = GVIS,
-     tooltip = "A zone within the % distance above can still start way off to the left, outside what's currently on screen — a flat line running across the whole chart with no visible origin gives no context and just compresses the price axis. With this on, a zone only shows once you've scrolled/zoomed so its origin candle is actually in view. Costs a full recalculation on every pan/zoom/timeframe change (a Pine limitation — chart.left_visible_bar_time is the only way to know the visible range), so turn it off if that redraw lag bothers you more than the extra lines.")
 
 var string GALR = "Proximity Alerts"
 use_near_alert       = input.bool(true, "Alert when price nears a POI zone", group = GALR)
@@ -168,17 +168,33 @@ near_alert_pct       = input.float(0.20, "Create Alert at Distance (% of price) 
 near_alert_reset_pct = input.float(1.00, "Remove Alert Beyond Distance (% of price)", 0.10, 5.0, 0.10, group = GALR)
 use_sweep_alert      = input.bool(true, "Alert the instant a POI zone is liquidated (price crosses it)", group = GALR)
 
-// REMOVED: this used to shrink the distance on lower timeframes (down to a
-// 15% floor, e.g. 0.40% -> 0.06% on 1m) with the stated intent of stopping
-// wide HTF boxes from stretching the y-axis. But zones are drawn as thin
-// LINES here, not boxes — nothing about a line's distance test affects the
-// price-axis auto-scale — so that concern doesn't apply to this codebase,
-// and the scaling had no real justification left except to make zones
-// vanish almost entirely on 1m, which is exactly the EXECUTION timeframe
-// the whole strategy operates on and the one where zones matter most. Now
-// flat: the same max_poi_pct distance applies at every timeframe.
-poi_pct_eff  = syminfo.type == "futures" ? max_poi_pct * 2.0 : max_poi_pct
-max_poi_dist = close * poi_pct_eff / 100.0
+// Distance is now scaled to REALIZED VOLATILITY (the previous day's or
+// week's actual high-low range) instead of a flat % of price. Two earlier
+// approaches both failed at this same goal, for opposite reasons:
+//   - a flat % of price (0.40%) ignores how much the pair is actually
+//     moving, so it doesn't adapt to a calm vs. a volatile stretch;
+//   - scaling that % by the CHART's timeframe (tf_scale, removed earlier
+//     this session) used timeframe as a crude proxy for "how wide a price
+//     window am I probably looking at", but that's not what timeframe
+//     measures, and it crushed 1m — the execution timeframe — down to a
+//     0.06% window;
+//   - scaling by the actual VISIBLE chart viewport (chart.left_visible_bar_
+//     time, also removed this session) is the most literally correct proxy,
+//     but referencing it forces Pine to fully recalculate the whole script
+//     on every pan/zoom/timeframe change — the visible redraw lag the user
+//     explicitly doesn't want.
+// Realized range doesn't have either problem: fetched once per bar via
+// request.security (same technique as the EQH/EQL and HTF FVG fixes), it
+// doesn't care what the chart's own timeframe is or what's currently
+// scrolled into view, so there's no extra recalculation cost, and it
+// automatically widens on a volatile day/week and narrows on a calm one —
+// a real proxy for the price range someone is likely to be looking at, not
+// an arbitrary flat threshold.
+[vis_day_h, vis_day_l]   = request.security(syminfo.tickerid, "D", [high[1], low[1]], lookahead = barmerge.lookahead_off)
+[vis_week_h, vis_week_l] = request.security(syminfo.tickerid, "W", [high[1], low[1]], lookahead = barmerge.lookahead_off)
+vis_range     = vis_range_ref == "Day" ? (vis_day_h - vis_day_l) : (vis_week_h - vis_week_l)
+vis_range_eff = syminfo.type == "futures" ? vis_range * 2.0 : vis_range
+max_poi_dist  = vis_range_eff * vis_range_mult
 
 near_pct_eff       = syminfo.type == "futures" ? near_alert_pct * 2.0 : near_alert_pct
 near_dist          = close * near_pct_eff / 100.0
@@ -216,13 +232,14 @@ chart_tf_lbl = f_tf_label(timeframe.period)
 chart_tf_minutes = timeframe.in_seconds(timeframe.period) / 60.0
 fvg_tf_ok         = chart_tf_minutes >= fvg_tf_min and chart_tf_minutes <= fvg_tf_max
 
-// VIEWPORT-BASED HIDING is back, gated behind require_origin_visible
-// (default on). chart.left_visible_bar_time is the only way Pine can know
-// the visible range, and referencing it forces a full recalculation on every
-// pan/zoom/timeframe change instead of updating incrementally — that lag is
-// a real cost, which is why this is a toggle rather than baked in
-// unconditionally. Applied once, at the final render loop below, rather
-// than duplicated into every zone's individual show/hide logic.
+// NOTE ON VIEWPORT-BASED HIDING (removed, again): chart.left_visible_bar_time
+// is the only way Pine can know the actual visible range, but referencing it
+// forces a full script recalculation on every pan/zoom/timeframe change —
+// the multi-second redraw lag the user explicitly asked to get rid of.
+// Distance-based hiding is back to being the only mechanism, now scaled to
+// realized volatility (vis_range_mult / max_poi_dist above) instead of a
+// flat percentage, which is what actually approximates "is this zone
+// probably still relevant/visible" without needing the viewport itself.
 
 // =============================================================
 // HTF BIAS  (no-repainting)
@@ -2333,26 +2350,19 @@ if show_levels or show_fvg_vis
                     array.set(used_flags, sj, true)
                 jj := jj + 1
 
-            // A zone whose ORIGIN candle is off-screen to the left gives no
-            // context — just a flat line crossing the whole visible chart
-            // with no visible start — so it's dropped entirely rather than
-            // drawn truncated. Skipped when require_origin_visible is off.
-            origin_visible = not require_origin_visible or g_bar >= chart.left_visible_bar_time
-            if origin_visible
-                // xloc=xloc.bar_time (not bar_index): an unmitigated imbalance
-                // can sit unresolved for tens of thousands of bars, and Pine's
-                // bar-index x1 has a hard "too far from current bar" limit that
-                // crashes the script once history gets long enough. Time-based
-                // coordinates have no such limit.
-                // g_ext=false (a POI swept this session) freezes the line at
-                // g_end (the liquidation time) instead of extending to "now".
-                // g_hi (max/high zone): label.style_label_down places text
-                // ABOVE the line. Low/min zone: label.style_label_up places
-                // it BELOW.
-                new_l  = line.new(g_bar, g_px, g_end, g_px, xloc = xloc.bar_time, extend = g_ext ? extend.right : extend.none, color = g_cl, style = line.style_solid, width = 1)
-                new_lb = label.new(g_end, g_px, g_nm, xloc = xloc.bar_time, style = g_hi ? label.style_label_down : label.style_label_up, color = color.new(color.black, 100), textcolor = g_tx, size = size.small)
-                array.push(managed_poi_lines,  new_l)
-                array.push(managed_poi_labels, new_lb)
+            // xloc=xloc.bar_time (not bar_index): an unmitigated imbalance
+            // can sit unresolved for tens of thousands of bars, and Pine's
+            // bar-index x1 has a hard "too far from current bar" limit that
+            // crashes the script once history gets long enough. Time-based
+            // coordinates have no such limit.
+            // g_ext=false (a POI swept this session) freezes the line at
+            // g_end (the liquidation time) instead of extending to "now".
+            // g_hi (max/high zone): label.style_label_down places text ABOVE
+            // the line. Low/min zone: label.style_label_up places it BELOW.
+            new_l  = line.new(g_bar, g_px, g_end, g_px, xloc = xloc.bar_time, extend = g_ext ? extend.right : extend.none, color = g_cl, style = line.style_solid, width = 1)
+            new_lb = label.new(g_end, g_px, g_nm, xloc = xloc.bar_time, style = g_hi ? label.style_label_down : label.style_label_up, color = color.new(color.black, 100), textcolor = g_tx, size = size.small)
+            array.push(managed_poi_lines,  new_l)
+            array.push(managed_poi_labels, new_lb)
 
 // Sweep markers — the bar this evaluates on IS the candle that crossed the
 // level, so no offset is needed any more.
