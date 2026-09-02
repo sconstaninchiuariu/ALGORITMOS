@@ -112,7 +112,8 @@ r6 = input.float(1.55, "Attempt 6 (%)", 0.1, 5.0, 0.01, group = GTR) / 100
 
 var string GEQL = "Equal Highs / Lows (Liquidity Pools)"
 use_eql      = input.bool(true,    "Detect and show EQH / EQL",        group = GEQL)
-eql_tol      = input.float(0.0003, "Tolerance (price)",  0.00005, 0.002, 0.00001, group = GEQL)
+eql_ref_tf   = input.string("15", "Reference Timeframe (pivots computed here, not the chart's)", options = ["1", "5", "15", "30", "60", "240"], group = GEQL, tooltip = "EQH/EQL pivots are computed on THIS fixed timeframe via request.security, regardless of what timeframe the chart itself is showing — that's what makes the same equal-highs/lows zone appear identically whether you're on a 1m chart or a Daily one. Before this, pivots were computed from the chart's own candles, so a zone visible on Daily could vanish on 1m simply because the 1m candles never happened to form a matching pivot shape.")
+eql_tol      = input.float(0.0005, "Tolerance (price)",  0.00005, 0.002, 0.00001, group = GEQL, tooltip = "How close two swing points need to be to count as \"equal\" — real equal-highs/lows are rarely the exact same pip, since stops cluster around a level rather than stacking on one price.")
 eql_lookback = input.int(5,        "History depth (# pivots)", 2, 20,   group = GEQL)
 
 // Simplified on purpose: short labels here, full explanation in the tooltip
@@ -120,7 +121,7 @@ eql_lookback = input.int(5,        "History depth (# pivots)", 2, 20,   group = 
 var string GVIS = "Visuals"
 
 show_levels  = input.bool(true, "POI Lines",   group = GVIS, inline = "show1")
-show_fvg_vis = input.bool(true, "Imbalances",  group = GVIS, inline = "show1")
+show_fvg_vis = input.bool(false, "Chart-TF Imbalances",  group = GVIS, inline = "show1", tooltip = "Extra imbalances found in the CURRENT CHART's own candles, on top of the always-on 1H/4H/D/W/M zones above (those come from request.security so they're identical at every chart timeframe). These are chart-native — an imbalance visible while looking at a 4H chart will not appear when you switch to 1m, since it's a gap in 4H candles that don't exist on the 1m series. Off by default so the default view stays the same at every timeframe; turn on if you specifically want to see the chart's own current-timeframe gaps too.")
 show_sweep   = input.bool(true, "Sweep Marks", group = GVIS, inline = "show2")
 show_checklist = input.bool(true, "Setup Checklist", group = GVIS, inline = "show2")
 show_info_tbl  = input.bool(false, "Info Table",  group = GVIS, inline = "show3")
@@ -370,8 +371,6 @@ var int session_id = 0
 if in_london != in_london[1] or in_ny != in_ny[1]
     session_id += 1
 
-eql_tf_ok = timeframe.in_seconds() >= 900
-
 // Running high/low while each kill zone session is in progress, so the
 // session can be drawn as a box (its actual traded range) instead of a
 // flat background strip. Also frozen into lon_h/lon_l and ny_h/ny_l the
@@ -581,6 +580,14 @@ if not na(raw_swl)
 // =============================================================
 // EQUAL HIGHS / LOWS
 // =============================================================
+// Pivots for EQH/EQL come from eql_ref_tf via request.security, NOT from
+// raw_swh/raw_swl (those stay chart-native, used only for last_swh/last_swl).
+// A pivot on a fixed reference timeframe is the same real swing point no
+// matter what timeframe the chart is displaying, so the same equal-highs
+// zone now shows identically at every zoom level — the "PDL + EQL + PWL"
+// on Daily used to just disappear on 1m because 1m's own noisy candles
+// rarely happened to form a matching pivot at all.
+[eql_swh_raw, eql_swl_raw, eql_swh_bar, eql_swl_bar] = request.security(syminfo.tickerid, eql_ref_tf, [ta.pivothigh(high, sw_len, sw_len), ta.pivotlow(low, sw_len, sw_len), time[sw_len], time[sw_len]], lookahead = barmerge.lookahead_off)
 
 var float[] swh_hist = array.new_float(0)
 var float[] swl_hist = array.new_float(0)
@@ -593,32 +600,33 @@ eqh_new = false
 eql_new = false
 
 // ta.pivothigh/pivotlow(src, sw_len, sw_len) confirms the pivot sw_len bars
-// after it printed, so the actual pivot bar is bar_index - sw_len.
-if use_eql and eql_tf_ok and not na(raw_swh)
+// after it printed on eql_ref_tf, so time[sw_len] (fetched above, inside the
+// security context) is the actual bar it formed on.
+if use_eql and not na(eql_swh_raw)
     sz = array.size(swh_hist)
     if sz > 0
         for i = 0 to sz - 1
-            if math.abs(raw_swh - array.get(swh_hist, i)) <= eql_tol
+            if math.abs(eql_swh_raw - array.get(swh_hist, i)) <= eql_tol
                 eqh_new      := true
-                last_eqh     := raw_swh
-                last_eqh_bar := time[sw_len]
+                last_eqh     := eql_swh_raw
+                last_eqh_bar := eql_swh_bar
                 break
     if array.size(swh_hist) >= eql_lookback
         array.shift(swh_hist)
-    array.push(swh_hist, raw_swh)
+    array.push(swh_hist, eql_swh_raw)
 
-if use_eql and eql_tf_ok and not na(raw_swl)
+if use_eql and not na(eql_swl_raw)
     sz = array.size(swl_hist)
     if sz > 0
         for i = 0 to sz - 1
-            if math.abs(raw_swl - array.get(swl_hist, i)) <= eql_tol
+            if math.abs(eql_swl_raw - array.get(swl_hist, i)) <= eql_tol
                 eql_new      := true
-                last_eql     := raw_swl
-                last_eql_bar := time[sw_len]
+                last_eql     := eql_swl_raw
+                last_eql_bar := eql_swl_bar
                 break
     if array.size(swl_hist) >= eql_lookback
         array.shift(swl_hist)
-    array.push(swl_hist, raw_swl)
+    array.push(swl_hist, eql_swl_raw)
 
 // =============================================================
 // STRUCTURE REFERENCE — seed for the break level
@@ -1598,8 +1606,8 @@ lonh_cond  = use_near_alert and use_lon_hl and not lon_h_swept and f_near(lon_h)
 lonl_cond  = use_near_alert and use_lon_hl and not lon_l_swept and f_near(lon_l)
 nyh_cond   = use_near_alert and use_ny_hl and not ny_h_swept and f_near(ny_h)
 nyl_cond   = use_near_alert and use_ny_hl and not ny_l_swept and f_near(ny_l)
-eqh_cond   = use_near_alert and use_eql  and eql_tf_ok and not eqh_swept and f_near(last_eqh)
-eql_cond   = use_near_alert and use_eql  and eql_tf_ok and not eql_swept and f_near(last_eql)
+eqh_cond   = use_near_alert and use_eql  and not eqh_swept and f_near(last_eqh)
+eql_cond   = use_near_alert and use_eql  and not eql_swept and f_near(last_eql)
 
 pdh_near_alert   = pdh_armed   and pdh_cond
 pdl_near_alert   = pdl_armed   and pdl_cond
@@ -2099,7 +2107,7 @@ if show_levels or show_fvg_vis
             array.push(poi_ext, not frz_nl)
             array.push(poi_end, end_nl)
             array.push(poi_hi, false)
-    if show_levels and use_eql and eql_tf_ok
+    if show_levels and use_eql
         [show_eqh, nm_eqh, act_eqh, frz_eqh, end_eqh] = f_poi_entry(last_eqh, eqh_swept, eqh_swept_t, eqh_swept_s, "EQH")
         if show_eqh
             array.push(poi_px, last_eqh)
