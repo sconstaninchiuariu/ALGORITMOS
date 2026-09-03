@@ -81,7 +81,7 @@ kz_ny_open    = input.int(14, "Open (h)",    0, 23, group = GSESS, inline = "ny2
 kz_ny_close_h = input.int(16, "Close (h)",   0, 23, group = GSESS, inline = "ny2")
 kz_ny_close_m = input.int(30, "Close (min)", 0, 59, group = GSESS, inline = "ny2")
 
-sess_box_max = input.int(10, "Max Boxes per Session (oldest dropped)", 2, 30, group = GSESS)
+sess_box_max = input.int(3, "Max Boxes per Session (oldest dropped)", 2, 30, group = GSESS)
 
 var string GLIQ = "Liquidity Levels (HTF POIs)"
 use_pdhl  = input.bool(true,    "PDH / PDL (Previous Day)",  group = GLIQ)
@@ -2174,7 +2174,12 @@ if show_levels or show_fvg_vis
             array.push(poi_hi, false)
     if show_levels and use_lon_hl
         [show_lh, nm_lh, act_lh, frz_lh, end_lh] = f_poi_entry(lon_h, lon_h_swept, lon_h_swept_t, lon_h_swept_s, "London H")
-        if show_lh
+        // A session high/low with no confluence (no EQH/EQL, no HTF FVG
+        // nearby) is chart noise, not a real level — same standard the
+        // sweep engine already holds it to (f_reinforced_high/low). Once
+        // it's actually been swept this session (frz_lh), it's a real
+        // event worth keeping visible regardless.
+        if show_lh and (frz_lh or f_reinforced_high(lon_h))
             array.push(poi_px, lon_h)
             array.push(poi_nm, nm_lh)
             array.push(poi_cl, act_lh ? active_col : poi_line_solid)
@@ -2185,7 +2190,7 @@ if show_levels or show_fvg_vis
             array.push(poi_end, end_lh)
             array.push(poi_hi, true)
         [show_ll, nm_ll, act_ll, frz_ll, end_ll] = f_poi_entry(lon_l, lon_l_swept, lon_l_swept_t, lon_l_swept_s, "London L")
-        if show_ll
+        if show_ll and (frz_ll or f_reinforced_low(lon_l))
             array.push(poi_px, lon_l)
             array.push(poi_nm, nm_ll)
             array.push(poi_cl, act_ll ? active_col : poi_line_solid)
@@ -2197,7 +2202,7 @@ if show_levels or show_fvg_vis
             array.push(poi_hi, false)
     if show_levels and use_ny_hl
         [show_nh, nm_nh, act_nh, frz_nh, end_nh] = f_poi_entry(ny_h, ny_h_swept, ny_h_swept_t, ny_h_swept_s, "NY H")
-        if show_nh
+        if show_nh and (frz_nh or f_reinforced_high(ny_h))
             array.push(poi_px, ny_h)
             array.push(poi_nm, nm_nh)
             array.push(poi_cl, act_nh ? active_col : poi_line_solid)
@@ -2208,7 +2213,7 @@ if show_levels or show_fvg_vis
             array.push(poi_end, end_nh)
             array.push(poi_hi, true)
         [show_nl, nm_nl, act_nl, frz_nl, end_nl] = f_poi_entry(ny_l, ny_l_swept, ny_l_swept_t, ny_l_swept_s, "NY L")
-        if show_nl
+        if show_nl and (frz_nl or f_reinforced_low(ny_l))
             array.push(poi_px, ny_l)
             array.push(poi_nm, nm_nl)
             array.push(poi_cl, act_nl ? active_col : poi_line_solid)
