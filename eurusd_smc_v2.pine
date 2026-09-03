@@ -8,7 +8,7 @@
 //@version=6
 strategy(
     title             = "Liquidity Algo v2",
-    shorttitle        = "Liquidity Algo v2",
+    shorttitle        = "LiqAlgoV2",
     overlay           = true,
     default_qty_type  = strategy.fixed,
     default_qty_value = 1,
@@ -717,11 +717,11 @@ if use_eql and not na(eql_swl_raw)
 // the sweep) needs the window capped at sweep_bar, so it can never drift
 // past the start of the current reaction into unrelated later price action.
 // Both call f_origin_low/f_origin_high with an explicit scan limit —
-// ce_scan_bars for a seed, f_relocate_limit() for a relocation — so the two
-// cases can never be conflated again.
-f_relocate_limit() =>
-    math.max(1, math.min(ce_scan_bars, bar_index - sweep_bar))
-
+// ce_scan_bars for a seed, f_relocate_limit() for a relocation (defined
+// further down, right after sweep_bar itself — this file declares sweep_bar
+// as part of the state machine's vars, later than this section, and a Pine
+// function can only reference a global that's already been declared above
+// it) — so the two cases can never be conflated again.
 f_origin_low(int lim) =>
     float res = na
     for i = 1 to lim
@@ -931,6 +931,14 @@ var int   state_bar    = 0
 // CONFIRMED break that is simply waiting for a London/NY session to open in
 // (see the entry-signal / cleanup logic below).
 var int   sweep_bar    = 0
+
+// Bounds a CE relocation scan (see f_origin_low/f_origin_high above) so it
+// can never look further back than the sweep that opened the current cycle
+// — only defined here, after sweep_bar, since Pine requires a global to be
+// declared before any function that reads it.
+f_relocate_limit() =>
+    math.max(1, math.min(ce_scan_bars, bar_index - sweep_bar))
+
 var float sweep_hi     = na
 var float sweep_lo     = na
 // Body-only counterparts, used ONLY to decide whether a candle "created a
