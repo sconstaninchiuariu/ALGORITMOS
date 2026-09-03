@@ -113,6 +113,7 @@ use_htf_d   = input.bool(true,  "Daily FVG zones",   group = GHTF)
 use_htf_w   = input.bool(true,  "Weekly FVG zones",  group = GHTF)
 use_htf_m   = input.bool(false, "Monthly FVG zones", group = GHTF)
 htf_fvg_min = input.float(0.0003, "Min HTF FVG Size", 0.00010, 0.010, 0.00010, group = GHTF)
+use_htf_imb_entry = input.bool(true, "Arm cycle when price manipulates an active HTF imbalance (like other POI)", group = GHTF, tooltip = "Treats an active 1H+ imbalance zone (from the toggles above) as a POI: the instant price enters/manipulates it, the cycle arms and waits for the usual structural break (CE/MSS) before entering — no liquidity sweep required first.")
 
 var string GRSK = "Risk Management"
 rr_ratio   = input.float(2.0,    "RR Ratio",         1.0, 10.0, 0.1,    group = GRSK)
@@ -309,46 +310,79 @@ var float htf_um_far   = na
 var bool  htf_bull_m_ok  = false
 
 [e_b1h, f_b1h, k_b1h] = f_htf_edge(htf_bear_1h, h1_h0, h1_l2, true, htf_b1h_edge, htf_b1h_far, htf_bear_1h_ok)
+// Touch = this zone was valid (unmitigated) last bar and just got mitigated
+// THIS bar — i.e. price has entered/manipulated it right now. Captured
+// before the ok flag below is overwritten with the new (post-touch) value.
+touch_b1h = htf_bear_1h_ok and not k_b1h
+touch_b1h_edge = e_b1h
 htf_b1h_edge := e_b1h
 htf_b1h_far  := f_b1h
 htf_bear_1h_ok := k_b1h
 [e_b4h, f_b4h, k_b4h] = f_htf_edge(htf_bear_4h, h2_h0, h2_l2, true, htf_b4h_edge, htf_b4h_far, htf_bear_4h_ok)
+touch_b4h = htf_bear_4h_ok and not k_b4h
+touch_b4h_edge = e_b4h
 htf_b4h_edge := e_b4h
 htf_b4h_far  := f_b4h
 htf_bear_4h_ok := k_b4h
 [e_bd, f_bd, k_bd] = f_htf_edge(htf_bear_d, h3_h0, h3_l2, true, htf_bd_edge, htf_bd_far, htf_bear_d_ok)
+touch_bd = htf_bear_d_ok and not k_bd
+touch_bd_edge = e_bd
 htf_bd_edge := e_bd
 htf_bd_far  := f_bd
 htf_bear_d_ok := k_bd
 [e_bw, f_bw, k_bw] = f_htf_edge(htf_bear_w, hw_h0, hw_l2, true, htf_bw_edge, htf_bw_far, htf_bear_w_ok)
+touch_bw = htf_bear_w_ok and not k_bw
+touch_bw_edge = e_bw
 htf_bw_edge := e_bw
 htf_bw_far  := f_bw
 htf_bear_w_ok := k_bw
 [e_bm, f_bm, k_bm] = f_htf_edge(htf_bear_m, hm_h0, hm_l2, true, htf_bm_edge, htf_bm_far, htf_bear_m_ok)
+touch_bm = htf_bear_m_ok and not k_bm
+touch_bm_edge = e_bm
 htf_bm_edge := e_bm
 htf_bm_far  := f_bm
 htf_bear_m_ok := k_bm
 
 [e_u1h, f_u1h, k_u1h] = f_htf_edge(htf_bull_1h, h1_l0, h1_h2, false, htf_u1h_edge, htf_u1h_far, htf_bull_1h_ok)
+touch_u1h = htf_bull_1h_ok and not k_u1h
+touch_u1h_edge = e_u1h
 htf_u1h_edge := e_u1h
 htf_u1h_far  := f_u1h
 htf_bull_1h_ok := k_u1h
 [e_u4h, f_u4h, k_u4h] = f_htf_edge(htf_bull_4h, h2_l0, h2_h2, false, htf_u4h_edge, htf_u4h_far, htf_bull_4h_ok)
+touch_u4h = htf_bull_4h_ok and not k_u4h
+touch_u4h_edge = e_u4h
 htf_u4h_edge := e_u4h
 htf_u4h_far  := f_u4h
 htf_bull_4h_ok := k_u4h
 [e_ud, f_ud, k_ud] = f_htf_edge(htf_bull_d, h3_l0, h3_h2, false, htf_ud_edge, htf_ud_far, htf_bull_d_ok)
+touch_ud = htf_bull_d_ok and not k_ud
+touch_ud_edge = e_ud
 htf_ud_edge := e_ud
 htf_ud_far  := f_ud
 htf_bull_d_ok := k_ud
 [e_uw, f_uw, k_uw] = f_htf_edge(htf_bull_w, hw_l0, hw_h2, false, htf_uw_edge, htf_uw_far, htf_bull_w_ok)
+touch_uw = htf_bull_w_ok and not k_uw
+touch_uw_edge = e_uw
 htf_uw_edge := e_uw
 htf_uw_far  := f_uw
 htf_bull_w_ok := k_uw
 [e_um, f_um, k_um] = f_htf_edge(htf_bull_m, hm_l0, hm_h2, false, htf_um_edge, htf_um_far, htf_bull_m_ok)
+touch_um = htf_bull_m_ok and not k_um
+touch_um_edge = e_um
 htf_um_edge := e_um
 htf_um_far  := f_um
 htf_bull_m_ok := k_um
+
+// Any active HTF imbalance (1H/4H/D/W/M, gated by its own use_htf_* toggle)
+// just got manipulated (price entered it) THIS bar — same-bar OR across all
+// tracked timeframes. Feeds hs_imb/ls_imb below, which arms the state
+// machine exactly like a liquidity sweep: touch now, wait for the
+// structural break (MSS) before entering, same as every other POI.
+touch_bear_htf = (use_htf_1h and touch_b1h) or (use_htf_4h and touch_b4h) or (use_htf_d and touch_bd) or (use_htf_w and touch_bw) or (use_htf_m and touch_bm)
+touch_bull_htf = (use_htf_1h and touch_u1h) or (use_htf_4h and touch_u4h) or (use_htf_d and touch_ud) or (use_htf_w and touch_uw) or (use_htf_m and touch_um)
+touch_bear_htf_edge = touch_b1h ? touch_b1h_edge : touch_b4h ? touch_b4h_edge : touch_bd ? touch_bd_edge : touch_bw ? touch_bw_edge : touch_bm_edge
+touch_bull_htf_edge = touch_u1h ? touch_u1h_edge : touch_u4h ? touch_u4h_edge : touch_ud ? touch_ud_edge : touch_uw ? touch_uw_edge : touch_um_edge
 
 htf_bear = (use_htf_1h and htf_bear_1h_ok) or (use_htf_4h and htf_bear_4h_ok) or (use_htf_d and htf_bear_d_ok) or (use_htf_w and htf_bear_w_ok) or (use_htf_m and htf_bear_m_ok)
 htf_bull = (use_htf_1h and htf_bull_1h_ok) or (use_htf_4h and htf_bull_4h_ok) or (use_htf_d and htf_bull_d_ok) or (use_htf_w and htf_bull_w_ok) or (use_htf_m and htf_bull_m_ok)
@@ -1073,6 +1107,7 @@ hs_asia = use_asia and asiah_liq
 hs_lon  = use_lon_hl and lonh_liq and f_reinforced_high(lon_h)
 hs_ny   = use_ny_hl and nyh_liq and f_reinforced_high(ny_h)
 hs_eqh  = use_eql  and eqh_liq
+hs_imb  = use_htf_imb_entry and touch_bear_htf
 
 ls_pdl  = use_pdhl and pdl_liq
 ls_pwl  = use_pwhl and pwl_liq
@@ -1080,6 +1115,7 @@ ls_asia = use_asia and asial_liq
 ls_lon  = use_lon_hl and lonl_liq and f_reinforced_low(lon_l)
 ls_ny   = use_ny_hl and nyl_liq and f_reinforced_low(ny_l)
 ls_eql  = use_eql  and eql_liq
+ls_imb  = use_htf_imb_entry and touch_bull_htf
 
 htf_ok_bear = not use_htf or htf_bear
 htf_ok_bull = not use_htf or htf_bull
@@ -1104,8 +1140,8 @@ htf_ok_bull = not use_htf or htf_bull
 // nothing extra needed at each of those call sites.
 is_exec_tf = timeframe.period == "1"
 
-any_hs = (hs_pdh or hs_pwh or hs_asia or hs_lon or hs_ny or hs_eqh) and htf_ok_bear and can_trade and is_exec_tf
-any_ls = (ls_pdl or ls_pwl or ls_asia or ls_lon or ls_ny or ls_eql)  and htf_ok_bull and can_trade and is_exec_tf
+any_hs = (hs_pdh or hs_pwh or hs_asia or hs_lon or hs_ny or hs_eqh or hs_imb) and htf_ok_bear and can_trade and is_exec_tf
+any_ls = (ls_pdl or ls_pwl or ls_asia or ls_lon or ls_ny or ls_eql or ls_imb)  and htf_ok_bull and can_trade and is_exec_tf
 
 if state == 0 and any_hs
     state        := 1
@@ -1142,7 +1178,7 @@ if state == 0 and any_hs
     fvg_top_line := tmp_fvg_l1
     fvg_bot_line := tmp_fvg_l2
     fvg_lbl := tmp_fvg_lb
-    active_sweep_px := hs_pdh ? pdh : hs_pwh ? pwh : hs_asia ? asia_h : hs_lon ? lon_h : hs_ny ? ny_h : last_eqh
+    active_sweep_px := hs_pdh ? pdh : hs_pwh ? pwh : hs_asia ? asia_h : hs_lon ? lon_h : hs_ny ? ny_h : hs_eqh ? last_eqh : touch_bear_htf_edge
     // Phase 1: zone liquidated (its own line turns green with a check via
     // f_poi_entry), then show the level price must break through to confirm
     // a bearish structure shift.
@@ -1173,7 +1209,7 @@ if state == 0 and any_ls
     fvg_top_line := tmp_fvg_l1
     fvg_bot_line := tmp_fvg_l2
     fvg_lbl := tmp_fvg_lb
-    active_sweep_px := ls_pdl ? pdl : ls_pwl ? pwl : ls_asia ? asia_l : ls_lon ? lon_l : ls_ny ? ny_l : last_eql
+    active_sweep_px := ls_pdl ? pdl : ls_pwl ? pwl : ls_asia ? asia_l : ls_lon ? lon_l : ls_ny ? ny_l : ls_eql ? last_eql : touch_bull_htf_edge
     line.delete(mss_ref_line)
     label.delete(mss_ref_lbl)
     label.delete(mss_ref_org)
