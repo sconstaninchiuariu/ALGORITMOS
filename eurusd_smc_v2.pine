@@ -86,9 +86,9 @@ sess_box_max = input.int(3, "Max Boxes per Session (oldest dropped)", 2, 30, gro
 var string GLIQ = "Liquidity Levels (HTF POIs)"
 use_pdhl  = input.bool(true,    "PDH / PDL (Previous Day)",  group = GLIQ)
 use_pwhl  = input.bool(true,    "PWH / PWL (Previous Week)", group = GLIQ)
-use_asia  = input.bool(true,    "Asia Range H/L",            group = GLIQ)
-use_lon_hl = input.bool(true,   "Previous London Session H/L", group = GLIQ, tooltip = "The high/low of the PREVIOUS completed London session, treated as a liquidity pool the same way PDH/PDL and Asia H/L are — session extremes attract equal-highs/equal-lows behaviour just like any other range.")
-use_ny_hl  = input.bool(true,   "Previous New York Session H/L", group = GLIQ)
+use_asia  = input.bool(false,   "Asia Range H/L",            group = GLIQ)
+use_lon_hl = input.bool(false,  "Previous London Session H/L", group = GLIQ, tooltip = "The high/low of the PREVIOUS completed London session, treated as a liquidity pool the same way PDH/PDL and Asia H/L are — session extremes attract equal-highs/equal-lows behaviour just like any other range. Off by default: a session extreme is not inherently meaningful liquidity the way PDH/PDL is, and shows up too often to be useful even with the EQH/EQL/HTF-imbalance reinforcement requirement.")
+use_ny_hl  = input.bool(false,  "Previous New York Session H/L", group = GLIQ)
 sw_len    = input.int(10,       "Swing Lookback (MSS ref)",  2, 50, group = GLIQ)
 sweep_buf = input.float(0.0002, "Sweep Buffer", 0.00005, 0.001, 0.00001, group = GLIQ)
 
