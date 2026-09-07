@@ -86,7 +86,7 @@ sess_box_max = input.int(3, "Max Boxes per Session (oldest dropped)", 2, 30, gro
 var string GLIQ = "Liquidity Levels (HTF POIs)"
 use_pdhl  = input.bool(true,    "PDH / PDL (Previous Day)",  group = GLIQ)
 use_pwhl  = input.bool(true,    "PWH / PWL (Previous Week)", group = GLIQ)
-use_asia  = input.bool(false,   "Asia Range H/L",            group = GLIQ)
+use_asia  = input.bool(true,    "Asia Range H/L",            group = GLIQ, tooltip = "The Asian range is a real liquidity pool (the whole session builds a tight range that London runs), unlike a London/NY session extreme — which is why those two are off by default and this one is not.")
 use_lon_hl = input.bool(false,  "Previous London Session H/L", group = GLIQ, tooltip = "The high/low of the PREVIOUS completed London session, treated as a liquidity pool the same way PDH/PDL and Asia H/L are — session extremes attract equal-highs/equal-lows behaviour just like any other range. Off by default: a session extreme is not inherently meaningful liquidity the way PDH/PDL is, and shows up too often to be useful even with the EQH/EQL/HTF-imbalance reinforcement requirement.")
 use_ny_hl  = input.bool(false,  "Previous New York Session H/L", group = GLIQ)
 sw_len    = input.int(10,       "Swing Lookback (MSS ref)",  2, 50, group = GLIQ)
@@ -94,7 +94,8 @@ sweep_buf = input.float(0.0002, "Sweep Buffer", 0.00005, 0.001, 0.00001, group =
 
 var string GMSS = "MSS Settings"
 mss_max_bars = input.int(150, "Max Bars for MSS (whole cycle deadline after the sweep)", 5, 500, group = GMSS, tooltip = "How long the bot keeps hunting for the structure break after a zone is liquidated. Price often sweeps a level and then keeps running for another 50-80 bars before the actual reaction, so a short deadline kills the setup right before the trade it was waiting for. This same deadline also bounds how long a CONFIRMED break can wait for a London/NY session to open before the setup is abandoned.")
-ce_scan_bars = input.int(30,  "CE Reference Scan (candles back)", 3, 100, group = GMSS, tooltip = "The CE level is the TRUE extreme (wick, not body/colour) reached within this many candles back — the actual lowest low / highest high of the reaction, not just \"the last candle of the opposite colour\", since the real extreme is sometimes made by a candle that closed the other way (e.g. a lower low made by a candle that still closed bullish). This is how far back to scan for it.")
+ce_scan_bars = input.int(30,  "CE Reference Scan (candles back)", 3, 100, group = GMSS, tooltip = "Used ONLY to seed the CE the moment a zone is liquidated: the TRUE extreme (wick, not body/colour) reached within this many candles back — the actual lowest low / highest high of the reaction, not just \"the last candle of the opposite colour\", since the real extreme is sometimes made by a candle that closed the other way (e.g. a lower low made by a candle that still closed bullish). Once the cycle is running the CE no longer rescans this window; it follows structure (see CE Structure Confirmation below).")
+ce_piv_len   = input.int(3,   "CE Structure Confirmation (bars each side)", 1, 20, group = GMSS, tooltip = "After the seed, the CE tracks the last HIGHER LOW of the rally (bearish setup) or the last LOWER HIGH of the decline (bullish setup) — the standard CHoCH reference. A swing counts once it has this many candles on each side, so the level moves on real structure instead of on every candle. Lower = follows price faster with more noise; higher = fewer, cleaner relocations with more lag.")
 
 var string GFVG = "FVG / Imbalance"
 use_fvg_entry = input.bool(false, "Wait for the imbalance retest (otherwise enter on the CE candle)", group = GFVG, tooltip = "OFF (default): liquidity is taken, the CE level is broken, and the order goes in on that very candle. ON: after the break the bot waits for price to come back and retest the imbalance the reaction left behind.")
@@ -724,67 +725,61 @@ if use_eql and not na(eql_swl_raw)
 //     bearish candle followed by one that dips to an even LOWER low but
 //     still closes bullish. The body-colour restriction picks the first
 //     (bearish) candle and misses the true low the second one made.
-// The level is simply the TRUE EXTREME (min low / max high, wick, no colour
-// restriction) within the scan window — no confirmation delay, and it can
-// never miss the real extreme regardless of which candle's body happens to
-// close which way. f_origin_low_bar / f_origin_high_bar run the same scan to
-// report which bar it was found on.
+// The SEED level is simply the TRUE EXTREME (min low / max high, wick, no
+// colour restriction) within the scan window — no confirmation delay, and it
+// can never miss the real extreme regardless of which candle's body happens
+// to close which way. Each function returns the level AND the bar it was
+// found on in one pass (they used to be two functions running the identical
+// loop twice per call site).
 //
 // ROOT CAUSE #8 — a setup entered correctly at the reaction low the first
 // time it was watched, then later (same cycle, no code change) entered way
-// up near the top of the move instead. The scan window above was always
-// "the last ce_scan_bars candles counted back from RIGHT NOW", with no
-// relation to when the sweep that started this cycle actually happened. In
-// an uptrend that keeps grinding, ANY later relocation trigger — even a
-// perfectly legitimate one, a minor pullback confirmed by body — re-scans
-// that flat window from the CURRENT bar, which by then can sit dozens of
-// candles past the original reaction. The window silently slides into
-// unrelated, more recent price action near the top of the move and finds
-// an extreme that has nothing to do with this setup.
+// up near the top of the move instead. The scan window was always "the last
+// ce_scan_bars candles counted back from RIGHT NOW", with no relation to
+// when the sweep that started this cycle actually happened, so a later
+// relocation silently slid the window into unrelated price action near the
+// top of the move.
 //
-// The SEED (at the sweep bar itself) is NOT affected by this — it looks
-// backward from the sweep for the pre-sweep origin candle exactly once, so
-// the full ce_scan_bars window is correct and intentional there. Only a
-// RELOCATION (evaluated on some LATER bar, potentially many candles after
-// the sweep) needs the window capped at sweep_bar, so it can never drift
-// past the start of the current reaction into unrelated later price action.
-// Both call f_origin_low/f_origin_high with an explicit scan limit —
-// ce_scan_bars for a seed, f_relocate_limit() for a relocation (defined
-// further down, right after sweep_bar itself — this file declares sweep_bar
-// as part of the state machine's vars, later than this section, and a Pine
-// function can only reference a global that's already been declared above
-// it) — so the two cases can never be conflated again.
+// ROOT CAUSE #9 (the fix that made both of the above moot) — capping that
+// same window at the sweep bar, which is what #8's fix did, turned the
+// relocation into "the lowest low since the sweep". In a rally that value
+// IS the sweep candle's own low, permanently: the CE could never move up,
+// no matter how far price ran above it. Reported as "price kept liquidating
+// higher and the CE zone never updated" — and it was not a tuning problem,
+// the scan was mathematically pinned to the bottom of the move.
+//
+// So the extreme scan is now the SEED ONLY — one backward look at the sweep
+// bar for the pre-sweep origin candle, which is exactly what it was always
+// right for. Everything after that is structural: see ce_piv_lo/ce_piv_hi
+// below and the ratchet in the state machine.
 f_origin_low(int lim) =>
-    float res = na
+    float res   = na
+    int   res_i = na
     for i = 1 to lim
         if na(res) or low[i] < res
-            res := low[i]
-    res
+            res   := low[i]
+            res_i := i
+    [res, na(res_i) ? na : bar_index - res_i]
 
 f_origin_high(int lim) =>
-    float res = na
-    for i = 1 to lim
-        if na(res) or high[i] > res
-            res := high[i]
-    res
-
-f_origin_low_bar(int lim) =>
-    float res = na
-    int   res_i = na
-    for i = 1 to lim
-        if na(res) or low[i] < res
-            res := low[i]
-            res_i := i
-    na(res_i) ? na : bar_index - res_i
-
-f_origin_high_bar(int lim) =>
-    float res = na
+    float res   = na
     int   res_i = na
     for i = 1 to lim
         if na(res) or high[i] > res
-            res := high[i]
+            res   := high[i]
             res_i := i
-    na(res_i) ? na : bar_index - res_i
+    [res, na(res_i) ? na : bar_index - res_i]
+
+// STRUCTURE for the CE ratchet: the last CONFIRMED swing low / swing high.
+// A bearish CHoCH is price closing below the last HIGHER LOW of the uptrend,
+// so while a bearish cycle is live the reference walks UP from one confirmed
+// higher low to the next (and mirror-image for a bullish cycle). Confirmation
+// costs ce_piv_len bars of lag, which is what stops every single candle from
+// dragging the level around — the exact failure mode of every earlier
+// non-confirmed attempt.
+ce_piv_lo  = ta.pivotlow(low,   ce_piv_len, ce_piv_len)
+ce_piv_hi  = ta.pivothigh(high, ce_piv_len, ce_piv_len)
+ce_piv_bar = bar_index - ce_piv_len
 
 // =============================================================
 // TIERED RISK ENGINE
@@ -964,23 +959,13 @@ var int   state_bar    = 0
 // (see the entry-signal / cleanup logic below).
 var int   sweep_bar    = 0
 
-// Bounds a CE relocation scan (see f_origin_low/f_origin_high above) so it
-// can never look further back than the sweep that opened the current cycle
-// — only defined here, after sweep_bar, since Pine requires a global to be
-// declared before any function that reads it.
-f_relocate_limit() =>
-    math.max(1, math.min(ce_scan_bars, bar_index - sweep_bar))
-
+// The running extreme of the reaction, wick included — the stop anchor, and
+// nothing else. The stop must sit beyond the real price reached, so this
+// tracks every new wick extreme unconditionally. It is deliberately NOT the
+// CE reference: the CE follows confirmed structure (ce_piv_lo/ce_piv_hi),
+// not the extreme of the move.
 var float sweep_hi     = na
 var float sweep_lo     = na
-// Body-only counterparts, used ONLY to decide whether a candle "created a
-// bigger move" for CE-relocation purposes. sweep_hi/sweep_lo (wick) stay the
-// stop anchor — the stop must sit beyond the real price reached, wick
-// included. A long wick with a tiny body hasn't actually moved the market,
-// so it must not be able to trigger a CE relocation on its own — that was
-// the "a tiny near-doji candle relocated the CE to a nonsense candle" bug.
-var float sweep_hi_body = na
-var float sweep_lo_body = na
 var float mss_ref_bear = na
 var float mss_ref_bull = na
 // Bar the CE level actually printed on (the swing/origin candle), so the line
@@ -1174,12 +1159,11 @@ if (state == 0 and any_hs) or (state == 2 and hs_imb_gated)
     // bot waits for structure (equivalent to maxAfterSweepPDH in the working
     // PDH/PDL strategy).
     sweep_hi     := high
-    sweep_hi_body := math.max(open, close)
-    // Structure reference = the ORIGIN CANDLE: the last bearish candle of the
-    // rally that ran into the sweep. Price closing below its low is the break.
-    // Falls back to this candle's own low only if none was found.
-    org_seed_b     = f_origin_low(ce_scan_bars)
-    org_seed_b_bar = f_origin_low_bar(ce_scan_bars)
+    // Structure reference SEED = the ORIGIN CANDLE: the extreme of the rally
+    // that ran into the sweep. Price closing below it is the break. Falls
+    // back to this candle's own low only if none was found. From the next
+    // bar on, the ratchet takes over and walks this level up with structure.
+    [org_seed_b, org_seed_b_bar] = f_origin_low(ce_scan_bars)
     mss_ref_bear := na(org_seed_b) ? low : org_seed_b
     mss_ref_bar  := na(org_seed_b_bar) ? bar_index : org_seed_b_bar
     state_bar    := bar_index
@@ -1216,10 +1200,8 @@ if (state == 0 and any_ls) or (state == 1 and ls_imb_gated)
     state        := 2
     sweep_bar    := bar_index
     sweep_lo     := low
-    sweep_lo_body := math.min(open, close)
-    // Mirror: the last bullish candle of the decline that ran into the sweep.
-    org_seed_u     = f_origin_high(ce_scan_bars)
-    org_seed_u_bar = f_origin_high_bar(ce_scan_bars)
+    // Mirror: the extreme of the decline that ran into the sweep.
+    [org_seed_u, org_seed_u_bar] = f_origin_high(ce_scan_bars)
     mss_ref_bull := na(org_seed_u) ? high : org_seed_u
     mss_ref_bar  := na(org_seed_u_bar) ? bar_index : org_seed_u_bar
     state_bar    := bar_index
@@ -1289,29 +1271,28 @@ bull_mss = state == 2 and bar_index > sweep_bar and not na(mss_ref_bull) and clo
 // new break point — a confirmed swing. Price grinding to marginal new
 // extremes inside one leg creates no swing and must leave the level alone.
 //
-// So both conditions must hold together: a new structural extreme AND a
-// fresh scan finding a genuinely different level. f_origin_low / f_origin_high
-// (now a TRUE wick-extreme scan, see above) supply the value both at the
-// seed and on every relocation — no separate pivot mechanism, no
-// confirmation lag.
+// THE RATCHET (ROOT CAUSE #9). While a bearish cycle is live, the CE walks
+// UP to each newly confirmed HIGHER LOW and can never walk back down; the
+// bullish cycle mirrors it downward. Three conditions, all necessary:
 //
-// The TRIGGER for a relocation is still body-based (sweep_hi_body/
-// sweep_lo_body, updated below) — sweep_hi/sweep_lo (wick) keep tracking the
-// real extreme unconditionally, for the stop anchor, but a relocation only
-// fires once the candle BODY also made a new extreme. A long wick with a
-// tiny body hasn't actually moved the market and must not be able to drag
-// the CE to a different candle on its own.
+//   1. the swing is CONFIRMED (ce_piv_len candles either side) — this is
+//      what keeps ordinary candles inside one leg from moving the level,
+//      the failure of every earlier unconfirmed attempt;
+//   2. it belongs to THIS cycle (printed at or after the sweep bar), so a
+//      stale pre-sweep swing can never be adopted;
+//   3. it is strictly HIGHER than the current reference (monotone) and still
+//      below price — a lower low is the setup failing, not new structure,
+//      and a level already above price would fire an instant fake break.
+//
+// Together these give exactly the textbook reference — "the last higher low
+// of the uptrend" — that keeps pace with a rally instead of staying pinned
+// to where the rally began.
 if state == 1 and not bear_mss
     if high > sweep_hi
         sweep_hi := high
-    body_hi = math.max(open, close)
-    if body_hi > sweep_hi_body
-        sweep_hi_body := body_hi
-        org_now     = f_origin_low(f_relocate_limit())
-        org_now_bar = f_origin_low_bar(f_relocate_limit())
-        if not na(org_now) and org_now != mss_ref_bear and org_now < high
-            mss_ref_bear := org_now
-            mss_ref_bar  := nz(org_now_bar, bar_index)
+    if not na(ce_piv_lo) and ce_piv_bar >= sweep_bar and (na(mss_ref_bear) or ce_piv_lo > mss_ref_bear) and ce_piv_lo < close
+        mss_ref_bear := ce_piv_lo
+        mss_ref_bar  := ce_piv_bar
     if not na(mss_ref_line)
         // x1 must move too — a relocation moves the CE to a DIFFERENT candle,
         // not just a different price, so the line's start needs to follow.
@@ -1324,14 +1305,9 @@ if state == 1 and not bear_mss
 if state == 2 and not bull_mss
     if low < sweep_lo
         sweep_lo := low
-    body_lo = math.min(open, close)
-    if body_lo < sweep_lo_body
-        sweep_lo_body := body_lo
-        org_now     = f_origin_high(f_relocate_limit())
-        org_now_bar = f_origin_high_bar(f_relocate_limit())
-        if not na(org_now) and org_now != mss_ref_bull and org_now > low
-            mss_ref_bull := org_now
-            mss_ref_bar  := nz(org_now_bar, bar_index)
+    if not na(ce_piv_hi) and ce_piv_bar >= sweep_bar and (na(mss_ref_bull) or ce_piv_hi < mss_ref_bull) and ce_piv_hi > close
+        mss_ref_bull := ce_piv_hi
+        mss_ref_bar  := ce_piv_bar
     if not na(mss_ref_line)
         line.set_x1(mss_ref_line, mss_ref_bar)
         line.set_y1(mss_ref_line, mss_ref_bull)
@@ -1443,11 +1419,9 @@ if use_fvg_entry and state == 3 and bar_index > mss_bar
             // Back to hunting for the real structure break, reference re-seeded
             // at this bar so it tracks the move from here on.
             state        := 1
-            org_re_b     = f_origin_low(ce_scan_bars)
-            org_re_b_bar = f_origin_low_bar(ce_scan_bars)
+            [org_re_b, org_re_b_bar] = f_origin_low(ce_scan_bars)
             mss_ref_bear := na(org_re_b) ? low : org_re_b
             mss_ref_bar  := na(org_re_b_bar) ? bar_index : org_re_b_bar
-            sweep_hi_body := math.max(open, close)
             line.delete(mss_ref_line)
             label.delete(mss_ref_lbl)
             label.delete(mss_ref_org)
@@ -1485,11 +1459,9 @@ if use_fvg_entry and state == 4 and bar_index > mss_bar
         ce_lbl := na
         if rearm_ok
             state        := 2
-            org_re_u     = f_origin_high(ce_scan_bars)
-            org_re_u_bar = f_origin_high_bar(ce_scan_bars)
+            [org_re_u, org_re_u_bar] = f_origin_high(ce_scan_bars)
             mss_ref_bull := na(org_re_u) ? high : org_re_u
             mss_ref_bar  := na(org_re_u_bar) ? bar_index : org_re_u_bar
-            sweep_lo_body := math.min(open, close)
             line.delete(mss_ref_line)
             label.delete(mss_ref_lbl)
             label.delete(mss_ref_org)
