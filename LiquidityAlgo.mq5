@@ -22,8 +22,9 @@
 //|       sweep arms (state 1 = bearish setup, state 2 = bullish).    |
 //|    2. The CE (structure) reference seeds at the TRUE wick extreme |
 //|       (min low / max high, no candle-colour restriction) within   |
-//|       CeScanBars M1 candles, and only relocates once a NEW        |
-//|       extreme is confirmed by candle BODY (not a bare wick poke). |
+//|       CeScanBars M1 candles, then ratchets with structure: it     |
+//|       tracks the last CONFIRMED higher low (bearish setup) or     |
+//|       lower high (bullish), so it keeps pace with the move.       |
 //|    3. Price closing back through the CE level confirms the break |
 //|       -> a PENDING entry (state 3/4): SL/TP are already frozen to |
 //|       the reaction's real wick extreme, and the order fires the   |
@@ -75,7 +76,8 @@ input int    EqlLookbackPivots = 5;
 input ENUM_TIMEFRAMES EqlRefTF = PERIOD_M15;
 
 input group "=== Structure (CE) ==="
-input int    CeScanBars    = 30;   // how far back to scan for the true wick extreme
+input int    CeScanBars    = 30;   // how far back to scan for the true wick extreme (SEED only)
+input int    CePivLen      = 3;    // bars each side confirming a CE structure swing
 input int    MssMaxBars    = 150;  // whole-cycle deadline (sweep -> break -> session), in M1 bars
 
 input group "=== Risk Management ==="
@@ -109,7 +111,6 @@ datetime sweepBarTime    = 0;
 datetime mssBarTime      = 0;
 
 double   sweepHi = 0, sweepLo = 0;           // wick extreme since the sweep (stop anchor)
-double   sweepHiBody = 0, sweepLoBody = 0;   // body-only extreme (relocation trigger)
 double   mssRefBear = 0, mssRefBull = 0;     // the CE level itself
 datetime mssRefBarTime = 0;                  // which M1 bar the CE level currently sits on (informational)
 double   activeSweepPx = 0;
@@ -328,16 +329,14 @@ void UpdateEqlOnNewRefBar()
 // Mirrors the final, validated Pine fix exactly.
 //======================================================================
 
-// lim caps how many M1 candles back to scan. The SEED (right at the sweep
-// bar) always passes CeScanBars, since it's looking BACKWARD from the sweep
-// for the pre-sweep origin candle — a one-time lookup, no drift risk. A
-// RELOCATION (evaluated on some LATER bar, once the reaction is already
-// under way) must instead pass a limit bounded at the sweep bar itself
-// (see RelocateLimit below) — otherwise, in a move that keeps grinding, a
-// later relocation trigger re-scans "the last CeScanBars candles from right
-// now", which by then can sit well past the original reaction and land on
-// unrelated, more recent price action near the current extreme instead of
-// the actual reaction low/high. This mirrors the Pine port's identical fix.
+// lim caps how many M1 candles back to scan. This is the SEED ONLY: a
+// one-time backward lookup at the sweep bar for the pre-sweep origin candle.
+//
+// It used to drive relocation too, bounded at the sweep bar - which made the
+// relocation "the lowest low since the sweep". In a rally that value IS the
+// sweep candle's own low, permanently, so the CE could never move up however
+// far price ran above it. Relocation is now structural instead: see
+// CePivotLow/CePivotHigh below. Mirrors the Pine port's identical fix.
 double OriginLow(int lim)
   {
    double res = -1;
@@ -358,11 +357,35 @@ double OriginHigh(int lim)
      }
    return res;
   }
-int RelocateLimit(datetime curBarTime)
+// STRUCTURE for the CE ratchet: the last CONFIRMED M1 swing low / high.
+// The candidate sits CePivLen closed bars back, so CePivLen bars have closed
+// on each side of it by the time it confirms. Shift 0 (the still-forming
+// bar) is never read.
+bool CePivotLow(double &val, datetime &t)
   {
-   int barsSinceSweep = BarsBetween(sweepBarTime, curBarTime);
-   int lim = MathMin(CeScanBars, barsSinceSweep);
-   return MathMax(1, lim);
+   int c = CePivLen + 1;
+   M1Bar cand; if(!GetM1(c, cand)) return false;
+   for(int i=1;i<=CePivLen;i++)
+     {
+      M1Bar l, r;
+      if(!GetM1(c+i, l) || !GetM1(c-i, r)) return false;
+      if(l.l <= cand.l || r.l <= cand.l) return false;
+     }
+   val = cand.l; t = cand.t;
+   return true;
+  }
+bool CePivotHigh(double &val, datetime &t)
+  {
+   int c = CePivLen + 1;
+   M1Bar cand; if(!GetM1(c, cand)) return false;
+   for(int i=1;i<=CePivLen;i++)
+     {
+      M1Bar l, r;
+      if(!GetM1(c+i, l) || !GetM1(c-i, r)) return false;
+      if(l.h >= cand.h || r.h >= cand.h) return false;
+     }
+   val = cand.h; t = cand.t;
+   return true;
   }
 
 //======================================================================
@@ -506,7 +529,7 @@ void ProcessNewM1Bar(const M1Bar &bar)
         {
          state = 1;
          sweepBarTime = bar.t;
-         sweepHi = bar.h; sweepHiBody = MathMax(bar.o, bar.c);
+         sweepHi = bar.h;
          double org = OriginLow(CeScanBars);
          mssRefBear = (org > 0) ? org : bar.l;
          mssRefBarTime = bar.t;
@@ -516,7 +539,7 @@ void ProcessNewM1Bar(const M1Bar &bar)
         {
          state = 2;
          sweepBarTime = bar.t;
-         sweepLo = bar.l; sweepLoBody = MathMin(bar.o, bar.c);
+         sweepLo = bar.l;
          double org = OriginHigh(CeScanBars);
          mssRefBull = (org > 0) ? org : bar.h;
          mssRefBarTime = bar.t;
@@ -537,25 +560,21 @@ void ProcessNewM1Bar(const M1Bar &bar)
    if(state == 1)
      {
       if(bar.h > sweepHi) sweepHi = bar.h;
-      double bodyHi = MathMax(bar.o, bar.c);
-      if(bodyHi > sweepHiBody)
-        {
-         sweepHiBody = bodyHi;
-         double org = OriginLow(RelocateLimit(bar.t));
-         if(org > 0 && org != mssRefBear && org < bar.h) { mssRefBear = org; mssRefBarTime = bar.t; }
-        }
+      // Walk the CE UP to each newly confirmed higher low of this cycle:
+      // confirmed swing, belongs to this cycle, strictly higher, still below
+      // price. Monotone - a lower low is the setup failing, not structure.
+      double pvLo; datetime ptLo;
+      if(CePivotLow(pvLo, ptLo) && ptLo >= sweepBarTime && pvLo > mssRefBear && pvLo < bar.c)
+        { mssRefBear = pvLo; mssRefBarTime = ptLo; }
       if(bar.t > sweepBarTime && bar.c < mssRefBear) bearMss = true;
      }
    else if(state == 2)
      {
       if(bar.l < sweepLo) sweepLo = bar.l;
-      double bodyLo = MathMin(bar.o, bar.c);
-      if(bodyLo < sweepLoBody)
-        {
-         sweepLoBody = bodyLo;
-         double org = OriginHigh(RelocateLimit(bar.t));
-         if(org > 0 && org != mssRefBull && org > bar.l) { mssRefBull = org; mssRefBarTime = bar.t; }
-        }
+      // Mirror: walk the CE DOWN to each newly confirmed lower high.
+      double pvHi; datetime ptHi;
+      if(CePivotHigh(pvHi, ptHi) && ptHi >= sweepBarTime && pvHi < mssRefBull && pvHi > bar.c)
+        { mssRefBull = pvHi; mssRefBarTime = ptHi; }
       if(bar.t > sweepBarTime && bar.c > mssRefBull) bullMss = true;
      }
 
