@@ -218,12 +218,131 @@ fvg_tf_ok         = chart_tf_minutes >= fvg_tf_min and chart_tf_minutes <= fvg_t
 // HTF BIAS  (no-repainting)
 // =============================================================
 
-// Use completed bars [3] and [1] so FVGs never flicker on the incomplete current bar
-[h1_h2, h1_l2, h1_h0, h1_l0] = request.security(syminfo.tickerid, "60",  [high[3], low[3], high[1], low[1]], lookahead = barmerge.lookahead_off)
-[h2_h2, h2_l2, h2_h0, h2_l0] = request.security(syminfo.tickerid, "240", [high[3], low[3], high[1], low[1]], lookahead = barmerge.lookahead_off)
-[h3_h2, h3_l2, h3_h0, h3_l0] = request.security(syminfo.tickerid, "D",   [high[3], low[3], high[1], low[1]], lookahead = barmerge.lookahead_off)
-[hw_h2, hw_l2, hw_h0, hw_l0] = request.security(syminfo.tickerid, "W",   [high[3], low[3], high[1], low[1]], lookahead = barmerge.lookahead_off)
-[hm_h2, hm_l2, hm_h0, hm_l0] = request.security(syminfo.tickerid, "M",   [high[3], low[3], high[1], low[1]], lookahead = barmerge.lookahead_off)
+// ROOT CAUSE — offsets (high[3], high[1], ...) used to live INSIDE the
+// request.security() tuple below. That's the one Pine construct whose
+// result depends on the relationship between the CHART's own timeframe and
+// the REQUESTED timeframe: safe as a many-to-one downsample (any TF request
+// on a much lower chart TF), but not guaranteed identical once the chart's
+// own timeframe reaches or exceeds the requested one — exactly the
+// "1H chart vs 1m chart show different imbalances" symptom, and exactly why
+// only the 1H leg was singled out (4H/D/W/M stayed in the safe many-to-one
+// regime on both a 1H and a 1m chart).
+//
+// Fixed by never putting an offset inside the security tuple at all: fetch
+// only the single latest (possibly still-forming) bar's time/high/low, then
+// do all historical bookkeeping ourselves, in the calling script's own
+// context, where a plain `[1]` is unambiguous regardless of chart
+// timeframe. A genuinely new HTF bar is detected by its OPEN TIME changing
+// — never coincidentally equal between two different real candles, unlike
+// the previous "did the high change value" check (h1_h0 != h1_h0[1]) below,
+// which could silently and permanently miss a real gap on any HTF candle
+// that happened to repeat the prior one's exact high (a double top, or a
+// flat candle). On each new-bar event, h60[1]/l60[1] (the reading from just
+// before the time changed) is the finalized high/low of the candle that
+// just closed; a 3-deep rolling buffer per timeframe reproduces exactly the
+// "candle 3 back" / "candle 1 back" values the rest of the file already
+// depends on (h1_h2/h1_l2/h1_h0/h1_l0 etc.) — same names, same roles, so
+// nothing downstream (htf_bear_1h/htf_bull_1h, the f_htf_gap_push calls)
+// needs to change.
+[t60, h60, l60]     = request.security(syminfo.tickerid, "60",  [time, high, low], lookahead = barmerge.lookahead_off)
+[t240, h240, l240]  = request.security(syminfo.tickerid, "240", [time, high, low], lookahead = barmerge.lookahead_off)
+[tD, hD, lD]         = request.security(syminfo.tickerid, "D",   [time, high, low], lookahead = barmerge.lookahead_off)
+[tW, hW, lW]         = request.security(syminfo.tickerid, "W",   [time, high, low], lookahead = barmerge.lookahead_off)
+[tM, hM, lM]         = request.security(syminfo.tickerid, "M",   [time, high, low], lookahead = barmerge.lookahead_off)
+
+new_close_1h = t60  != t60[1]
+new_close_4h = t240 != t240[1]
+new_close_d  = tD   != tD[1]
+new_close_w  = tW   != tW[1]
+new_close_m  = tM   != tM[1]
+
+var float h1_hA = na
+var float h1_lA = na
+var float h1_hB = na
+var float h1_lB = na
+var float h1_hC = na
+var float h1_lC = na
+var float h2_hA = na
+var float h2_lA = na
+var float h2_hB = na
+var float h2_lB = na
+var float h2_hC = na
+var float h2_lC = na
+var float h3_hA = na
+var float h3_lA = na
+var float h3_hB = na
+var float h3_lB = na
+var float h3_hC = na
+var float h3_lC = na
+var float hw_hA = na
+var float hw_lA = na
+var float hw_hB = na
+var float hw_lB = na
+var float hw_hC = na
+var float hw_lC = na
+var float hm_hA = na
+var float hm_lA = na
+var float hm_hB = na
+var float hm_lB = na
+var float hm_hC = na
+var float hm_lC = na
+
+if new_close_1h
+    h1_hC := h1_hB
+    h1_lC := h1_lB
+    h1_hB := h1_hA
+    h1_lB := h1_lA
+    h1_hA := h60[1]
+    h1_lA := l60[1]
+if new_close_4h
+    h2_hC := h2_hB
+    h2_lC := h2_lB
+    h2_hB := h2_hA
+    h2_lB := h2_lA
+    h2_hA := h240[1]
+    h2_lA := l240[1]
+if new_close_d
+    h3_hC := h3_hB
+    h3_lC := h3_lB
+    h3_hB := h3_hA
+    h3_lB := h3_lA
+    h3_hA := hD[1]
+    h3_lA := lD[1]
+if new_close_w
+    hw_hC := hw_hB
+    hw_lC := hw_lB
+    hw_hB := hw_hA
+    hw_lB := hw_lA
+    hw_hA := hW[1]
+    hw_lA := lW[1]
+if new_close_m
+    hm_hC := hm_hB
+    hm_lC := hm_lB
+    hm_hB := hm_hA
+    hm_lB := hm_lA
+    hm_hA := hM[1]
+    hm_lA := lM[1]
+
+h1_h0 = h1_hA
+h1_l0 = h1_lA
+h1_h2 = h1_hC
+h1_l2 = h1_lC
+h2_h0 = h2_hA
+h2_l0 = h2_lA
+h2_h2 = h2_hC
+h2_l2 = h2_lC
+h3_h0 = h3_hA
+h3_l0 = h3_lA
+h3_h2 = h3_hC
+h3_l2 = h3_lC
+hw_h0 = hw_hA
+hw_l0 = hw_lA
+hw_h2 = hw_hC
+hw_l2 = hw_lC
+hm_h0 = hm_hA
+hm_l0 = hm_lA
+hm_h2 = hm_hC
+hm_l2 = hm_lC
 
 htf_bear_1h = h1_l2 > h1_h0 and (h1_l2 - h1_h0) >= htf_fvg_min
 htf_bear_4h = h2_l2 > h2_h0 and (h2_l2 - h2_h0) >= htf_fvg_min
@@ -346,14 +465,6 @@ var int[]   htf_uw_org_arr   = array.new_int(0)
 var float[] htf_um_near_arr  = array.new_float(0)
 var float[] htf_um_far_arr   = array.new_float(0)
 var int[]   htf_um_org_arr   = array.new_int(0)
-
-// A genuinely new HTF candle just closed on that timeframe (its near-edge
-// reference value changed) — the only moment a new gap can appear.
-new_close_1h = h1_h0 != h1_h0[1]
-new_close_4h = h2_h0 != h2_h0[1]
-new_close_d  = h3_h0 != h3_h0[1]
-new_close_w  = hw_h0 != hw_h0[1]
-new_close_m  = hm_h0 != hm_h0[1]
 
 // Touch-check runs BEFORE the push below, not after: a brand new gap must
 // never be checked against the very same bar's high/low that helped form
@@ -2442,6 +2553,14 @@ if show_levels or show_fvg_vis
             g_ext = array.get(poi_ext, si)
             g_end = array.get(poi_end, si)
             g_hi  = array.get(poi_hi, si)
+            // OR'd across every merged member, independent of display
+            // priority: a merged line must only render frozen when EVERY
+            // component it represents is actually swept/frozen. Without
+            // this, a still-live imbalance merging with an unrelated frozen
+            // structural POI (within merge_tol) inherited that POI's freeze
+            // state just because the POI happened to win display priority —
+            // rendering a genuinely unmitigated zone as if it were dead.
+            any_ext = g_ext
             array.set(used_flags, si, true)
 
             jj = ii + 1
@@ -2453,6 +2572,7 @@ if show_levels or show_fvg_vis
                 if not array.get(used_flags, sj)
                     prj = array.get(poi_pr, sj)
                     nmj = array.get(poi_nm, sj)
+                    any_ext := any_ext or array.get(poi_ext, sj)
                     if prj < g_pr
                         g_nm  := nmj + " + " + g_nm
                         g_cl  := array.get(poi_cl, sj)
@@ -2466,6 +2586,10 @@ if show_levels or show_fvg_vis
                         g_nm := g_nm + " + " + nmj
                     array.set(used_flags, sj, true)
                 jj := jj + 1
+
+            g_ext := any_ext
+            if any_ext
+                g_end := time
 
             // xloc=xloc.bar_time (not bar_index): an unmitigated imbalance
             // can sit unresolved for tens of thousands of bars, and Pine's
