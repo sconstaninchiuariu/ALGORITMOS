@@ -93,7 +93,7 @@ sw_len    = input.int(10,       "Swing Lookback (MSS ref)",  2, 50, group = GLIQ
 sweep_buf = input.float(0.0002, "Sweep Buffer", 0.00005, 0.001, 0.00001, group = GLIQ)
 
 var string GMSS = "MSS Settings"
-mss_max_bars = input.int(150, "Max Bars for MSS (whole cycle deadline after the sweep)", 5, 500, group = GMSS, tooltip = "How long the bot keeps hunting for the structure break after a zone is liquidated. Price often sweeps a level and then keeps running for another 50-80 bars before the actual reaction, so a short deadline kills the setup right before the trade it was waiting for. This same deadline also bounds how long a CONFIRMED break can wait for a London/NY session to open before the setup is abandoned.")
+mss_max_bars = input.int(150, "Max Bars for MSS (whole cycle deadline after the sweep)", 5, 500, group = GMSS, tooltip = "How long the bot keeps hunting for the structure break after a zone is liquidated. Price often sweeps a level and then keeps running for another 50-80 bars before the actual reaction, so a short deadline kills the setup right before the trade it was waiting for. A cycle is also abandoned immediately if the session it armed in ends first (Asia/London/NY) — it never waits across a session boundary — so this deadline mainly matters for setups that time out within the same session.")
 ce_scan_bars = input.int(30,  "CE Reference Scan (candles back)", 3, 100, group = GMSS, tooltip = "Used ONLY to seed the CE the moment a zone is liquidated: the TRUE extreme (wick, not body/colour) reached within this many candles back — the actual lowest low / highest high of the reaction, not just \"the last candle of the opposite colour\", since the real extreme is sometimes made by a candle that closed the other way (e.g. a lower low made by a candle that still closed bullish). Once the cycle is running the CE no longer rescans this window; it follows structure (see CE Structure Confirmation below).")
 ce_piv_len   = input.int(3,   "CE Structure Confirmation (bars each side)", 1, 20, group = GMSS, tooltip = "After the seed, the CE tracks the last HIGHER LOW of the rally (bearish setup) or the last LOWER HIGH of the decline (bullish setup) — the standard CHoCH reference. A swing counts once it has this many candles on each side, so the level moves on real structure instead of on every candle. Lower = follows price faster with more noise; higher = fewer, cleaner relocations with more lag.")
 
@@ -954,10 +954,16 @@ var int   state_bar    = 0
 // at the MSS, so this is the one deadline that bounds the whole cycle: a
 // structure break that fails to produce an entry re-arms back to the "waiting
 // for structure" phase (see the re-arm blocks) rather than killing the setup,
-// and this is what stops that from looping forever. It also now bounds a
-// CONFIRMED break that is simply waiting for a London/NY session to open in
-// (see the entry-signal / cleanup logic below).
+// and this is what stops that from looping forever.
 var int   sweep_bar    = 0
+
+// The session the CURRENT cycle armed in — captured once at the sweep, not
+// re-evaluated live. Used to abandon the cycle the instant that specific
+// session ends, instead of letting it wait across the gap into the next one
+// (see the reset block further down).
+var bool  cyc_sess_asia = false
+var bool  cyc_sess_lon  = false
+var bool  cyc_sess_ny   = false
 
 // The running extreme of the reaction, wick included — the stop anchor, and
 // nothing else. The stop must sit beyond the real price reached, so this
@@ -1140,8 +1146,19 @@ htf_ok_bull = not use_htf or htf_bull
 // nothing extra needed at each of those call sites.
 is_exec_tf = timeframe.period == "1"
 
-any_hs = (hs_pdh or hs_pwh or hs_asia or hs_lon or hs_ny or hs_eqh or hs_imb) and htf_ok_bear and can_trade and is_exec_tf
-any_ls = (ls_pdl or ls_pwl or ls_asia or ls_lon or ls_ny or ls_eql or ls_imb)  and htf_ok_bull and can_trade and is_exec_tf
+// The whole cycle — sweep, CE wait, entry — must start AND finish inside the
+// SAME session window (Asia/London/NY). A sweep during Asia that never
+// breaks structure before Asia closes is NOT a standing setup waiting for
+// London to open; it is a failed cycle, and the bot must wait for a fresh
+// liquidation. Carrying an armed cycle across a session boundary breaks the
+// statistical premise the sessions are meant to provide. Enforced two ways
+// below: (1) a sweep can only ARM while some session window is open, and
+// (2) if the session that armed the current cycle ends before an entry
+// fires, the cycle is abandoned (see the reset block further down).
+in_any_sess = in_asia or in_london or in_ny
+
+any_hs = (hs_pdh or hs_pwh or hs_asia or hs_lon or hs_ny or hs_eqh or hs_imb) and htf_ok_bear and can_trade and is_exec_tf and in_any_sess
+any_ls = (ls_pdl or ls_pwl or ls_asia or ls_lon or ls_ny or ls_eql or ls_imb)  and htf_ok_bull and can_trade and is_exec_tf and in_any_sess
 
 // An imbalance manipulation in the OPPOSITE direction of the cycle currently
 // being tracked takes priority: forget the old POI (whatever sweep armed it)
@@ -1154,6 +1171,9 @@ ls_imb_gated = ls_imb and htf_ok_bull and can_trade and is_exec_tf
 if (state == 0 and any_hs) or (state == 2 and hs_imb_gated)
     state        := 1
     sweep_bar    := bar_index
+    cyc_sess_asia := in_asia
+    cyc_sess_lon  := in_london
+    cyc_sess_ny   := in_ny
     // The liquidating candle IS the sweep candle now, so its own extreme seeds
     // the stop anchor; it then keeps tracking the reaction extreme while the
     // bot waits for structure (equivalent to maxAfterSweepPDH in the working
@@ -1199,6 +1219,9 @@ if (state == 0 and any_hs) or (state == 2 and hs_imb_gated)
 if (state == 0 and any_ls) or (state == 1 and ls_imb_gated)
     state        := 2
     sweep_bar    := bar_index
+    cyc_sess_asia := in_asia
+    cyc_sess_lon  := in_london
+    cyc_sess_ny   := in_ny
     sweep_lo     := low
     // Mirror: the extreme of the decline that ran into the sweep.
     [org_seed_u, org_seed_u_bar] = f_origin_high(ce_scan_bars)
@@ -1223,6 +1246,24 @@ if (state == 0 and any_ls) or (state == 1 and ls_imb_gated)
     mss_ref_org  := label.new(nz(mss_ref_bar, bar_index), mss_ref_bull, "•", xloc = xloc.bar_index, style = label.style_none, textcolor = color.yellow, size = size.tiny)
 
 if (state == 1 or state == 2) and (bar_index - sweep_bar) > mss_max_bars
+    state := 0
+    active_sweep_px := na
+    label.delete(ce_lbl)
+    ce_lbl := na
+    line.delete(mss_ref_line)
+    label.delete(mss_ref_lbl)
+    label.delete(mss_ref_org)
+    mss_ref_line    := na
+    mss_ref_lbl     := na
+    mss_ref_org     := na
+
+// The session that armed this cycle just ended — abandon it rather than
+// carry the wait (for the structure break OR, further along, for the entry)
+// into the next session. Covers every non-idle state, since a break
+// confirmed in Asia waiting on can_trade_entry for London to open is exactly
+// the cross-session carryover this exists to prevent.
+sess_carried_over = state != 0 and not ((cyc_sess_asia and in_asia) or (cyc_sess_lon and in_london) or (cyc_sess_ny and in_ny))
+if sess_carried_over
     state := 0
     active_sweep_px := na
     label.delete(ce_lbl)
