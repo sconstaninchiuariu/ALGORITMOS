@@ -355,27 +355,35 @@ new_close_d  = h3_h0 != h3_h0[1]
 new_close_w  = hw_h0 != hw_h0[1]
 new_close_m  = hm_h0 != hm_h0[1]
 
-f_htf_gap_push(new_close_1h, htf_bear_1h, h1_h0, h1_l2, htf_b1h_near_arr, htf_b1h_far_arr, htf_b1h_org_arr, htf_gap_cap)
+// Touch-check runs BEFORE the push below, not after: a brand new gap must
+// never be checked against the very same bar's high/low that helped form
+// it. That ordering bug was silently self-mitigating most fresh gaps the
+// instant they appeared — the near edge is almost always the just-closed
+// HTF candle's own extreme, which the current low-TF bar is frequently
+// still sitting right at (especially mid-trend, exactly when a real gap is
+// most likely to matter) — so gaps kept vanishing before ever being visible
+// or usable. Existing entries are unaffected either way.
 [touch_b1h, touch_b1h_edge] = f_htf_gap_touch(htf_b1h_near_arr, htf_b1h_far_arr, htf_b1h_org_arr, true)
-f_htf_gap_push(new_close_4h, htf_bear_4h, h2_h0, h2_l2, htf_b4h_near_arr, htf_b4h_far_arr, htf_b4h_org_arr, htf_gap_cap)
+f_htf_gap_push(new_close_1h, htf_bear_1h, h1_h0, h1_l2, htf_b1h_near_arr, htf_b1h_far_arr, htf_b1h_org_arr, htf_gap_cap)
 [touch_b4h, touch_b4h_edge] = f_htf_gap_touch(htf_b4h_near_arr, htf_b4h_far_arr, htf_b4h_org_arr, true)
-f_htf_gap_push(new_close_d, htf_bear_d, h3_h0, h3_l2, htf_bd_near_arr, htf_bd_far_arr, htf_bd_org_arr, htf_gap_cap)
+f_htf_gap_push(new_close_4h, htf_bear_4h, h2_h0, h2_l2, htf_b4h_near_arr, htf_b4h_far_arr, htf_b4h_org_arr, htf_gap_cap)
 [touch_bd, touch_bd_edge] = f_htf_gap_touch(htf_bd_near_arr, htf_bd_far_arr, htf_bd_org_arr, true)
-f_htf_gap_push(new_close_w, htf_bear_w, hw_h0, hw_l2, htf_bw_near_arr, htf_bw_far_arr, htf_bw_org_arr, htf_gap_cap)
+f_htf_gap_push(new_close_d, htf_bear_d, h3_h0, h3_l2, htf_bd_near_arr, htf_bd_far_arr, htf_bd_org_arr, htf_gap_cap)
 [touch_bw, touch_bw_edge] = f_htf_gap_touch(htf_bw_near_arr, htf_bw_far_arr, htf_bw_org_arr, true)
-f_htf_gap_push(new_close_m, htf_bear_m, hm_h0, hm_l2, htf_bm_near_arr, htf_bm_far_arr, htf_bm_org_arr, htf_gap_cap)
+f_htf_gap_push(new_close_w, htf_bear_w, hw_h0, hw_l2, htf_bw_near_arr, htf_bw_far_arr, htf_bw_org_arr, htf_gap_cap)
 [touch_bm, touch_bm_edge] = f_htf_gap_touch(htf_bm_near_arr, htf_bm_far_arr, htf_bm_org_arr, true)
+f_htf_gap_push(new_close_m, htf_bear_m, hm_h0, hm_l2, htf_bm_near_arr, htf_bm_far_arr, htf_bm_org_arr, htf_gap_cap)
 
-f_htf_gap_push(new_close_1h, htf_bull_1h, h1_l0, h1_h2, htf_u1h_near_arr, htf_u1h_far_arr, htf_u1h_org_arr, htf_gap_cap)
 [touch_u1h, touch_u1h_edge] = f_htf_gap_touch(htf_u1h_near_arr, htf_u1h_far_arr, htf_u1h_org_arr, false)
-f_htf_gap_push(new_close_4h, htf_bull_4h, h2_l0, h2_h2, htf_u4h_near_arr, htf_u4h_far_arr, htf_u4h_org_arr, htf_gap_cap)
+f_htf_gap_push(new_close_1h, htf_bull_1h, h1_l0, h1_h2, htf_u1h_near_arr, htf_u1h_far_arr, htf_u1h_org_arr, htf_gap_cap)
 [touch_u4h, touch_u4h_edge] = f_htf_gap_touch(htf_u4h_near_arr, htf_u4h_far_arr, htf_u4h_org_arr, false)
-f_htf_gap_push(new_close_d, htf_bull_d, h3_l0, h3_h2, htf_ud_near_arr, htf_ud_far_arr, htf_ud_org_arr, htf_gap_cap)
+f_htf_gap_push(new_close_4h, htf_bull_4h, h2_l0, h2_h2, htf_u4h_near_arr, htf_u4h_far_arr, htf_u4h_org_arr, htf_gap_cap)
 [touch_ud, touch_ud_edge] = f_htf_gap_touch(htf_ud_near_arr, htf_ud_far_arr, htf_ud_org_arr, false)
-f_htf_gap_push(new_close_w, htf_bull_w, hw_l0, hw_h2, htf_uw_near_arr, htf_uw_far_arr, htf_uw_org_arr, htf_gap_cap)
+f_htf_gap_push(new_close_d, htf_bull_d, h3_l0, h3_h2, htf_ud_near_arr, htf_ud_far_arr, htf_ud_org_arr, htf_gap_cap)
 [touch_uw, touch_uw_edge] = f_htf_gap_touch(htf_uw_near_arr, htf_uw_far_arr, htf_uw_org_arr, false)
-f_htf_gap_push(new_close_m, htf_bull_m, hm_l0, hm_h2, htf_um_near_arr, htf_um_far_arr, htf_um_org_arr, htf_gap_cap)
+f_htf_gap_push(new_close_w, htf_bull_w, hw_l0, hw_h2, htf_uw_near_arr, htf_uw_far_arr, htf_uw_org_arr, htf_gap_cap)
 [touch_um, touch_um_edge] = f_htf_gap_touch(htf_um_near_arr, htf_um_far_arr, htf_um_org_arr, false)
+f_htf_gap_push(new_close_m, htf_bull_m, hm_l0, hm_h2, htf_um_near_arr, htf_um_far_arr, htf_um_org_arr, htf_gap_cap)
 
 // Any active HTF imbalance (1H/4H/D/W/M, gated by its own use_htf_* toggle)
 // just got manipulated (price entered it) THIS bar — same-bar OR across all
