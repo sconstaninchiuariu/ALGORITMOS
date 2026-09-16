@@ -110,6 +110,11 @@ int      state          = 0;
 datetime sweepBarTime    = 0;
 datetime mssBarTime      = 0;
 
+// The session the CURRENT cycle armed in, captured once at the sweep. Used
+// to abandon the cycle the instant that specific session ends instead of
+// letting it wait across the gap into the next one.
+bool     cycSessAsia = false, cycSessLondon = false, cycSessNy = false;
+
 double   sweepHi = 0, sweepLo = 0;           // wick extreme since the sweep (stop anchor)
 double   mssRefBear = 0, mssRefBull = 0;     // the CE level itself
 datetime mssRefBarTime = 0;                  // which M1 bar the CE level currently sits on (informational)
@@ -506,6 +511,7 @@ void ProcessNewM1Bar(const M1Bar &bar)
 
    bool inLondonNow = InLondon(bar.t);
    bool inNyNow     = InNy(bar.t);
+   bool inAsiaNow   = InAsia(bar.t);
    if(inLondonNow && !prevInLondon) lonSessionTrades = 0;
    if(inNyNow && !prevInNy) nySessionTrades = 0;
    prevInLondon = inLondonNow;
@@ -521,14 +527,22 @@ void ProcessNewM1Bar(const M1Bar &bar)
    bool canTradeEntry = canTrade && ((inLondonNow && lonSessionTrades < MaxTradesPerSession) ||
                                       (inNyNow     && nySessionTrades < MaxTradesPerSession));
 
+   // The whole cycle - sweep, CE wait, entry - must start and finish inside
+   // the SAME session (Asia/London/NY). A sweep can only arm while some
+   // session is actually open; carrying an armed cycle across a session
+   // boundary (e.g. sweep in Asia, break/entry attempted once London opens)
+   // breaks the statistical premise sessions are meant to provide.
+   bool inAnySession = inAsiaNow || inLondonNow || inNyNow;
+
    // --- SWEEP: arm the state machine the instant a level is crossed ---
    double lvl;
-   if(state == 0 && canTrade)
+   if(state == 0 && canTrade && inAnySession)
      {
       if(AnyHighSweep(bar, lvl))
         {
          state = 1;
          sweepBarTime = bar.t;
+         cycSessAsia = inAsiaNow; cycSessLondon = inLondonNow; cycSessNy = inNyNow;
          sweepHi = bar.h;
          double org = OriginLow(CeScanBars);
          mssRefBear = (org > 0) ? org : bar.l;
@@ -539,6 +553,7 @@ void ProcessNewM1Bar(const M1Bar &bar)
         {
          state = 2;
          sweepBarTime = bar.t;
+         cycSessAsia = inAsiaNow; cycSessLondon = inLondonNow; cycSessNy = inNyNow;
          sweepLo = bar.l;
          double org = OriginHigh(CeScanBars);
          mssRefBull = (org > 0) ? org : bar.h;
@@ -550,6 +565,16 @@ void ProcessNewM1Bar(const M1Bar &bar)
    // --- whole-cycle deadline (covers both the sweep->break hunt and the
    //     pending-entry wait for a session, same as the Pine version) ---
    if(state != 0 && BarsBetween(sweepBarTime, bar.t) > MssMaxBars)
+     {
+      state = 0; activeSweepPx = 0;
+      return;
+     }
+
+   // The session that armed this cycle just ended - abandon it instead of
+   // carrying the wait into the next session. A break confirmed in Asia,
+   // still waiting on canTradeEntry once London opens, is exactly the
+   // cross-session carryover this prevents.
+   if(state != 0 && !((cycSessAsia && inAsiaNow) || (cycSessLondon && inLondonNow) || (cycSessNy && inNyNow)))
      {
       state = 0; activeSweepPx = 0;
       return;
@@ -611,8 +636,9 @@ void ProcessNewM1Bar(const M1Bar &bar)
             state = 0; activeSweepPx = 0;
            }
         }
-      // Not yet in a session: stays parked in state 3/4 until the
-      // MssMaxBars-from-sweep deadline above closes it out.
+      // Not yet in London/NY: stays parked in state 3/4 only until the
+      // ARMING session itself ends (checked above) or the MssMaxBars
+      // deadline hits - never carries into a later session.
      }
   }
 
