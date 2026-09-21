@@ -542,9 +542,26 @@ htf_bull = (use_htf_1h and htf_bull_1h_ok) or (use_htf_4h and htf_bull_4h_ok) or
 h_utc = hour(time, "UTC+2")
 m_utc = minute(time, "UTC+2")
 
+// Session windows (Asia/London/NY) are an intraday concept: hour(time, ...)
+// only means anything when the chart's own bar can actually move across
+// hours within a day. On a Daily (or Weekly/Monthly) chart every bar's time
+// is that period's fixed start, so hour() returns the SAME constant on
+// every single bar — the window it happens to fall in (Asia by default,
+// 00:00) evaluates true FOREVER, never once flipping false. That silently
+// broke everything downstream that depends on a true->false transition: the
+// session box never re-opens (one box object keeps stretching, unbounded,
+// to the running all-time high/low of the whole loaded history) and price's
+// auto-scale gets dragged along with it, squashing real candles and nearby
+// POI lines into a visual smear. Gating in_asia/in_london/in_ny to false on
+// D/W/M+ makes the whole session subsystem (box drawing, live H/L tracking,
+// the sweep sources already restricted to the 1-minute exec timeframe) a
+// clean no-op there instead — correct, since a daily bar has no intraday
+// granularity to derive a session extreme from anyway.
+is_intraday_tf = timeframe.in_seconds(timeframe.period) < 86400
+
 ny_closed = h_utc > kz_ny_close_h or (h_utc == kz_ny_close_h and m_utc >= kz_ny_close_m)
-in_london = h_utc >= kz_lon_open and h_utc < kz_lon_close
-in_ny     = h_utc >= kz_ny_open and not ny_closed
+in_london = is_intraday_tf and h_utc >= kz_lon_open and h_utc < kz_lon_close
+in_ny     = is_intraday_tf and h_utc >= kz_ny_open and not ny_closed
 in_kz     = in_london or in_ny
 
 // Increments on EVERY London/NY session boundary — open AND close — used to
@@ -721,7 +738,8 @@ else
 
 // Handles both an overnight session (e.g. 22h-7h, wraps past midnight) and
 // a same-day session (e.g. 1h-6h) depending on which input is larger.
-in_asia = kz_asia_open <= kz_asia_close ? (h_utc >= kz_asia_open and h_utc < kz_asia_close) : (h_utc >= kz_asia_open or h_utc < kz_asia_close)
+// is_intraday_tf gate: see the comment at h_utc/in_london above.
+in_asia = is_intraday_tf and (kz_asia_open <= kz_asia_close ? (h_utc >= kz_asia_open and h_utc < kz_asia_close) : (h_utc >= kz_asia_open or h_utc < kz_asia_close))
 
 var float asia_live_h     = na
 var float asia_live_l     = na
@@ -776,7 +794,71 @@ if not na(raw_swl)
 // zone now shows identically at every zoom level — the "PDL + EQL + PWL"
 // on Daily used to just disappear on 1m because 1m's own noisy candles
 // rarely happened to form a matching pivot at all.
-[eql_swh_raw, eql_swl_raw, eql_swh_bar, eql_swl_bar] = request.security(syminfo.tickerid, eql_ref_tf, [ta.pivothigh(high, sw_len, sw_len), ta.pivotlow(low, sw_len, sw_len), time[sw_len], time[sw_len]], lookahead = barmerge.lookahead_off)
+//
+// ROOT CAUSE (same class already fixed for the HTF 1H/4H/D/W/M candle
+// fetch): the old version put time[sw_len] — an offset — INSIDE the
+// request.security() tuple, which is only a safe many-to-one downsample
+// when the chart's own timeframe is lower than eql_ref_tf (default "60").
+// On a chart timeframe that reaches or exceeds eql_ref_tf (e.g. viewing
+// Daily while eql_ref_tf is still 1H), the returned bar/time pairing
+// becomes unreliable — the EQH/EQL line's x1 could land far off from where
+// its own label renders (the label is anchored independently), which is
+// exactly "a floating EQH/EQL label with no visible line next to it".
+//
+// Fixed the same way: fetch only the single latest closed-or-forming bar's
+// time/high/low with ZERO offsets inside the security call, detect a
+// genuinely new eql_ref_tf bar by its OPEN TIME changing (never
+// coincidentally equal), and do the pivot-high/pivot-low confirmation
+// ourselves against a local rolling buffer of the last few closed bars —
+// the direct local equivalent of ta.pivothigh/ta.pivotlow, computed only on
+// the bar a new reference-timeframe candle closes (matching the original
+// "confirms once" semantics exactly, instead of re-confirming the same
+// pivot on every chart bar until the next reference close).
+[eqlt, eqlh, eqll] = request.security(syminfo.tickerid, eql_ref_tf, [time, high, low], lookahead = barmerge.lookahead_off)
+eql_new_close = eqlt != eqlt[1]
+
+var float[] eql_h_buf = array.new_float(0)
+var float[] eql_l_buf = array.new_float(0)
+var int[]   eql_t_buf = array.new_int(0)
+eql_buf_cap = sw_len * 2 + 5
+
+f_eql_pivot(array<float> vbuf, array<int> tbuf, int len, bool is_high) =>
+    float res   = na
+    int   res_t = na
+    n = array.size(vbuf)
+    if n >= 2 * len + 1
+        c  = n - 1 - len
+        cv = array.get(vbuf, c)
+        bool ok = true
+        for i = 1 to len
+            v_before = array.get(vbuf, c - i)
+            v_after  = array.get(vbuf, c + i)
+            if is_high ? (v_before >= cv or v_after >= cv) : (v_before <= cv or v_after <= cv)
+                ok := false
+        if ok
+            res   := cv
+            res_t := array.get(tbuf, c)
+    [res, res_t]
+
+float eql_swh_raw = na
+int   eql_swh_bar = na
+float eql_swl_raw = na
+int   eql_swl_bar = na
+
+if eql_new_close
+    array.push(eql_h_buf, eqlh[1])
+    array.push(eql_l_buf, eqll[1])
+    array.push(eql_t_buf, eqlt[1])
+    if array.size(eql_h_buf) > eql_buf_cap
+        array.shift(eql_h_buf)
+        array.shift(eql_l_buf)
+        array.shift(eql_t_buf)
+    [wh, wht] = f_eql_pivot(eql_h_buf, eql_t_buf, sw_len, true)
+    [wl, wlt] = f_eql_pivot(eql_l_buf, eql_t_buf, sw_len, false)
+    eql_swh_raw := wh
+    eql_swh_bar := wht
+    eql_swl_raw := wl
+    eql_swl_bar := wlt
 
 var float[] swh_hist = array.new_float(0)
 var float[] swl_hist = array.new_float(0)
@@ -788,9 +870,9 @@ var int     last_eql_bar = na
 eqh_new = false
 eql_new = false
 
-// ta.pivothigh/pivotlow(src, sw_len, sw_len) confirms the pivot sw_len bars
-// after it printed on eql_ref_tf, so time[sw_len] (fetched above, inside the
-// security context) is the actual bar it formed on.
+// f_eql_pivot confirms the pivot sw_len bars after it printed on
+// eql_ref_tf, so eql_swh_bar/eql_swl_bar (from the local buffer above) is
+// the actual bar it formed on.
 if use_eql and not na(eql_swh_raw)
     sz = array.size(swh_hist)
     if sz > 0
