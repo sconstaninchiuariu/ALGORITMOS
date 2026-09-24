@@ -564,17 +564,32 @@ in_london = is_intraday_tf and h_utc >= kz_lon_open and h_utc < kz_lon_close
 in_ny     = is_intraday_tf and h_utc >= kz_ny_open and not ny_closed
 in_kz     = in_london or in_ny
 
-// Increments on EVERY London/NY session boundary — open AND close — used to
-// tell "swept this session" (still show, frozen at the liquidation point)
-// from "swept in an earlier session" (fully remove) for the 8 structural POI
-// lines below.
+// Moved up here (out of the "ASIA RANGE" section below) so session_id, right
+// below, can react to Asia open/close too — see that comment for why.
+// Handles both an overnight session (e.g. 22h-7h, wraps past midnight) and
+// a same-day session (e.g. 1h-6h) depending on which input is larger.
+in_asia = is_intraday_tf and (kz_asia_open <= kz_asia_close ? (h_utc >= kz_asia_open and h_utc < kz_asia_close) : (h_utc >= kz_asia_open or h_utc < kz_asia_close))
+
+// Increments on EVERY Asia/London/NY session boundary — open AND close — used
+// to tell "swept this session" (still show, frozen at the liquidation point)
+// from "swept in an earlier session" (fully remove) for every structural POI
+// line below.
 // Incrementing only on session OPEN was wrong: a level swept during NY kept
 // matching the live session_id all the way until London opened the next day,
 // so frozen liquidated lines stayed on the chart hours after NY had closed.
 // Counting the close as a boundary too means the moment a session ends, its
 // liquidated zones stop matching and are dropped, which is the intent.
+// ROOT CAUSE (found after PDL/swept-HTF-imbalance lines were reported still
+// showing long after being liquidated): this only ever reacted to
+// in_london/in_ny, never in_asia — a level swept during Asia (or in any of
+// the dead-zone gaps between kill zones) kept matching the SAME session_id
+// for up to ~16 hours, until London's next open finally moved it. Adding
+// in_asia fixes both Asia's own boundaries AND those dead-zone gaps for
+// free: Asia's close (08:00 default) and London's close (11:00 default)
+// already bump the counter via their own toggles, so nothing swept just
+// before either boundary can wait for the next session's OPEN anymore.
 var int session_id = 0
-if in_london != in_london[1] or in_ny != in_ny[1]
+if in_london != in_london[1] or in_ny != in_ny[1] or in_asia != in_asia[1]
     session_id += 1
 
 // Swept-HTF-imbalance record: unlike PDH/PDL/session-H-L/EQH/EQL, a touched
@@ -814,11 +829,8 @@ else
 // =============================================================
 // ASIA RANGE  (default 00:00 - 08:00 UTC+2, see kz_asia_open/close above)
 // =============================================================
-
-// Handles both an overnight session (e.g. 22h-7h, wraps past midnight) and
-// a same-day session (e.g. 1h-6h) depending on which input is larger.
-// is_intraday_tf gate: see the comment at h_utc/in_london above.
-in_asia = is_intraday_tf and (kz_asia_open <= kz_asia_close ? (h_utc >= kz_asia_open and h_utc < kz_asia_close) : (h_utc >= kz_asia_open or h_utc < kz_asia_close))
+// in_asia itself is now computed earlier, alongside in_london/in_ny and
+// session_id (see the comments there) — this section starts from it.
 
 var float asia_live_h     = na
 var float asia_live_l     = na
@@ -2836,6 +2848,15 @@ if show_levels or show_fvg_vis
             array.push(poi_hi, false)
 
     // --- Generic chart-native imbalances (whatever timeframe the chart is on) ---
+    // "Chart " prefix: f_tf_label(timeframe.period) returns e.g. "1H" for a
+    // 60-minute chart — textually IDENTICAL to the dedicated HTF-1H
+    // detector's own "1H FVG Bear/Bull" label whenever the chart happens to
+    // be viewed at 1H, even though the two are separate detectors with
+    // different thresholds (fvg_min_gap here vs. htf_fvg_min there) and
+    // different candle alignment. That collision read as "an imbalance that
+    // doesn't really exist" — a real gap under this looser, chart-native
+    // definition, mislabeled as if it were the stricter dedicated one. The
+    // prefix makes it unambiguous which detector produced a given zone.
     if show_fvg_vis
         n_bear_push = array.size(bear_fvg_px)
         if n_bear_push > 0
@@ -2843,7 +2864,7 @@ if show_levels or show_fvg_vis
                 bpx = array.get(bear_fvg_px, k)
                 if f_imb_in_rng(bpx)
                     array.push(poi_px, bpx)
-                    array.push(poi_nm, chart_tf_lbl + " FVG Bear")
+                    array.push(poi_nm, "Chart " + chart_tf_lbl + " FVG Bear")
                     array.push(poi_cl, imb_line_faded)
                     array.push(poi_tx, imb_text_solid)
                     array.push(poi_pr, 60)
@@ -2857,7 +2878,7 @@ if show_levels or show_fvg_vis
                 bpx = array.get(bull_fvg_px, k)
                 if f_imb_in_rng(bpx)
                     array.push(poi_px, bpx)
-                    array.push(poi_nm, chart_tf_lbl + " FVG Bull")
+                    array.push(poi_nm, "Chart " + chart_tf_lbl + " FVG Bull")
                     array.push(poi_cl, imb_line_faded)
                     array.push(poi_tx, imb_text_solid)
                     array.push(poi_pr, 61)
