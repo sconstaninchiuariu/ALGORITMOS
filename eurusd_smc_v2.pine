@@ -432,7 +432,18 @@ f_htf_gap_reinforced(array<float> near_arr, float lvl) =>
                 found := true
     found
 
-htf_gap_cap = 50
+// ROOT CAUSE — this used to be 50. A cap that low evicts by raw COUNT, not
+// by mitigation or price relevance: on 1H (thousands of candle closes over
+// just a few months) it took only weeks to cycle through 50 entries and
+// silently discard anything older, even a still-unmitigated gap sitting
+// right next to current price — the visibility rule everywhere else in this
+// file is purely price-distance (f_imb_in_rng), with no time cutoff by
+// design, so this was the one place quietly reintroducing one. Raised to a
+// bound generous enough that realistic gap-formation rates on any of the 5
+// timeframes won't hit it within a normal multi-year chart history — these
+// are plain floats/ints, not drawn objects, so a much larger array costs
+// nothing until something in it is actually close enough to price to render.
+htf_gap_cap = 2000
 
 var float[] htf_b1h_near_arr = array.new_float(0)
 var float[] htf_b1h_far_arr  = array.new_float(0)
@@ -953,10 +964,89 @@ if eql_new_close
 
 var float[] swh_hist = array.new_float(0)
 var float[] swl_hist = array.new_float(0)
-var float   last_eqh = na
-var float   last_eql = na
-var int     last_eqh_bar = na
-var int     last_eql_bar = na
+
+// ROOT CAUSE — last_eqh/last_eql used to be single vars, unconditionally
+// OVERWRITTEN every time ANY new equal-high/low confirmed anywhere, with no
+// check on distance or whether the previous one had even been swept yet. A
+// real, still-live equal-high from months ago was silently replaced the
+// next time an unrelated one formed elsewhere — the identical "single
+// sticky slot" defect already found and fixed for HTF imbalances this
+// session (the multi-gap array rewrite). Same fix here: every confirmed
+// equal-high/low is PUSHED onto a live array instead of overwriting one
+// slot, and only removed when it's actually swept (price trades through
+// it) — so a months-old level currently near price still shows, exactly
+// like the HTF FVG arrays.
+var float[] eqh_arr     = array.new_float(0)
+var int[]   eqh_bar_arr = array.new_int(0)
+var float[] eql_arr     = array.new_float(0)
+var int[]   eql_bar_arr = array.new_int(0)
+
+// Mirrors f_htf_gap_touch (single price array instead of near/far/org,
+// since an equal-high/low is one level, not a two-edge gap).
+f_eqh_touch(array<float> px_arr, array<int> bar_arr, bool is_high) =>
+    bool  touched     = false
+    float touched_px  = na
+    int   touched_bar = na
+    n = array.size(px_arr)
+    if n > 0
+        for j = 0 to n - 1
+            i = n - 1 - j
+            e = array.get(px_arr, i)
+            hit = is_high ? high >= e : low <= e
+            if hit
+                touched     := true
+                touched_px  := e
+                touched_bar := array.get(bar_arr, i)
+                array.remove(px_arr, i)
+                array.remove(bar_arr, i)
+    [touched, touched_px, touched_bar]
+
+// Push a newly confirmed equal-high/low, deduplicated against any existing
+// live entry within eql_tol (the same TWO swings that just matched to
+// confirm "equal" would otherwise both end up pushed separately).
+f_eqh_push(array<float> px_arr, array<int> bar_arr, float px, int bar, float tol) =>
+    bool dup = false
+    n = array.size(px_arr)
+    if n > 0
+        for i = 0 to n - 1
+            if math.abs(px - array.get(px_arr, i)) <= tol
+                dup := true
+    if not dup
+        array.push(px_arr, px)
+        array.push(bar_arr, bar)
+    array.size(px_arr)
+
+// Any matching entry within merge_tol — mirrors f_htf_gap_reinforced.
+f_eqh_reinforced(array<float> px_arr, float lvl) =>
+    bool found = false
+    n = array.size(px_arr)
+    if n > 0
+        for i = 0 to n - 1
+            if math.abs(lvl - array.get(px_arr, i)) <= merge_tol
+                found := true
+    found
+
+// Nearest-to-price live entry — only for the single-line proximity alert,
+// same simplification already used for the HTF gap arrays (f_htf_gap_nearest):
+// detection/reinforcement/display use every entry, alerts stay one-per-side.
+f_eqh_nearest(array<float> px_arr, array<int> bar_arr) =>
+    float best     = na
+    int   best_bar = na
+    n = array.size(px_arr)
+    if n > 0
+        for i = 0 to n - 1
+            e = array.get(px_arr, i)
+            if na(best) or math.abs(close - e) < math.abs(close - best)
+                best     := e
+                best_bar := array.get(bar_arr, i)
+    [best, best_bar]
+
+// Touch-check runs BEFORE the push below, every bar unconditionally (not
+// just on eql_new_close bars, since price can cross a previously-confirmed
+// level on any later bar) — same ordering fix as the HTF gap tracker, so a
+// freshly confirmed level is never checked against its own confirmation bar.
+[touch_eqh, touch_eqh_px, touch_eqh_bar] = f_eqh_touch(eqh_arr, eqh_bar_arr, true)
+[touch_eql, touch_eql_px, touch_eql_bar] = f_eqh_touch(eql_arr, eql_bar_arr, false)
 
 eqh_new = false
 eql_new = false
@@ -969,9 +1059,8 @@ if use_eql and not na(eql_swh_raw)
     if sz > 0
         for i = 0 to sz - 1
             if math.abs(eql_swh_raw - array.get(swh_hist, i)) <= eql_tol
-                eqh_new      := true
-                last_eqh     := eql_swh_raw
-                last_eqh_bar := eql_swh_bar
+                eqh_new := true
+                f_eqh_push(eqh_arr, eqh_bar_arr, eql_swh_raw, eql_swh_bar, eql_tol)
                 break
     if array.size(swh_hist) >= eql_lookback
         array.shift(swh_hist)
@@ -982,13 +1071,13 @@ if use_eql and not na(eql_swl_raw)
     if sz > 0
         for i = 0 to sz - 1
             if math.abs(eql_swl_raw - array.get(swl_hist, i)) <= eql_tol
-                eql_new      := true
-                last_eql     := eql_swl_raw
-                last_eql_bar := eql_swl_bar
+                eql_new := true
+                f_eqh_push(eql_arr, eql_bar_arr, eql_swl_raw, eql_swl_bar, eql_tol)
                 break
     if array.size(swl_hist) >= eql_lookback
         array.shift(swl_hist)
     array.push(swl_hist, eql_swl_raw)
+
 
 // =============================================================
 // STRUCTURE REFERENCE — seed for the break level
@@ -1175,8 +1264,6 @@ var bool lon_h_swept  = false
 var bool lon_l_swept  = false
 var bool ny_h_swept   = false
 var bool ny_l_swept   = false
-var bool eqh_swept    = false
-var bool eql_swept    = false
 
 // Liquidation time + the session it happened in. A level swept THIS session
 // stays visible, frozen at the point it was hit (not extending to "now");
@@ -1201,10 +1288,12 @@ var int ny_h_swept_t = na
 var int ny_h_swept_s = na
 var int ny_l_swept_t = na
 var int ny_l_swept_s = na
-var int eqh_swept_t = na
-var int eqh_swept_s = na
-var int eql_swept_t = na
-var int eql_swept_s = na
+var float eqh_swept_px = na
+var int   eqh_swept_t = na
+var int   eqh_swept_s = na
+var float eql_swept_px = na
+var int   eql_swept_t = na
+var int   eql_swept_s = na
 
 if is_new_day
     pdh_swept := false
@@ -1221,10 +1310,6 @@ if lon_closed
 if ny_sess_closed
     ny_h_swept := false
     ny_l_swept := false
-if eqh_new
-    eqh_swept := false
-if eql_new
-    eql_swept := false
 
 pdh_liq    = not na(pdh) and not pdh_swept and high >= pdh
 pdl_liq    = not na(pdl) and not pdl_swept and low <= pdl
@@ -1236,8 +1321,12 @@ lonh_liq   = not na(lon_h) and not lon_h_swept and high >= lon_h
 lonl_liq   = not na(lon_l) and not lon_l_swept and low <= lon_l
 nyh_liq    = not na(ny_h) and not ny_h_swept and high >= ny_h
 nyl_liq    = not na(ny_l) and not ny_l_swept and low <= ny_l
-eqh_liq    = not na(last_eqh) and not eqh_swept and high >= last_eqh
-eql_liq    = not na(last_eql) and not eql_swept and low <= last_eql
+// Sweep detection is now the touch flags computed earlier, up in the
+// EQUAL HIGHS/LOWS section (touch_eqh/touch_eql) — "was any still-live
+// entry in eqh_arr/eql_arr just crossed this bar", instead of comparing
+// against a single last_eqh/last_eql value.
+eqh_liq    = touch_eqh
+eql_liq    = touch_eql
 
 if pdh_liq
     pdh_swept := true
@@ -1280,11 +1369,11 @@ if nyl_liq
     ny_l_swept_t := time
     ny_l_swept_s := session_id
 if eqh_liq
-    eqh_swept := true
+    eqh_swept_px := touch_eqh_px
     eqh_swept_t := time
     eqh_swept_s := session_id
 if eql_liq
-    eql_swept := true
+    eql_swept_px := touch_eql_px
     eql_swept_t := time
     eql_swept_s := session_id
 
@@ -1438,7 +1527,7 @@ var label ce_lbl = na
 // care about this at all) — it just can't fire a trade on its own.
 f_reinforced_high(float lvl) =>
     not na(lvl) and (
-         (not na(last_eqh) and math.abs(lvl - last_eqh) <= merge_tol) or
+         f_eqh_reinforced(eqh_arr, lvl) or
          f_htf_gap_reinforced(htf_b1h_near_arr, lvl) or
          f_htf_gap_reinforced(htf_b4h_near_arr, lvl) or
          f_htf_gap_reinforced(htf_bd_near_arr,  lvl) or
@@ -1447,7 +1536,7 @@ f_reinforced_high(float lvl) =>
 
 f_reinforced_low(float lvl) =>
     not na(lvl) and (
-         (not na(last_eql) and math.abs(lvl - last_eql) <= merge_tol) or
+         f_eqh_reinforced(eql_arr, lvl) or
          f_htf_gap_reinforced(htf_u1h_near_arr, lvl) or
          f_htf_gap_reinforced(htf_u4h_near_arr, lvl) or
          f_htf_gap_reinforced(htf_ud_near_arr,  lvl) or
@@ -1552,7 +1641,7 @@ if (state == 0 and any_hs) or (state == 2 and hs_imb_gated)
     fvg_top_line := tmp_fvg_l1
     fvg_bot_line := tmp_fvg_l2
     fvg_lbl := tmp_fvg_lb
-    active_sweep_px := hs_pdh ? pdh : hs_pwh ? pwh : hs_asia ? asia_h : hs_lon ? lon_h : hs_ny ? ny_h : hs_eqh ? last_eqh : touch_bear_htf_edge
+    active_sweep_px := hs_pdh ? pdh : hs_pwh ? pwh : hs_asia ? asia_h : hs_lon ? lon_h : hs_ny ? ny_h : hs_eqh ? touch_eqh_px : touch_bear_htf_edge
     // Phase 1: zone liquidated (its own line turns green with a check via
     // f_poi_entry), then show the level price must break through to confirm
     // a bearish structure shift.
@@ -1584,7 +1673,7 @@ if (state == 0 and any_ls) or (state == 1 and ls_imb_gated)
     fvg_top_line := tmp_fvg_l1
     fvg_bot_line := tmp_fvg_l2
     fvg_lbl := tmp_fvg_lb
-    active_sweep_px := ls_pdl ? pdl : ls_pwl ? pwl : ls_asia ? asia_l : ls_lon ? lon_l : ls_ny ? ny_l : ls_eql ? last_eql : touch_bull_htf_edge
+    active_sweep_px := ls_pdl ? pdl : ls_pwl ? pwl : ls_asia ? asia_l : ls_lon ? lon_l : ls_ny ? ny_l : ls_eql ? touch_eql_px : touch_bull_htf_edge
     line.delete(mss_ref_line)
     label.delete(mss_ref_lbl)
     label.delete(mss_ref_org)
@@ -2043,9 +2132,9 @@ if use_sweep_alert and nyh_liq
 if use_sweep_alert and nyl_liq
     alert("POI Liquidado: NY Low @ " + str.tostring(ny_l, "#.#####"), alert.freq_once_per_bar)
 if use_sweep_alert and eqh_liq
-    alert("POI Liquidado: Equal Highs @ " + str.tostring(last_eqh, "#.#####"), alert.freq_once_per_bar)
+    alert("POI Liquidado: Equal Highs @ " + str.tostring(touch_eqh_px, "#.#####"), alert.freq_once_per_bar)
 if use_sweep_alert and eql_liq
-    alert("POI Liquidado: Equal Lows @ " + str.tostring(last_eql, "#.#####"), alert.freq_once_per_bar)
+    alert("POI Liquidado: Equal Lows @ " + str.tostring(touch_eql_px, "#.#####"), alert.freq_once_per_bar)
 
 // =============================================================
 // PROXIMITY ALERTS — hysteresis armed/disarmed per zone:
@@ -2108,8 +2197,10 @@ lonh_cond  = use_near_alert and use_lon_hl and not lon_h_swept and f_near(lon_h)
 lonl_cond  = use_near_alert and use_lon_hl and not lon_l_swept and f_near(lon_l)
 nyh_cond   = use_near_alert and use_ny_hl and not ny_h_swept and f_near(ny_h)
 nyl_cond   = use_near_alert and use_ny_hl and not ny_l_swept and f_near(ny_l)
-eqh_cond   = use_near_alert and use_eql  and not eqh_swept and f_near(last_eqh)
-eql_cond   = use_near_alert and use_eql  and not eql_swept and f_near(last_eql)
+[eqh_nearest_px, eqh_nearest_bar] = f_eqh_nearest(eqh_arr, eqh_bar_arr)
+[eql_nearest_px, eql_nearest_bar] = f_eqh_nearest(eql_arr, eql_bar_arr)
+eqh_cond   = use_near_alert and use_eql  and f_near(eqh_nearest_px)
+eql_cond   = use_near_alert and use_eql  and f_near(eql_nearest_px)
 
 pdh_near_alert   = pdh_armed   and pdh_cond
 pdl_near_alert   = pdl_armed   and pdl_cond
@@ -2169,9 +2260,9 @@ if f_far(ny_h)
     nyh_armed := true
 if f_far(ny_l)
     nyl_armed := true
-if f_far(last_eqh)
+if f_far(eqh_nearest_px)
     eqh_armed   := true
-if f_far(last_eql)
+if f_far(eql_nearest_px)
     eql_armed   := true
 
 if pdh_near_alert
@@ -2195,9 +2286,9 @@ if nyh_near_alert
 if nyl_near_alert
     alert("Price approaching Previous NY Low - " + str.tostring(ny_l, "#.#####"), alert.freq_once_per_bar)
 if eqh_near_alert
-    alert("Price approaching Equal Highs liquidity pool - " + str.tostring(last_eqh, "#.#####"), alert.freq_once_per_bar)
+    alert("Price approaching Equal Highs liquidity pool - " + str.tostring(eqh_nearest_px, "#.#####"), alert.freq_once_per_bar)
 if eql_near_alert
-    alert("Price approaching Equal Lows liquidity pool - " + str.tostring(last_eql, "#.#####"), alert.freq_once_per_bar)
+    alert("Price approaching Equal Lows liquidity pool - " + str.tostring(eql_nearest_px, "#.#####"), alert.freq_once_per_bar)
 
 // =============================================================
 // FVG / IMBALANCE STATE — tracked here (before the POI arrays are
@@ -2562,27 +2653,61 @@ if show_levels or show_fvg_vis
             array.push(poi_end, end_nl)
             array.push(poi_hi, false)
     if show_levels and use_eql
-        [show_eqh, nm_eqh, act_eqh, frz_eqh, end_eqh] = f_poi_entry(last_eqh, eqh_swept, eqh_swept_t, eqh_swept_s, "EQH")
-        if show_eqh
-            array.push(poi_px, last_eqh)
-            array.push(poi_nm, nm_eqh)
-            array.push(poi_cl, act_eqh ? active_col : poi_line_solid)
-            array.push(poi_tx, act_eqh ? active_col : poi_line_solid)
+        // Every still-live (unswept) equal-high/low within visibility
+        // distance shows — no single-slot overwrite, mirrors the HTF FVG
+        // live-entry loop exactly.
+        n_eqh = array.size(eqh_arr)
+        if n_eqh > 0
+            for i = 0 to n_eqh - 1
+                px = array.get(eqh_arr, i)
+                if poi_in_rng(px)
+                    array.push(poi_px, px)
+                    array.push(poi_nm, "EQH")
+                    array.push(poi_cl, poi_line_solid)
+                    array.push(poi_tx, poi_line_solid)
+                    array.push(poi_pr, 40)
+                    array.push(poi_bar, array.get(eqh_bar_arr, i))
+                    array.push(poi_ext, true)
+                    array.push(poi_end, time)
+                    array.push(poi_hi, true)
+        n_eql = array.size(eql_arr)
+        if n_eql > 0
+            for i = 0 to n_eql - 1
+                px = array.get(eql_arr, i)
+                if poi_in_rng(px)
+                    array.push(poi_px, px)
+                    array.push(poi_nm, "EQL")
+                    array.push(poi_cl, poi_line_solid)
+                    array.push(poi_tx, poi_line_solid)
+                    array.push(poi_pr, 41)
+                    array.push(poi_bar, array.get(eql_bar_arr, i))
+                    array.push(poi_ext, true)
+                    array.push(poi_end, time)
+                    array.push(poi_hi, false)
+        // Swept-record: the most recently swept EQH/EQL, frozen for the
+        // rest of this session — same lifecycle every other POI type has,
+        // same pattern already used for the HTF-imbalance swept records.
+        [show_eqh_sw, nm_eqh_sw, act_eqh_sw, frz_eqh_sw, end_eqh_sw] = f_poi_entry(eqh_swept_px, not na(eqh_swept_px), eqh_swept_t, eqh_swept_s, "EQH")
+        if show_eqh_sw
+            array.push(poi_px, eqh_swept_px)
+            array.push(poi_nm, nm_eqh_sw)
+            array.push(poi_cl, act_eqh_sw ? active_col : poi_line_solid)
+            array.push(poi_tx, act_eqh_sw ? active_col : poi_line_solid)
             array.push(poi_pr, 40)
-            array.push(poi_bar, nz(last_eqh_bar, time))
-            array.push(poi_ext, not frz_eqh)
-            array.push(poi_end, end_eqh)
+            array.push(poi_bar, nz(eqh_swept_t, time))
+            array.push(poi_ext, not frz_eqh_sw)
+            array.push(poi_end, end_eqh_sw)
             array.push(poi_hi, true)
-        [show_eql, nm_eql, act_eql, frz_eql, end_eql] = f_poi_entry(last_eql, eql_swept, eql_swept_t, eql_swept_s, "EQL")
-        if show_eql
-            array.push(poi_px, last_eql)
-            array.push(poi_nm, nm_eql)
-            array.push(poi_cl, act_eql ? active_col : poi_line_solid)
-            array.push(poi_tx, act_eql ? active_col : poi_line_solid)
+        [show_eql_sw, nm_eql_sw, act_eql_sw, frz_eql_sw, end_eql_sw] = f_poi_entry(eql_swept_px, not na(eql_swept_px), eql_swept_t, eql_swept_s, "EQL")
+        if show_eql_sw
+            array.push(poi_px, eql_swept_px)
+            array.push(poi_nm, nm_eql_sw)
+            array.push(poi_cl, act_eql_sw ? active_col : poi_line_solid)
+            array.push(poi_tx, act_eql_sw ? active_col : poi_line_solid)
             array.push(poi_pr, 41)
-            array.push(poi_bar, nz(last_eql_bar, time))
-            array.push(poi_ext, not frz_eql)
-            array.push(poi_end, end_eql)
+            array.push(poi_bar, nz(eql_swept_t, time))
+            array.push(poi_ext, not frz_eql_sw)
+            array.push(poi_end, end_eql_sw)
             array.push(poi_hi, false)
 
     // --- HTF FVG imbalance zones (1H..MN), same merge system as POI levels ---
