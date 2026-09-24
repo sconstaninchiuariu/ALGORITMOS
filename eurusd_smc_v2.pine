@@ -577,6 +577,85 @@ var int session_id = 0
 if in_london != in_london[1] or in_ny != in_ny[1]
     session_id += 1
 
+// Swept-HTF-imbalance record: unlike PDH/PDL/session-H-L/EQH/EQL, a touched
+// HTF gap has nothing tracking it once f_htf_gap_touch removes it from its
+// array — it simply vanished from the chart with no trace at all. One slot
+// per timeframe/direction (same shape f_poi_entry expects everywhere else:
+// price, sweep time, sweep session id) captures the most recently touched
+// gap on that pair, so it gets the same "frozen for the rest of this
+// session, then gone" treatment every other swept POI type already has.
+var float htf_b1h_swept_px = na
+var int   htf_b1h_swept_t  = na
+var int   htf_b1h_swept_s  = na
+var float htf_b4h_swept_px = na
+var int   htf_b4h_swept_t  = na
+var int   htf_b4h_swept_s  = na
+var float htf_bd_swept_px  = na
+var int   htf_bd_swept_t   = na
+var int   htf_bd_swept_s   = na
+var float htf_bw_swept_px  = na
+var int   htf_bw_swept_t   = na
+var int   htf_bw_swept_s   = na
+var float htf_bm_swept_px  = na
+var int   htf_bm_swept_t   = na
+var int   htf_bm_swept_s   = na
+var float htf_u1h_swept_px = na
+var int   htf_u1h_swept_t  = na
+var int   htf_u1h_swept_s  = na
+var float htf_u4h_swept_px = na
+var int   htf_u4h_swept_t  = na
+var int   htf_u4h_swept_s  = na
+var float htf_ud_swept_px  = na
+var int   htf_ud_swept_t   = na
+var int   htf_ud_swept_s   = na
+var float htf_uw_swept_px  = na
+var int   htf_uw_swept_t   = na
+var int   htf_uw_swept_s   = na
+var float htf_um_swept_px  = na
+var int   htf_um_swept_t   = na
+var int   htf_um_swept_s   = na
+
+if touch_b1h
+    htf_b1h_swept_px := touch_b1h_edge
+    htf_b1h_swept_t  := time
+    htf_b1h_swept_s  := session_id
+if touch_b4h
+    htf_b4h_swept_px := touch_b4h_edge
+    htf_b4h_swept_t  := time
+    htf_b4h_swept_s  := session_id
+if touch_bd
+    htf_bd_swept_px := touch_bd_edge
+    htf_bd_swept_t  := time
+    htf_bd_swept_s  := session_id
+if touch_bw
+    htf_bw_swept_px := touch_bw_edge
+    htf_bw_swept_t  := time
+    htf_bw_swept_s  := session_id
+if touch_bm
+    htf_bm_swept_px := touch_bm_edge
+    htf_bm_swept_t  := time
+    htf_bm_swept_s  := session_id
+if touch_u1h
+    htf_u1h_swept_px := touch_u1h_edge
+    htf_u1h_swept_t  := time
+    htf_u1h_swept_s  := session_id
+if touch_u4h
+    htf_u4h_swept_px := touch_u4h_edge
+    htf_u4h_swept_t  := time
+    htf_u4h_swept_s  := session_id
+if touch_ud
+    htf_ud_swept_px := touch_ud_edge
+    htf_ud_swept_t  := time
+    htf_ud_swept_s  := session_id
+if touch_uw
+    htf_uw_swept_px := touch_uw_edge
+    htf_uw_swept_t  := time
+    htf_uw_swept_s  := session_id
+if touch_um
+    htf_um_swept_px := touch_um_edge
+    htf_um_swept_t  := time
+    htf_um_swept_s  := session_id
+
 // Running high/low while each kill zone session is in progress, so the
 // session can be drawn as a box (its actual traded range) instead of a
 // flat background strip. Also frozen into lon_h/lon_l and ny_h/ny_l the
@@ -970,6 +1049,61 @@ f_origin_high(int lim) =>
             res   := high[i]
             res_i := i
     [res, na(res_i) ? na : bar_index - res_i]
+
+// ROOT CAUSE — the seed above picks the single DEEPEST wick anywhere in the
+// scan window, not "the last confirmed higher low before the reaction",
+// which is what the ratchet further down actually walks forward from. Those
+// are two different definitions of "origin", and the mismatch is exactly
+// what put the CE at the bottom of an old rally instead of at the obvious
+// recent pullback low right before the reaction that got swept: the ratchet
+// can only adopt a pivot that confirms ON OR AFTER the arm bar (by design —
+// it must never reach back into stale pre-cycle history), so a real,
+// correct pivot that happens to sit just BEFORE the arm bar can never be
+// adopted there. The fix is a seed that uses the SAME definition the
+// ratchet uses — the nearest confirmed swing pivot behind the current bar —
+// so the two agree from the very first bar of the cycle, with the old
+// deepest-wick scan kept only as a fallback for a sharp move with no
+// confirmable pullback at all (so a cycle can never end up with no seed).
+f_seed_pivot_low(int lim) =>
+    float res     = na
+    int   res_bar = na
+    // Guard, not just "the loop skips": Pine's `for a to b` auto-reverses
+    // (counts down) when a > b instead of doing nothing, so this must be
+    // checked explicitly rather than relied on to naturally no-op.
+    if lim >= 2 * ce_piv_len + 1
+        for i = ce_piv_len + 1 to lim - ce_piv_len
+            bool ok = true
+            for k = 1 to ce_piv_len
+                if low[i - k] <= low[i] or low[i + k] <= low[i]
+                    ok := false
+            if ok
+                res     := low[i]
+                res_bar := bar_index - i
+                break
+    if na(res)
+        [res2, res2_bar] = f_origin_low(lim)
+        res     := res2
+        res_bar := res2_bar
+    [res, res_bar]
+
+f_seed_pivot_high(int lim) =>
+    float res     = na
+    int   res_bar = na
+    if lim >= 2 * ce_piv_len + 1
+        for i = ce_piv_len + 1 to lim - ce_piv_len
+            bool ok = true
+            for k = 1 to ce_piv_len
+                if high[i - k] >= high[i] or high[i + k] >= high[i]
+                    ok := false
+            if ok
+                res     := high[i]
+                res_bar := bar_index - i
+                break
+    if na(res)
+        [res2, res2_bar] = f_origin_high(lim)
+        res     := res2
+        res_bar := res2_bar
+    [res, res_bar]
 
 // STRUCTURE for the CE ratchet: the last CONFIRMED swing low / swing high.
 // A bearish CHoCH is price closing below the last HIGHER LOW of the uptrend,
@@ -1384,7 +1518,7 @@ if (state == 0 and any_hs) or (state == 2 and hs_imb_gated)
     // that ran into the sweep. Price closing below it is the break. Falls
     // back to this candle's own low only if none was found. From the next
     // bar on, the ratchet takes over and walks this level up with structure.
-    [org_seed_b, org_seed_b_bar] = f_origin_low(ce_scan_bars)
+    [org_seed_b, org_seed_b_bar] = f_seed_pivot_low(ce_scan_bars)
     mss_ref_bear := na(org_seed_b) ? low : org_seed_b
     mss_ref_bar  := na(org_seed_b_bar) ? bar_index : org_seed_b_bar
     state_bar    := bar_index
@@ -1425,7 +1559,7 @@ if (state == 0 and any_ls) or (state == 1 and ls_imb_gated)
     cyc_sess_ny   := in_ny
     sweep_lo     := low
     // Mirror: the extreme of the decline that ran into the sweep.
-    [org_seed_u, org_seed_u_bar] = f_origin_high(ce_scan_bars)
+    [org_seed_u, org_seed_u_bar] = f_seed_pivot_high(ce_scan_bars)
     mss_ref_bull := na(org_seed_u) ? high : org_seed_u
     mss_ref_bar  := na(org_seed_u_bar) ? bar_index : org_seed_u_bar
     state_bar    := bar_index
@@ -1661,7 +1795,7 @@ if use_fvg_entry and state == 3 and bar_index > mss_bar
             // Back to hunting for the real structure break, reference re-seeded
             // at this bar so it tracks the move from here on.
             state        := 1
-            [org_re_b, org_re_b_bar] = f_origin_low(ce_scan_bars)
+            [org_re_b, org_re_b_bar] = f_seed_pivot_low(ce_scan_bars)
             mss_ref_bear := na(org_re_b) ? low : org_re_b
             mss_ref_bar  := na(org_re_b_bar) ? bar_index : org_re_b_bar
             line.delete(mss_ref_line)
@@ -1701,7 +1835,7 @@ if use_fvg_entry and state == 4 and bar_index > mss_bar
         ce_lbl := na
         if rearm_ok
             state        := 2
-            [org_re_u, org_re_u_bar] = f_origin_high(ce_scan_bars)
+            [org_re_u, org_re_u_bar] = f_seed_pivot_high(ce_scan_bars)
             mss_ref_bull := na(org_re_u) ? high : org_re_u
             mss_ref_bar  := na(org_re_u_bar) ? bar_index : org_re_u_bar
             line.delete(mss_ref_line)
@@ -2341,7 +2475,12 @@ if show_levels or show_fvg_vis
             array.push(poi_hi, false)
     if show_levels and use_asia
         [show_ah, nm_ah, act_ah, frz_ah, end_ah] = f_poi_entry(asia_h, asia_h_swept, asia_h_swept_t, asia_h_swept_s, "Asia H")
-        if show_ah
+        // Session H-L: delete the line the instant it's swept, don't keep
+        // the frozen "ghost" f_poi_entry gives every other POI type — an
+        // already-liquidated session extreme isn't a level worth referencing
+        // anymore. PDH/PDL/PWH/PWL/EQH/EQL are untouched (f_poi_entry itself
+        // isn't changed), only these 6 session-H-L push sites override it.
+        if show_ah and not asia_h_swept
             array.push(poi_px, asia_h)
             array.push(poi_nm, nm_ah)
             array.push(poi_cl, act_ah ? active_col : poi_line_solid)
@@ -2352,7 +2491,7 @@ if show_levels or show_fvg_vis
             array.push(poi_end, end_ah)
             array.push(poi_hi, true)
         [show_al, nm_al, act_al, frz_al, end_al] = f_poi_entry(asia_l, asia_l_swept, asia_l_swept_t, asia_l_swept_s, "Asia L")
-        if show_al
+        if show_al and not asia_l_swept
             array.push(poi_px, asia_l)
             array.push(poi_nm, nm_al)
             array.push(poi_cl, act_al ? active_col : poi_line_solid)
@@ -2364,12 +2503,9 @@ if show_levels or show_fvg_vis
             array.push(poi_hi, false)
     if show_levels and use_lon_hl
         [show_lh, nm_lh, act_lh, frz_lh, end_lh] = f_poi_entry(lon_h, lon_h_swept, lon_h_swept_t, lon_h_swept_s, "London H")
-        // A session high/low with no confluence (no EQH/EQL, no HTF FVG
-        // nearby) is chart noise, not a real level — same standard the
-        // sweep engine already holds it to (f_reinforced_high/low). Once
-        // it's actually been swept this session (frz_lh), it's a real
-        // event worth keeping visible regardless.
-        if show_lh and (frz_lh or f_reinforced_high(lon_h))
+        // Same delete-on-sweep override as Asia above. The reinforcement
+        // check below (f_reinforced_high) still applies while unswept.
+        if show_lh and not lon_h_swept and f_reinforced_high(lon_h)
             array.push(poi_px, lon_h)
             array.push(poi_nm, nm_lh)
             array.push(poi_cl, act_lh ? active_col : poi_line_solid)
@@ -2380,7 +2516,7 @@ if show_levels or show_fvg_vis
             array.push(poi_end, end_lh)
             array.push(poi_hi, true)
         [show_ll, nm_ll, act_ll, frz_ll, end_ll] = f_poi_entry(lon_l, lon_l_swept, lon_l_swept_t, lon_l_swept_s, "London L")
-        if show_ll and (frz_ll or f_reinforced_low(lon_l))
+        if show_ll and not lon_l_swept and f_reinforced_low(lon_l)
             array.push(poi_px, lon_l)
             array.push(poi_nm, nm_ll)
             array.push(poi_cl, act_ll ? active_col : poi_line_solid)
@@ -2392,7 +2528,7 @@ if show_levels or show_fvg_vis
             array.push(poi_hi, false)
     if show_levels and use_ny_hl
         [show_nh, nm_nh, act_nh, frz_nh, end_nh] = f_poi_entry(ny_h, ny_h_swept, ny_h_swept_t, ny_h_swept_s, "NY H")
-        if show_nh and (frz_nh or f_reinforced_high(ny_h))
+        if show_nh and not ny_h_swept and f_reinforced_high(ny_h)
             array.push(poi_px, ny_h)
             array.push(poi_nm, nm_nh)
             array.push(poi_cl, act_nh ? active_col : poi_line_solid)
@@ -2403,7 +2539,7 @@ if show_levels or show_fvg_vis
             array.push(poi_end, end_nh)
             array.push(poi_hi, true)
         [show_nl, nm_nl, act_nl, frz_nl, end_nl] = f_poi_entry(ny_l, ny_l_swept, ny_l_swept_t, ny_l_swept_s, "NY L")
-        if show_nl and (frz_nl or f_reinforced_low(ny_l))
+        if show_nl and not ny_l_swept and f_reinforced_low(ny_l)
             array.push(poi_px, ny_l)
             array.push(poi_nm, nm_nl)
             array.push(poi_cl, act_nl ? active_col : poi_line_solid)
@@ -2469,6 +2605,31 @@ if show_levels or show_fvg_vis
                     array.push(poi_ext, true)
                     array.push(poi_end, time)
                     array.push(poi_hi, false)
+        // Swept-record: the most recently touched 1H gap on each side,
+        // frozen for the rest of this session — same lifecycle every other
+        // POI type already gets, previously missing entirely for HTF gaps.
+        [show_b1h_sw, nm_b1h_sw, act_b1h_sw, frz_b1h_sw, end_b1h_sw] = f_poi_entry(htf_b1h_swept_px, not na(htf_b1h_swept_px), htf_b1h_swept_t, htf_b1h_swept_s, "1H FVG Bear")
+        if show_b1h_sw
+            array.push(poi_px, htf_b1h_swept_px)
+            array.push(poi_nm, nm_b1h_sw)
+            array.push(poi_cl, act_b1h_sw ? active_col : imb_line_faded)
+            array.push(poi_tx, act_b1h_sw ? active_col : imb_text_solid)
+            array.push(poi_pr, 58)
+            array.push(poi_bar, nz(htf_b1h_swept_t, time))
+            array.push(poi_ext, not frz_b1h_sw)
+            array.push(poi_end, end_b1h_sw)
+            array.push(poi_hi, true)
+        [show_u1h_sw, nm_u1h_sw, act_u1h_sw, frz_u1h_sw, end_u1h_sw] = f_poi_entry(htf_u1h_swept_px, not na(htf_u1h_swept_px), htf_u1h_swept_t, htf_u1h_swept_s, "1H FVG Bull")
+        if show_u1h_sw
+            array.push(poi_px, htf_u1h_swept_px)
+            array.push(poi_nm, nm_u1h_sw)
+            array.push(poi_cl, act_u1h_sw ? active_col : imb_line_faded)
+            array.push(poi_tx, act_u1h_sw ? active_col : imb_text_solid)
+            array.push(poi_pr, 59)
+            array.push(poi_bar, nz(htf_u1h_swept_t, time))
+            array.push(poi_ext, not frz_u1h_sw)
+            array.push(poi_end, end_u1h_sw)
+            array.push(poi_hi, false)
     if show_levels and use_htf_4h
         n_b4h = array.size(htf_b4h_near_arr)
         if n_b4h > 0
@@ -2498,6 +2659,28 @@ if show_levels or show_fvg_vis
                     array.push(poi_ext, true)
                     array.push(poi_end, time)
                     array.push(poi_hi, false)
+        [show_b4h_sw, nm_b4h_sw, act_b4h_sw, frz_b4h_sw, end_b4h_sw] = f_poi_entry(htf_b4h_swept_px, not na(htf_b4h_swept_px), htf_b4h_swept_t, htf_b4h_swept_s, "4H FVG Bear")
+        if show_b4h_sw
+            array.push(poi_px, htf_b4h_swept_px)
+            array.push(poi_nm, nm_b4h_sw)
+            array.push(poi_cl, act_b4h_sw ? active_col : imb_line_faded)
+            array.push(poi_tx, act_b4h_sw ? active_col : imb_text_solid)
+            array.push(poi_pr, 56)
+            array.push(poi_bar, nz(htf_b4h_swept_t, time))
+            array.push(poi_ext, not frz_b4h_sw)
+            array.push(poi_end, end_b4h_sw)
+            array.push(poi_hi, true)
+        [show_u4h_sw, nm_u4h_sw, act_u4h_sw, frz_u4h_sw, end_u4h_sw] = f_poi_entry(htf_u4h_swept_px, not na(htf_u4h_swept_px), htf_u4h_swept_t, htf_u4h_swept_s, "4H FVG Bull")
+        if show_u4h_sw
+            array.push(poi_px, htf_u4h_swept_px)
+            array.push(poi_nm, nm_u4h_sw)
+            array.push(poi_cl, act_u4h_sw ? active_col : imb_line_faded)
+            array.push(poi_tx, act_u4h_sw ? active_col : imb_text_solid)
+            array.push(poi_pr, 57)
+            array.push(poi_bar, nz(htf_u4h_swept_t, time))
+            array.push(poi_ext, not frz_u4h_sw)
+            array.push(poi_end, end_u4h_sw)
+            array.push(poi_hi, false)
     if show_levels and use_htf_d
         n_bd = array.size(htf_bd_near_arr)
         if n_bd > 0
@@ -2527,6 +2710,28 @@ if show_levels or show_fvg_vis
                     array.push(poi_ext, true)
                     array.push(poi_end, time)
                     array.push(poi_hi, false)
+        [show_bd_sw, nm_bd_sw, act_bd_sw, frz_bd_sw, end_bd_sw] = f_poi_entry(htf_bd_swept_px, not na(htf_bd_swept_px), htf_bd_swept_t, htf_bd_swept_s, "D FVG Bear")
+        if show_bd_sw
+            array.push(poi_px, htf_bd_swept_px)
+            array.push(poi_nm, nm_bd_sw)
+            array.push(poi_cl, act_bd_sw ? active_col : imb_line_faded)
+            array.push(poi_tx, act_bd_sw ? active_col : imb_text_solid)
+            array.push(poi_pr, 54)
+            array.push(poi_bar, nz(htf_bd_swept_t, time))
+            array.push(poi_ext, not frz_bd_sw)
+            array.push(poi_end, end_bd_sw)
+            array.push(poi_hi, true)
+        [show_ud_sw, nm_ud_sw, act_ud_sw, frz_ud_sw, end_ud_sw] = f_poi_entry(htf_ud_swept_px, not na(htf_ud_swept_px), htf_ud_swept_t, htf_ud_swept_s, "D FVG Bull")
+        if show_ud_sw
+            array.push(poi_px, htf_ud_swept_px)
+            array.push(poi_nm, nm_ud_sw)
+            array.push(poi_cl, act_ud_sw ? active_col : imb_line_faded)
+            array.push(poi_tx, act_ud_sw ? active_col : imb_text_solid)
+            array.push(poi_pr, 55)
+            array.push(poi_bar, nz(htf_ud_swept_t, time))
+            array.push(poi_ext, not frz_ud_sw)
+            array.push(poi_end, end_ud_sw)
+            array.push(poi_hi, false)
     if show_levels and use_htf_w
         n_bw = array.size(htf_bw_near_arr)
         if n_bw > 0
@@ -2556,6 +2761,28 @@ if show_levels or show_fvg_vis
                     array.push(poi_ext, true)
                     array.push(poi_end, time)
                     array.push(poi_hi, false)
+        [show_bw_sw, nm_bw_sw, act_bw_sw, frz_bw_sw, end_bw_sw] = f_poi_entry(htf_bw_swept_px, not na(htf_bw_swept_px), htf_bw_swept_t, htf_bw_swept_s, "W FVG Bear")
+        if show_bw_sw
+            array.push(poi_px, htf_bw_swept_px)
+            array.push(poi_nm, nm_bw_sw)
+            array.push(poi_cl, act_bw_sw ? active_col : imb_line_faded)
+            array.push(poi_tx, act_bw_sw ? active_col : imb_text_solid)
+            array.push(poi_pr, 52)
+            array.push(poi_bar, nz(htf_bw_swept_t, time))
+            array.push(poi_ext, not frz_bw_sw)
+            array.push(poi_end, end_bw_sw)
+            array.push(poi_hi, true)
+        [show_uw_sw, nm_uw_sw, act_uw_sw, frz_uw_sw, end_uw_sw] = f_poi_entry(htf_uw_swept_px, not na(htf_uw_swept_px), htf_uw_swept_t, htf_uw_swept_s, "W FVG Bull")
+        if show_uw_sw
+            array.push(poi_px, htf_uw_swept_px)
+            array.push(poi_nm, nm_uw_sw)
+            array.push(poi_cl, act_uw_sw ? active_col : imb_line_faded)
+            array.push(poi_tx, act_uw_sw ? active_col : imb_text_solid)
+            array.push(poi_pr, 53)
+            array.push(poi_bar, nz(htf_uw_swept_t, time))
+            array.push(poi_ext, not frz_uw_sw)
+            array.push(poi_end, end_uw_sw)
+            array.push(poi_hi, false)
     if show_levels and use_htf_m
         n_bm = array.size(htf_bm_near_arr)
         if n_bm > 0
@@ -2585,6 +2812,28 @@ if show_levels or show_fvg_vis
                     array.push(poi_ext, true)
                     array.push(poi_end, time)
                     array.push(poi_hi, false)
+        [show_bm_sw, nm_bm_sw, act_bm_sw, frz_bm_sw, end_bm_sw] = f_poi_entry(htf_bm_swept_px, not na(htf_bm_swept_px), htf_bm_swept_t, htf_bm_swept_s, "MN FVG Bear")
+        if show_bm_sw
+            array.push(poi_px, htf_bm_swept_px)
+            array.push(poi_nm, nm_bm_sw)
+            array.push(poi_cl, act_bm_sw ? active_col : imb_line_faded)
+            array.push(poi_tx, act_bm_sw ? active_col : imb_text_solid)
+            array.push(poi_pr, 50)
+            array.push(poi_bar, nz(htf_bm_swept_t, time))
+            array.push(poi_ext, not frz_bm_sw)
+            array.push(poi_end, end_bm_sw)
+            array.push(poi_hi, true)
+        [show_um_sw, nm_um_sw, act_um_sw, frz_um_sw, end_um_sw] = f_poi_entry(htf_um_swept_px, not na(htf_um_swept_px), htf_um_swept_t, htf_um_swept_s, "MN FVG Bull")
+        if show_um_sw
+            array.push(poi_px, htf_um_swept_px)
+            array.push(poi_nm, nm_um_sw)
+            array.push(poi_cl, act_um_sw ? active_col : imb_line_faded)
+            array.push(poi_tx, act_um_sw ? active_col : imb_text_solid)
+            array.push(poi_pr, 51)
+            array.push(poi_bar, nz(htf_um_swept_t, time))
+            array.push(poi_ext, not frz_um_sw)
+            array.push(poi_end, end_um_sw)
+            array.push(poi_hi, false)
 
     // --- Generic chart-native imbalances (whatever timeframe the chart is on) ---
     if show_fvg_vis
