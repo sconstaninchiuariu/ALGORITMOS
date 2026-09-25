@@ -150,8 +150,14 @@ imb_line_col    = input.color(color.white, "Imbalance Color", group = GVIS, inli
      tooltip = "One flat color for every imbalance line (HTF and chart-native). The line uses the transparency below; its label text is always fully solid.")
 imb_line_transp = input.int(10, "Transp %", 0, 90, group = GVIS, inline = "imbcol")
 
-vis_dist_pct   = input.float(0.25, "Visibility Distance (% of price)", 0.05, 2.0, 0.01, group = GVIS,
-     tooltip = "A zone shows only while price is within this % of price from it; farther than that, it's hidden. Fixed % of current price, not scaled to recent range.")
+vis_mode     = input.string("Auto (ADR)", "Visibility Mode", options = ["Auto (ADR)", "Manual %"], group = GVIS,
+     tooltip = "Auto: a zone shows only within a % of the average daily range of the last closed days, so quiet markets show fewer lines and fast markets more — no daily tuning. Manual: fixed % of price below.")
+vis_adr_pct  = input.float(50.0, "Auto: % of ADR", 10.0, 300.0, 5.0, group = GVIS, inline = "adr")
+vis_adr_len  = input.int(5, "ADR Days", 1, 30, group = GVIS, inline = "adr")
+vis_max_side = input.int(2, "Max Lines Above / Below Price", 1, 10, group = GVIS,
+     tooltip = "After merging, only this many nearest live lines are drawn above price and the same below. Levels swept this session always show.")
+vis_dist_pct   = input.float(0.25, "Manual: Visibility Distance (% of price)", 0.05, 2.0, 0.01, group = GVIS,
+     tooltip = "Used only in Manual mode: a zone shows only while price is within this % of price from it.")
 merge_tol   = input.float(0.0005, "Zone Merge Tolerance", 0.00010, 0.005, 0.00010, group = GVIS,
      tooltip = "Zones within this price distance of each other collapse into one line, names joined with \"+\".")
 
@@ -161,9 +167,12 @@ near_alert_pct       = input.float(0.20, "Create Alert at Distance (% of price) 
 near_alert_reset_pct = input.float(1.00, "Remove Alert Beyond Distance (% of price)", 0.10, 5.0, 0.10, group = GALR)
 use_sweep_alert      = input.bool(true, "Alert the instant a POI zone is liquidated (price crosses it)", group = GALR)
 
-// Flat % of current price — a zone farther than this from price is hidden.
+// Visibility distance. Auto: % of the average range of the last closed D
+// candles ([1] + lookahead_on = closed days only, identical on every chart
+// TF). Manual: flat % of current price.
+vis_adr      = request.security(syminfo.tickerid, "D", ta.sma(high - low, vis_adr_len)[1], lookahead = barmerge.lookahead_on)
 vis_pct_eff  = syminfo.type == "futures" ? vis_dist_pct * 2.0 : vis_dist_pct
-max_poi_dist = close * vis_pct_eff / 100.0
+max_poi_dist = vis_mode == "Auto (ADR)" and not na(vis_adr) ? vis_adr * vis_adr_pct / 100.0 : close * vis_pct_eff / 100.0
 
 near_pct_eff       = syminfo.type == "futures" ? near_alert_pct * 2.0 : near_alert_pct
 near_dist          = close * near_pct_eff / 100.0
@@ -362,30 +371,65 @@ f_src_step(bool hi, bool ag_done, int ag_t, int ag_cct, float ag_h, float ag_l, 
         fed += f_feed(ag_t, ag_cct, ag_h, ag_l, hb, lb, tb, bn, bf, bo, bc, un, uf, uo, uc)
     fed
 
+// Stacked gaps: several same-TF, same-direction gaps from one leg (ranges
+// touching within merge_tol, or formed within leg_ms of each other) are one
+// stack, and only its OUTERMOST gap — the last one price would liquidate —
+// is a POI. True when no other gap in the array is farther from price than
+// gap i and linked to it.
+f_gap_is_outer(array<float> near_arr, array<float> far_arr, array<int> org_arr, int i, bool is_supply, int leg_ms) =>
+    e = array.get(near_arr, i)
+    f = array.get(far_arr, i)
+    o = array.get(org_arr, i)
+    bool outer = true
+    int  n = array.size(near_arr)
+    for j = 0 to n - 1
+        if j != i
+            ej = array.get(near_arr, j)
+            if is_supply ? ej > e : ej < e
+                linked = (is_supply ? ej <= f + merge_tol : ej >= f - merge_tol) or math.abs(array.get(org_arr, j) - o) <= leg_ms
+                if linked
+                    outer := false
+                    break
+    outer
+
 // Removes every gap price has now reached (after the gap existed), at the
-// common 15m clock. Returns whether any was hit this bar, the (last) hit
-// edge, its 15m crossing time and its origin time.
-f_gap_cross(array<float> near_arr, array<float> far_arr, array<int> org_arr, array<int> cre_arr, bool is_supply) =>
+// common 15m clock. Inner gaps of a stack are removed silently; only an
+// outermost gap counts as a hit (swept record + sweep arming). Returns the
+// farthest such hit's edge, 15m crossing time and origin time.
+f_gap_cross(array<float> near_arr, array<float> far_arr, array<int> org_arr, array<int> cre_arr, bool is_supply, int leg_ms) =>
     bool  hit  = false
     float edge = na
     int   xt   = na
     int   xo   = na
     int   n = array.size(near_arr)
     if n > 0
-        for j = 0 to n - 1
-            i = n - 1 - j
+        hits = array.new_int(0)
+        tms  = array.new_int(0)
+        for i = 0 to n - 1
             e = array.get(near_arr, i)
             if is_supply ? high >= e : low <= e
                 t_hit = f_cross_t(e, is_supply, array.get(cre_arr, i))
                 if not na(t_hit)
-                    hit  := true
-                    edge := e
-                    xt   := t_hit
-                    xo   := array.get(org_arr, i)
-                    array.remove(near_arr, i)
-                    array.remove(far_arr, i)
-                    array.remove(org_arr, i)
-                    array.remove(cre_arr, i)
+                    array.push(hits, i)
+                    array.push(tms, t_hit)
+        nh = array.size(hits)
+        if nh > 0
+            for k = 0 to nh - 1
+                i = array.get(hits, k)
+                e = array.get(near_arr, i)
+                if f_gap_is_outer(near_arr, far_arr, org_arr, i, is_supply, leg_ms)
+                    if not hit or (is_supply ? e > edge : e < edge)
+                        hit  := true
+                        edge := e
+                        xt   := array.get(tms, k)
+                        xo   := array.get(org_arr, i)
+            // hits are ascending, so removing from the back keeps indices valid
+            for k = 0 to nh - 1
+                i = array.get(hits, nh - 1 - k)
+                array.remove(near_arr, i)
+                array.remove(far_arr, i)
+                array.remove(org_arr, i)
+                array.remove(cre_arr, i)
     [hit, edge, xt, xo]
 
 // Nearest-to-price active entry — used only for the single-line proximity
@@ -491,16 +535,16 @@ fed_D   = f_src_step(hi_D,   aD_done,   aD_t,   aD_ct,   aD_h,   aD_l,   ltD,   
 fed_W   = f_src_step(hi_W,   aW_done,   aW_t,   aW_ct,   aW_h,   aW_l,   ltW,   lcW,   lhW,   llW,   hbW,   lbW,   tbW,   htf_bw_near_arr,  htf_bw_far_arr,  htf_bw_org_arr,  htf_bw_cre_arr,  htf_uw_near_arr,  htf_uw_far_arr,  htf_uw_org_arr,  htf_uw_cre_arr)
 fed_M   = f_src_step(false,  aM_done,   aM_t,   aM_ct,   aM_h,   aM_l,   ltW,   lcW,   lhW,   llW,   hbM,   lbM,   tbM,   htf_bm_near_arr,  htf_bm_far_arr,  htf_bm_org_arr,  htf_bm_cre_arr,  htf_um_near_arr,  htf_um_far_arr,  htf_um_org_arr,  htf_um_cre_arr)
 
-[touch_b1h, touch_b1h_edge, xt_b1h, xo_b1h] = f_gap_cross(htf_b1h_near_arr, htf_b1h_far_arr, htf_b1h_org_arr, htf_b1h_cre_arr, true)
-[touch_b4h, touch_b4h_edge, xt_b4h, xo_b4h] = f_gap_cross(htf_b4h_near_arr, htf_b4h_far_arr, htf_b4h_org_arr, htf_b4h_cre_arr, true)
-[touch_bd,  touch_bd_edge,  xt_bd,  xo_bd]  = f_gap_cross(htf_bd_near_arr,  htf_bd_far_arr,  htf_bd_org_arr,  htf_bd_cre_arr,  true)
-[touch_bw,  touch_bw_edge,  xt_bw,  xo_bw]  = f_gap_cross(htf_bw_near_arr,  htf_bw_far_arr,  htf_bw_org_arr,  htf_bw_cre_arr,  true)
-[touch_bm,  touch_bm_edge,  xt_bm,  xo_bm]  = f_gap_cross(htf_bm_near_arr,  htf_bm_far_arr,  htf_bm_org_arr,  htf_bm_cre_arr,  true)
-[touch_u1h, touch_u1h_edge, xt_u1h, xo_u1h] = f_gap_cross(htf_u1h_near_arr, htf_u1h_far_arr, htf_u1h_org_arr, htf_u1h_cre_arr, false)
-[touch_u4h, touch_u4h_edge, xt_u4h, xo_u4h] = f_gap_cross(htf_u4h_near_arr, htf_u4h_far_arr, htf_u4h_org_arr, htf_u4h_cre_arr, false)
-[touch_ud,  touch_ud_edge,  xt_ud,  xo_ud]  = f_gap_cross(htf_ud_near_arr,  htf_ud_far_arr,  htf_ud_org_arr,  htf_ud_cre_arr,  false)
-[touch_uw,  touch_uw_edge,  xt_uw,  xo_uw]  = f_gap_cross(htf_uw_near_arr,  htf_uw_far_arr,  htf_uw_org_arr,  htf_uw_cre_arr,  false)
-[touch_um,  touch_um_edge,  xt_um,  xo_um]  = f_gap_cross(htf_um_near_arr,  htf_um_far_arr,  htf_um_org_arr,  htf_um_cre_arr,  false)
+[touch_b1h, touch_b1h_edge, xt_b1h, xo_b1h] = f_gap_cross(htf_b1h_near_arr, htf_b1h_far_arr, htf_b1h_org_arr, htf_b1h_cre_arr, true, 3 * 3600000)
+[touch_b4h, touch_b4h_edge, xt_b4h, xo_b4h] = f_gap_cross(htf_b4h_near_arr, htf_b4h_far_arr, htf_b4h_org_arr, htf_b4h_cre_arr, true, 3 * 14400000)
+[touch_bd,  touch_bd_edge,  xt_bd,  xo_bd]  = f_gap_cross(htf_bd_near_arr,  htf_bd_far_arr,  htf_bd_org_arr,  htf_bd_cre_arr,  true, 4 * 86400000)
+[touch_bw,  touch_bw_edge,  xt_bw,  xo_bw]  = f_gap_cross(htf_bw_near_arr,  htf_bw_far_arr,  htf_bw_org_arr,  htf_bw_cre_arr,  true, 3 * 604800000)
+[touch_bm,  touch_bm_edge,  xt_bm,  xo_bm]  = f_gap_cross(htf_bm_near_arr,  htf_bm_far_arr,  htf_bm_org_arr,  htf_bm_cre_arr,  true, 3 * 2678400000)
+[touch_u1h, touch_u1h_edge, xt_u1h, xo_u1h] = f_gap_cross(htf_u1h_near_arr, htf_u1h_far_arr, htf_u1h_org_arr, htf_u1h_cre_arr, false, 3 * 3600000)
+[touch_u4h, touch_u4h_edge, xt_u4h, xo_u4h] = f_gap_cross(htf_u4h_near_arr, htf_u4h_far_arr, htf_u4h_org_arr, htf_u4h_cre_arr, false, 3 * 14400000)
+[touch_ud,  touch_ud_edge,  xt_ud,  xo_ud]  = f_gap_cross(htf_ud_near_arr,  htf_ud_far_arr,  htf_ud_org_arr,  htf_ud_cre_arr,  false, 4 * 86400000)
+[touch_uw,  touch_uw_edge,  xt_uw,  xo_uw]  = f_gap_cross(htf_uw_near_arr,  htf_uw_far_arr,  htf_uw_org_arr,  htf_uw_cre_arr,  false, 3 * 604800000)
+[touch_um,  touch_um_edge,  xt_um,  xo_um]  = f_gap_cross(htf_um_near_arr,  htf_um_far_arr,  htf_um_org_arr,  htf_um_cre_arr,  false, 3 * 2678400000)
 
 // Swept record per timeframe/direction: the most recently mitigated gap,
 // kept frozen (origin -> crossing time) until the session it was mitigated
@@ -1594,7 +1638,7 @@ if bear_mss
         line.set_x2(mss_ref_line, bar_index)
         line.set_extend(mss_ref_line, extend.none)
     label.delete(ce_lbl)
-    ce_lbl := label.new(bar_index, high, "CE", style = label.style_label_down, color = color.orange, textcolor = color.black, size = size.small)
+    ce_lbl := label.new(bar_index, high, "CE", style = label.style_label_down, color = color.orange, textcolor = color.black, size = size.tiny)
 
 if bull_mss
     mss_bar      := bar_index
@@ -1605,7 +1649,7 @@ if bull_mss
         line.set_x2(mss_ref_line, bar_index)
         line.set_extend(mss_ref_line, extend.none)
     label.delete(ce_lbl)
-    ce_lbl := label.new(bar_index, low, "CE", style = label.style_label_up, color = color.orange, textcolor = color.black, size = size.small)
+    ce_lbl := label.new(bar_index, low, "CE", style = label.style_label_up, color = color.orange, textcolor = color.black, size = size.tiny)
 
 // ROOT CAUSE #3 + "closest imbalance" rule. The old code checked
 // mss_bear_ok[1] — exactly one bar after the structure break — and gave up
@@ -1810,8 +1854,8 @@ qty_l       = f_qty(sl_dist_l)
 long_valid  = long_signal and sl_dist_l >= min_sl and sl_dist_l <= max_sl and qty_l > 0
 
 if short_valid
-    strategy.entry("Short", strategy.short, qty = qty_s, comment = "Liq Short")
-    strategy.exit("SX", from_entry = "Short", stop = sl_price_s, limit = tp_price_s)
+    strategy.entry("Short", strategy.short, qty = qty_s, comment = "S")
+    strategy.exit("SX", from_entry = "Short", stop = sl_price_s, limit = tp_price_s, comment_profit = "TP", comment_loss = "SL")
     trades_today += 1
     cnt_entry    += 1
     if in_london
@@ -1829,8 +1873,8 @@ if short_valid
     fvg_lbl := tmp_fvg_lb
 
 if long_valid
-    strategy.entry("Long", strategy.long, qty = qty_l, comment = "Liq Long")
-    strategy.exit("LX", from_entry = "Long", stop = sl_price_l, limit = tp_price_l)
+    strategy.entry("Long", strategy.long, qty = qty_l, comment = "L")
+    strategy.exit("LX", from_entry = "Long", stop = sl_price_l, limit = tp_price_l, comment_profit = "TP", comment_loss = "SL")
     trades_today += 1
     cnt_entry    += 1
     if in_london
@@ -1855,9 +1899,12 @@ if long_valid
 // history doesn't accumulate forever.
 // =============================================================
 
+// No border: a box's left/right edges are vertical lines (and on a session's
+// first bar left == right, so the border was a vertical line through the
+// candle). Fill only.
 f_session_box(bool in_session, bool prev_in_session, float sess_h, float sess_l, color line_col, color fill_col, string txt, box[] arr) =>
     if in_session and not prev_in_session
-        nb = box.new(bar_index, sess_h, bar_index, sess_l, border_color = line_col, bgcolor = fill_col, border_style = line.style_dotted, text = txt, text_color = line_col, text_size = size.small, text_halign = text.align_center, text_valign = text.align_top)
+        nb = box.new(bar_index, sess_h, bar_index, sess_l, border_color = na, border_width = 0, bgcolor = fill_col, text = txt, text_color = line_col, text_size = size.small, text_halign = text.align_center, text_valign = text.align_top)
         array.push(arr, nb)
         if array.size(arr) > sess_box_max
             box.delete(array.shift(arr))
@@ -2124,9 +2171,9 @@ if n_mlb > 0
 array.clear(managed_poi_labels)
 
 // A swept level that triggered the CURRENT active sweep->MSS->entry cycle
-// turns green with a "✓" instead of just disappearing, and stays visible
+// turns green instead of just disappearing, and stays visible
 // regardless of distance (it's part of the active setup, not just a
-// passive structural level) until the cycle resets to state 0 — the ✓ and
+// passive structural level) until the cycle resets to state 0 — the
 // green color are the only things that track the active cycle now.
 //
 // Any swept level FREEZES THE INSTANT IT'S HIT, active cycle or not: the line
@@ -2139,7 +2186,7 @@ f_poi_entry(float lvl, bool swept, int sw_t, int sw_s, string nm) =>
     is_active = swept and lvl == active_sweep_px and state != 0
     same_sess = swept and not na(sw_s) and sw_s == cur_sess_key
     show      = (poi_in_rng(lvl) and not swept) or same_sess
-    nm2       = is_active ? nm + " ✓" : nm
+    nm2       = nm
     end_t     = same_sess and not na(sw_t) ? sw_t : time
     [show, nm2, is_active, same_sess, end_t]
 
@@ -2278,7 +2325,7 @@ if show_levels
         if n_b1h > 0
             for i = 0 to n_b1h - 1
                 px = array.get(htf_b1h_near_arr, i)
-                if f_imb_in_rng(px)
+                if f_imb_in_rng(px) and f_gap_is_outer(htf_b1h_near_arr, htf_b1h_far_arr, htf_b1h_org_arr, i, true, 3 * 3600000)
                     array.push(poi_px, px)
                     array.push(poi_nm, "1H FVG Bear")
                     array.push(poi_cl, imb_line_faded)
@@ -2292,7 +2339,7 @@ if show_levels
         if n_u1h > 0
             for i = 0 to n_u1h - 1
                 px = array.get(htf_u1h_near_arr, i)
-                if f_imb_in_rng(px)
+                if f_imb_in_rng(px) and f_gap_is_outer(htf_u1h_near_arr, htf_u1h_far_arr, htf_u1h_org_arr, i, false, 3 * 3600000)
                     array.push(poi_px, px)
                     array.push(poi_nm, "1H FVG Bull")
                     array.push(poi_cl, imb_line_faded)
@@ -2332,7 +2379,7 @@ if show_levels
         if n_b4h > 0
             for i = 0 to n_b4h - 1
                 px = array.get(htf_b4h_near_arr, i)
-                if f_imb_in_rng(px)
+                if f_imb_in_rng(px) and f_gap_is_outer(htf_b4h_near_arr, htf_b4h_far_arr, htf_b4h_org_arr, i, true, 3 * 14400000)
                     array.push(poi_px, px)
                     array.push(poi_nm, "4H FVG Bear")
                     array.push(poi_cl, imb_line_faded)
@@ -2346,7 +2393,7 @@ if show_levels
         if n_u4h > 0
             for i = 0 to n_u4h - 1
                 px = array.get(htf_u4h_near_arr, i)
-                if f_imb_in_rng(px)
+                if f_imb_in_rng(px) and f_gap_is_outer(htf_u4h_near_arr, htf_u4h_far_arr, htf_u4h_org_arr, i, false, 3 * 14400000)
                     array.push(poi_px, px)
                     array.push(poi_nm, "4H FVG Bull")
                     array.push(poi_cl, imb_line_faded)
@@ -2383,7 +2430,7 @@ if show_levels
         if n_bd > 0
             for i = 0 to n_bd - 1
                 px = array.get(htf_bd_near_arr, i)
-                if f_imb_in_rng(px)
+                if f_imb_in_rng(px) and f_gap_is_outer(htf_bd_near_arr, htf_bd_far_arr, htf_bd_org_arr, i, true, 4 * 86400000)
                     array.push(poi_px, px)
                     array.push(poi_nm, "D FVG Bear")
                     array.push(poi_cl, imb_line_faded)
@@ -2397,7 +2444,7 @@ if show_levels
         if n_ud > 0
             for i = 0 to n_ud - 1
                 px = array.get(htf_ud_near_arr, i)
-                if f_imb_in_rng(px)
+                if f_imb_in_rng(px) and f_gap_is_outer(htf_ud_near_arr, htf_ud_far_arr, htf_ud_org_arr, i, false, 4 * 86400000)
                     array.push(poi_px, px)
                     array.push(poi_nm, "D FVG Bull")
                     array.push(poi_cl, imb_line_faded)
@@ -2434,7 +2481,7 @@ if show_levels
         if n_bw > 0
             for i = 0 to n_bw - 1
                 px = array.get(htf_bw_near_arr, i)
-                if f_imb_in_rng(px)
+                if f_imb_in_rng(px) and f_gap_is_outer(htf_bw_near_arr, htf_bw_far_arr, htf_bw_org_arr, i, true, 3 * 604800000)
                     array.push(poi_px, px)
                     array.push(poi_nm, "W FVG Bear")
                     array.push(poi_cl, imb_line_faded)
@@ -2448,7 +2495,7 @@ if show_levels
         if n_uw > 0
             for i = 0 to n_uw - 1
                 px = array.get(htf_uw_near_arr, i)
-                if f_imb_in_rng(px)
+                if f_imb_in_rng(px) and f_gap_is_outer(htf_uw_near_arr, htf_uw_far_arr, htf_uw_org_arr, i, false, 3 * 604800000)
                     array.push(poi_px, px)
                     array.push(poi_nm, "W FVG Bull")
                     array.push(poi_cl, imb_line_faded)
@@ -2485,7 +2532,7 @@ if show_levels
         if n_bm > 0
             for i = 0 to n_bm - 1
                 px = array.get(htf_bm_near_arr, i)
-                if f_imb_in_rng(px)
+                if f_imb_in_rng(px) and f_gap_is_outer(htf_bm_near_arr, htf_bm_far_arr, htf_bm_org_arr, i, true, 3 * 2678400000)
                     array.push(poi_px, px)
                     array.push(poi_nm, "MN FVG Bear")
                     array.push(poi_cl, imb_line_faded)
@@ -2499,7 +2546,7 @@ if show_levels
         if n_um > 0
             for i = 0 to n_um - 1
                 px = array.get(htf_um_near_arr, i)
-                if f_imb_in_rng(px)
+                if f_imb_in_rng(px) and f_gap_is_outer(htf_um_near_arr, htf_um_far_arr, htf_um_org_arr, i, false, 3 * 2678400000)
                     array.push(poi_px, px)
                     array.push(poi_nm, "MN FVG Bull")
                     array.push(poi_cl, imb_line_faded)
@@ -2537,6 +2584,16 @@ if show_levels
     if n_poi > 0
         sorted_idx = array.sort_indices(poi_px, order.ascending)
         used_flags = array.new_bool(n_poi, false)
+        // merged groups, drawn after the per-side cap below
+        gr_px  = array.new_float(0)
+        gr_nm  = array.new_string(0)
+        gr_cl  = array.new_color(0)
+        gr_tx  = array.new_color(0)
+        gr_bar = array.new_int(0)
+        gr_ext = array.new_bool(0)
+        gr_end = array.new_int(0)
+        gr_hi  = array.new_bool(0)
+        gr_d   = array.new_float(0)
 
         for ii = 0 to n_poi - 1
             si = array.get(sorted_idx, ii)
@@ -2551,33 +2608,30 @@ if show_levels
             g_ext = array.get(poi_ext, si)
             g_end = array.get(poi_end, si)
             g_hi  = array.get(poi_hi, si)
-            // OR'd across every merged member, independent of display
-            // priority: a merged line must only render frozen when EVERY
-            // component it represents is actually swept/frozen. Without
-            // this, a still-live imbalance merging with an unrelated frozen
-            // structural POI (within merge_tol) inherited that POI's freeze
-            // state just because the POI happened to win display priority —
-            // rendering a genuinely unmitigated zone as if it were dead.
-            any_ext = g_ext
+            base_px = g_px
             array.set(used_flags, si, true)
 
+            // Only members in the SAME state merge: live with live, swept
+            // (frozen) with swept. A swept PDH next to a live D FVG used to
+            // become one extending line that ran through price; now each
+            // keeps its own line. The line sits at the winning (highest
+            // priority) member's own price.
             jj = ii + 1
             while jj <= n_poi - 1
                 sj  = array.get(sorted_idx, jj)
                 pj  = array.get(poi_px, sj)
-                if pj - g_px > merge_tol
+                if pj - base_px > merge_tol
                     break
-                if not array.get(used_flags, sj)
+                if not array.get(used_flags, sj) and array.get(poi_ext, sj) == g_ext
                     prj = array.get(poi_pr, sj)
                     nmj = array.get(poi_nm, sj)
-                    any_ext := any_ext or array.get(poi_ext, sj)
                     if prj < g_pr
                         g_nm  := nmj + " + " + g_nm
+                        g_px  := pj
                         g_cl  := array.get(poi_cl, sj)
                         g_tx  := array.get(poi_tx, sj)
                         g_pr  := prj
                         g_bar := array.get(poi_bar, sj)
-                        g_ext := array.get(poi_ext, sj)
                         g_end := array.get(poi_end, sj)
                         g_hi  := array.get(poi_hi, sj)
                     else
@@ -2585,23 +2639,50 @@ if show_levels
                     array.set(used_flags, sj, true)
                 jj := jj + 1
 
-            g_ext := any_ext
-            if any_ext
+            if g_ext
                 g_end := time
+            array.push(gr_px, g_px)
+            array.push(gr_nm, g_nm)
+            array.push(gr_cl, g_cl)
+            array.push(gr_tx, g_tx)
+            array.push(gr_bar, g_bar)
+            array.push(gr_ext, g_ext)
+            array.push(gr_end, g_end)
+            array.push(gr_hi, g_hi)
+            array.push(gr_d, math.abs(g_px - close))
 
-            // xloc=xloc.bar_time (not bar_index): an unmitigated imbalance
-            // can sit unresolved for tens of thousands of bars, and Pine's
-            // bar-index x1 has a hard "too far from current bar" limit that
-            // crashes the script once history gets long enough. Time-based
-            // coordinates have no such limit.
-            // g_ext=false (a POI swept this session) freezes the line at
-            // g_end (the liquidation time) instead of extending to "now".
-            // g_hi (max/high zone): label.style_label_down places text ABOVE
-            // the line. Low/min zone: label.style_label_up places it BELOW.
-            new_l  = line.new(g_bar, g_px, g_end, g_px, xloc = xloc.bar_time, extend = g_ext ? extend.right : extend.none, color = g_cl, style = line.style_solid, width = 1)
-            new_lb = label.new(g_end, g_px, g_nm, xloc = xloc.bar_time, style = g_hi ? label.style_label_down : label.style_label_up, color = color.new(color.black, 100), textcolor = g_tx, size = size.small)
-            array.push(managed_poi_lines,  new_l)
-            array.push(managed_poi_labels, new_lb)
+        // Per-side cap: only the vis_max_side nearest LIVE lines above
+        // price and below price are drawn. Frozen (swept this session)
+        // lines always draw and don't count.
+        n_gr = array.size(gr_px)
+        if n_gr > 0
+            by_dist = array.sort_indices(gr_d, order.ascending)
+            int n_up = 0
+            int n_dn = 0
+            for k = 0 to n_gr - 1
+                gi    = array.get(by_dist, k)
+                d_px  = array.get(gr_px, gi)
+                d_ext = array.get(gr_ext, gi)
+                bool draw = true
+                if d_ext
+                    if d_px >= close
+                        n_up += 1
+                        draw := n_up <= vis_max_side
+                    else
+                        n_dn += 1
+                        draw := n_dn <= vis_max_side
+                if draw
+                    // xloc.bar_time: bar-index x1 has a "too far from current
+                    // bar" limit on long-lived zones. Never a vertical line:
+                    // x1 is clamped to <= now and x2 is always > x1, and every
+                    // line is horizontal (y1 == y2).
+                    x1 = math.min(array.get(gr_bar, gi), time)
+                    x2 = math.max(array.get(gr_end, gi), x1 + 1)
+                    d_hi = array.get(gr_hi, gi)
+                    new_l  = line.new(x1, d_px, x2, d_px, xloc = xloc.bar_time, extend = d_ext ? extend.right : extend.none, color = array.get(gr_cl, gi), style = line.style_solid, width = 1)
+                    new_lb = label.new(x2, d_px, array.get(gr_nm, gi), xloc = xloc.bar_time, style = d_hi ? label.style_label_down : label.style_label_up, color = color.new(color.black, 100), textcolor = array.get(gr_tx, gi), size = size.small)
+                    array.push(managed_poi_lines,  new_l)
+                    array.push(managed_poi_labels, new_lb)
 
 // Sweep markers — the bar this evaluates on IS the candle that crossed the
 // level, so no offset is needed any more.
@@ -2617,8 +2698,8 @@ plotshape(show_sweep and any_ls, title = "Sweep LOW",  style = shape.triangleup,
 // Gated by short_valid/long_valid (not the raw signal) so the marker can
 // never appear on a bar where the order was actually rejected by the SL/qty
 // checks — what you see on the chart is exactly what's in the Strategy Tester.
-plotshape(short_valid, title = "Short Entry", style = shape.labeldown, location = location.abovebar, color = color.red,  textcolor = color.white, text = "SHORT", size = size.small)
-plotshape(long_valid,  title = "Long Entry",  style = shape.labelup,   location = location.belowbar, color = color.teal, textcolor = color.white, text = "LONG",  size = size.small)
+plotshape(short_valid, title = "Short Entry", style = shape.arrowdown, location = location.abovebar, color = color.red,  size = size.tiny)
+plotshape(long_valid,  title = "Long Entry",  style = shape.arrowup,   location = location.belowbar, color = color.teal, size = size.tiny)
 
 // Default mode: if the break happened inside session hours, short_valid/
 // long_valid already fired and reset state to 0 above — this only ever
