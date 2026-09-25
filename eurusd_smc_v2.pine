@@ -86,9 +86,6 @@ sess_box_max = input.int(3, "Max Boxes per Session (oldest dropped)", 2, 30, gro
 var string GLIQ = "Liquidity Levels (HTF POIs)"
 use_pdhl  = input.bool(true,    "PDH / PDL (Previous Day)",  group = GLIQ)
 use_pwhl  = input.bool(true,    "PWH / PWL (Previous Week)", group = GLIQ)
-use_asia  = input.bool(true,    "Asia Range H/L",            group = GLIQ, tooltip = "The Asian range is a real liquidity pool (the whole session builds a tight range that London runs), unlike a London/NY session extreme — which is why those two are off by default and this one is not.")
-use_lon_hl = input.bool(false,  "Previous London Session H/L", group = GLIQ, tooltip = "The high/low of the PREVIOUS completed London session, treated as a liquidity pool the same way PDH/PDL and Asia H/L are — session extremes attract equal-highs/equal-lows behaviour just like any other range. Off by default: a session extreme is not inherently meaningful liquidity the way PDH/PDL is, and shows up too often to be useful even with the EQH/EQL/HTF-imbalance reinforcement requirement.")
-use_ny_hl  = input.bool(false,  "Previous New York Session H/L", group = GLIQ)
 sw_len    = input.int(10,       "Swing Lookback (MSS ref)",  2, 50, group = GLIQ)
 sweep_buf = input.float(0.0002, "Sweep Buffer", 0.00005, 0.001, 0.00001, group = GLIQ)
 
@@ -103,8 +100,6 @@ fvg_min_gap   = input.float(0.0002, "Min FVG Gap",  0.00005, 0.002, 0.00001, gro
 fvg_max_bars  = input.int(30,       "FVG Max Age (bars to wait for the retest before cancelling)",  5, 300, group = GFVG, tooltip = "How long a locked entry zone stays valid waiting for price to come back and retest it. On 1m this is minutes. 60 was letting setups fire an hour after the structure break.")
 fvg_search_bars = input.int(8,      "Bars after MSS to find entry FVG", 1, 50, group = GFVG, tooltip = "The reaction-leg window. Imbalances are only picked up during this many bars after the structure break; the closest/newest one within it wins, and the zone is then LOCKED so it can't drift up the impulse.")
 req_close_fvg = input.bool(true,    "Entry candle must CLOSE inside FVG", group = GFVG)
-fvg_tf_min    = input.int(1,   "Show Chart Imbalances: Min Timeframe (minutes)", 1, 1440, group = GFVG)
-fvg_tf_max    = input.int(1440, "Show Chart Imbalances: Max Timeframe (minutes)", 1, 1440, group = GFVG, tooltip = "Default 1440 = a full day's worth of minutes, so an imbalance from any intraday timeframe up to daily still qualifies. Lower this to hide imbalances from higher timeframes.")
 
 var string GHTF = "HTF Context Filter"
 use_htf     = input.bool(false, "Require HTF FVG alignment (at least one active TF) — heavy filter", group = GHTF)
@@ -144,7 +139,6 @@ eql_lookback = input.int(5,        "History depth (# pivots)", 2, 20,   group = 
 var string GVIS = "Visuals"
 
 show_levels  = input.bool(true, "POI Lines",   group = GVIS, inline = "show1")
-show_fvg_vis = input.bool(false, "Chart-TF Imbalances",  group = GVIS, inline = "show1", tooltip = "Extra imbalances found in the CURRENT CHART's own candles, on top of the always-on 1H/4H/D/W/M zones above (those come from request.security so they're identical at every chart timeframe). These are chart-native — an imbalance visible while looking at a 4H chart will not appear when you switch to 1m, since it's a gap in 4H candles that don't exist on the 1m series. Off by default so the default view stays the same at every timeframe; turn on if you specifically want to see the chart's own current-timeframe gaps too.")
 show_sweep   = input.bool(true, "Sweep Marks", group = GVIS, inline = "show2")
 show_checklist = input.bool(true, "Setup Checklist", group = GVIS, inline = "show2")
 show_info_tbl  = input.bool(false, "Info Table",  group = GVIS, inline = "show3")
@@ -183,29 +177,7 @@ near_reset_dist    = close * near_reset_pct_eff / 100.0
 // distance, applied identically to both.
 imb_dist = max_poi_dist
 
-// Formats a timeframe.period string ("1","5","60","240","D","W","M") into a
-// short human label ("1m","5m","1H","4H","D","W","MN") for imbalance labels.
-f_tf_label(string tf) =>
-    string lbl = tf
-    if tf == "D"
-        lbl := "D"
-    else if tf == "W"
-        lbl := "W"
-    else if tf == "M"
-        lbl := "MN"
-    else
-        mins = str.tonumber(tf)
-        if not na(mins)
-            lbl := mins >= 60 and mins % 60 == 0 ? str.tostring(mins / 60) + "H" : str.tostring(mins) + "m"
-    lbl
 
-chart_tf_lbl = f_tf_label(timeframe.period)
-
-// Lets the user restrict generic chart-native imbalances to a chosen
-// timeframe range (e.g. only 1m-5m, skip 15m) instead of an all-or-nothing
-// toggle tied to whatever the chart happens to be showing.
-chart_tf_minutes = timeframe.in_seconds(timeframe.period) / 60.0
-fvg_tf_ok         = chart_tf_minutes >= fvg_tf_min and chart_tf_minutes <= fvg_tf_max
 
 // NOTE ON VIEWPORT-BASED HIDING (removed, again): chart.left_visible_bar_time
 // is the only way Pine can know the actual visible range, but referencing it
@@ -218,193 +190,206 @@ fvg_tf_ok         = chart_tf_minutes >= fvg_tf_min and chart_tf_minutes <= fvg_t
 // HTF BIAS  (no-repainting)
 // =============================================================
 
-// ROOT CAUSE — offsets (high[3], high[1], ...) used to live INSIDE the
-// request.security() tuple below. That's the one Pine construct whose
-// result depends on the relationship between the CHART's own timeframe and
-// the REQUESTED timeframe: safe as a many-to-one downsample (any TF request
-// on a much lower chart TF), but not guaranteed identical once the chart's
-// own timeframe reaches or exceeds the requested one — exactly the
-// "1H chart vs 1m chart show different imbalances" symptom, and exactly why
-// only the 1H leg was singled out (4H/D/W/M stayed in the safe many-to-one
-// regime on both a 1H and a 1m chart).
-//
-// Fixed by never putting an offset inside the security tuple at all: fetch
-// only the single latest (possibly still-forming) bar's time/high/low, then
-// do all historical bookkeeping ourselves, in the calling script's own
-// context, where a plain `[1]` is unambiguous regardless of chart
-// timeframe. A genuinely new HTF bar is detected by its OPEN TIME changing
-// — never coincidentally equal between two different real candles, unlike
-// the previous "did the high change value" check (h1_h0 != h1_h0[1]) below,
-// which could silently and permanently miss a real gap on any HTF candle
-// that happened to repeat the prior one's exact high (a double top, or a
-// flat candle). On each new-bar event, h60[1]/l60[1] (the reading from just
-// before the time changed) is the finalized high/low of the candle that
-// just closed; a 3-deep rolling buffer per timeframe reproduces exactly the
-// "candle 3 back" / "candle 1 back" values the rest of the file already
-// depends on (h1_h2/h1_l2/h1_h0/h1_l0 etc.) — same names, same roles, so
-// nothing downstream (htf_bear_1h/htf_bull_1h, the f_htf_gap_push calls)
-// needs to change.
-[t60, h60, l60]     = request.security(syminfo.tickerid, "60",  [time, high, low], lookahead = barmerge.lookahead_off)
-[t240, h240, l240]  = request.security(syminfo.tickerid, "240", [time, high, low], lookahead = barmerge.lookahead_off)
-[tD, hD, lD]         = request.security(syminfo.tickerid, "D",   [time, high, low], lookahead = barmerge.lookahead_off)
-[tW, hW, lW]         = request.security(syminfo.tickerid, "W",   [time, high, low], lookahead = barmerge.lookahead_off)
-[tM, hM, lM]         = request.security(syminfo.tickerid, "M",   [time, high, low], lookahead = barmerge.lookahead_off)
+// =============================================================
+// FIXED-TIMEFRAME CANDLE FEED
+// =============================================================
+// Every POI source (1H/4H/D/W/M imbalances, PDH/PDL, PWH/PWL) is built from
+// its OWN timeframe's candles, never from the chart's bars, so the zones are
+// identical whatever timeframe the chart is on. Two paths, picked by
+// comparing the chart timeframe with the source's:
+//  - chart TF <= source TF: the chart's bars are aggregated into source
+//    candles on the source period boundary (time(tf) changes). Chart bars
+//    nest exactly inside source candles, so the result is the real candle,
+//    delivered at the instant it closes, on every timeframe.
+//  - chart TF  > source TF: one chart bar holds several source candles;
+//    request.security_lower_tf returns ALL of them and they are fed in
+//    order. Plain request.security returns only the LAST one per chart bar,
+//    which is what used to build "1H gaps" on a 4H chart out of candles
+//    4 hours apart (real gaps missed, fake ones invented).
+chart_sec = timeframe.in_seconds(timeframe.period)
+hi_60  = chart_sec > 3600
+hi_240 = chart_sec > 14400
+hi_D   = chart_sec > 86400
+hi_W   = chart_sec > 604800
+hi_15  = chart_sec > 900
 
-new_close_1h = t60  != t60[1]
-new_close_4h = t240 != t240[1]
-new_close_d  = tD   != tD[1]
-new_close_w  = tW   != tW[1]
-new_close_m  = tM   != tM[1]
+[lt60,  lc60,  lh60,  ll60]  = request.security_lower_tf(syminfo.tickerid, hi_60  ? "60"  : timeframe.period, [time, time_close, high, low])
+[lt240, lc240, lh240, ll240] = request.security_lower_tf(syminfo.tickerid, hi_240 ? "240" : timeframe.period, [time, time_close, high, low])
+[ltD,   lcD,   lhD,   llD]   = request.security_lower_tf(syminfo.tickerid, hi_D   ? "D"   : timeframe.period, [time, time_close, high, low])
+[ltW,   lcW,   lhW,   llW]   = request.security_lower_tf(syminfo.tickerid, hi_W   ? "W"   : timeframe.period, [time, time_close, high, low])
 
-var float h1_hA = na
-var float h1_lA = na
-var float h1_hB = na
-var float h1_lB = na
-var float h1_hC = na
-var float h1_lC = na
-var float h2_hA = na
-var float h2_lA = na
-var float h2_hB = na
-var float h2_lB = na
-var float h2_hC = na
-var float h2_lC = na
-var float h3_hA = na
-var float h3_lA = na
-var float h3_hB = na
-var float h3_lB = na
-var float h3_hC = na
-var float h3_lC = na
-var float hw_hA = na
-var float hw_lA = na
-var float hw_hB = na
-var float hw_lB = na
-var float hw_hC = na
-var float hw_lC = na
-var float hm_hA = na
-var float hm_lA = na
-var float hm_hB = na
-var float hm_lB = na
-var float hm_hC = na
-var float hm_lC = na
+// One common clock for every sweep / mitigation time: 15-minute resolution
+// on every chart timeframe. On charts of 15m or less the chart bar itself is
+// used (its time floored to the 15-minute slot); above that, the 15m
+// intrabars of the chart bar. A level crossed at 10:37 is stamped 10:30 on
+// 1m, 1H, 4H and D alike, so its session (and how long its frozen line
+// stays) is the same everywhere.
+[x15_t, x15_h, x15_l] = request.security_lower_tf(syminfo.tickerid, hi_15 ? "15" : timeframe.period, [time, high, low])
 
-if new_close_1h
-    h1_hC := h1_hB
-    h1_lC := h1_lB
-    h1_hB := h1_hA
-    h1_lB := h1_lA
-    h1_hA := h60[1]
-    h1_lA := l60[1]
-if new_close_4h
-    h2_hC := h2_hB
-    h2_lC := h2_lB
-    h2_hB := h2_hA
-    h2_lB := h2_lA
-    h2_hA := h240[1]
-    h2_lA := l240[1]
-if new_close_d
-    h3_hC := h3_hB
-    h3_lC := h3_lB
-    h3_hB := h3_hA
-    h3_lB := h3_lA
-    h3_hA := hD[1]
-    h3_lA := lD[1]
-if new_close_w
-    hw_hC := hw_hB
-    hw_lC := hw_lB
-    hw_hB := hw_hA
-    hw_lB := hw_lA
-    hw_hA := hW[1]
-    hw_lA := lW[1]
-if new_close_m
-    hm_hC := hm_hB
-    hm_lC := hm_lB
-    hm_hB := hm_hA
-    hm_lB := hm_lA
-    hm_hA := hM[1]
-    hm_lA := lM[1]
+// First 15m-resolution time, at or after `since`, at which price reached
+// level e (from below for is_high, from above otherwise). na if not this bar.
+f_cross_t(float e, bool is_high, int since) =>
+    int res = na
+    if not na(e) and not na(since)
+        if not hi_15
+            if time >= since and (is_high ? high >= e : low <= e)
+                res := time - time % 900000
+        else
+            n = array.size(x15_t)
+            if n > 0
+                for i = 0 to n - 1
+                    ti = array.get(x15_t, i)
+                    if ti >= since and (is_high ? array.get(x15_h, i) >= e : array.get(x15_l, i) <= e)
+                        res := ti
+                        break
+    res
 
-h1_h0 = h1_hA
-h1_l0 = h1_lA
-h1_h2 = h1_hC
-h1_l2 = h1_lC
-h2_h0 = h2_hA
-h2_l0 = h2_lA
-h2_h2 = h2_hC
-h2_l2 = h2_lC
-h3_h0 = h3_hA
-h3_l0 = h3_lA
-h3_h2 = h3_hC
-h3_l2 = h3_lC
-hw_h0 = hw_hA
-hw_l0 = hw_lA
-hw_h2 = hw_hC
-hw_l2 = hw_lC
-hm_h0 = hm_hA
-hm_l0 = hm_lA
-hm_h2 = hm_hC
-hm_l2 = hm_lC
+// Session key from a timestamp (FX day stamp * 10 + bucket), used for the
+// "frozen until the end of the session it was swept in" rule. Buckets: 1 Asia,
+// 2 gap, 3 London, 4 gap, 5 New York, 6 after NY. Purely clock-based, so the
+// same sweep maps to the same session on every chart timeframe.
+f_sess_key(int t) =>
+    int res = na
+    if not na(t)
+        hh   = hour(t, "UTC+2")
+        mins = hh * 60 + minute(t, "UTC+2")
+        d    = year(t, "UTC+2") * 10000 + month(t, "UTC+2") * 100 + dayofmonth(t, "UTC+2")
+        asia = kz_asia_open <= kz_asia_close ? (hh >= kz_asia_open and hh < kz_asia_close) : (hh >= kz_asia_open or hh < kz_asia_close)
+        b = asia ? 1 : mins < kz_lon_open * 60 ? 2 : mins < kz_lon_close * 60 ? 3 : mins < kz_ny_open * 60 ? 4 : mins < kz_ny_close_h * 60 + kz_ny_close_m ? 5 : 6
+        res := d * 10 + b
+    res
 
-htf_bear_1h = h1_l2 > h1_h0 and (h1_l2 - h1_h0) >= htf_fvg_min
-htf_bear_4h = h2_l2 > h2_h0 and (h2_l2 - h2_h0) >= htf_fvg_min
-htf_bear_d  = h3_l2 > h3_h0 and (h3_l2 - h3_h0) >= htf_fvg_min
-htf_bear_w  = hw_l2 > hw_h0 and (hw_l2 - hw_h0) >= htf_fvg_min
-htf_bear_m  = hm_l2 > hm_h0 and (hm_l2 - hm_h0) >= htf_fvg_min
+// Current session key: the live clock on the realtime bar, the end of the
+// last bar otherwise (the last bar's OPEN would differ between a 1m and a 4H
+// chart; its end doesn't).
+cur_sess_key = f_sess_key(barstate.isrealtime ? timenow : barstate.islast ? math.min(timenow, time_close) - 1 : time)
 
-htf_bull_1h = h1_h2 < h1_l0 and (h1_l0 - h1_h2) >= htf_fvg_min
-htf_bull_4h = h2_h2 < h2_l0 and (h2_l0 - h2_h2) >= htf_fvg_min
-htf_bull_d  = h3_h2 < h3_l0 and (h3_l0 - h3_h2) >= htf_fvg_min
-htf_bull_w  = hw_h2 < hw_l0 and (hw_l0 - hw_h2) >= htf_fvg_min
-htf_bull_m  = hm_h2 < hm_l0 and (hm_l0 - hm_h2) >= htf_fvg_min
+// Aggregates chart bars into candles of the period p = time(tf). Returns the
+// just-completed candle (open time, high, low) and the new period's start
+// (= that candle's close) on the first bar of a new period. The very first,
+// partially loaded period is never emitted.
+f_agg_step(int p, array<float> agg, array<int> aggt) =>
+    bool  done = false
+    int   ct   = na
+    int   cct  = na
+    float ch   = na
+    float cl   = na
+    if not na(p)
+        if array.size(aggt) == 0
+            array.push(aggt, p)
+            array.push(aggt, 0)
+            array.push(agg, high)
+            array.push(agg, low)
+        else if p != array.get(aggt, 0)
+            if array.get(aggt, 1) == 1
+                done := true
+                ct   := array.get(aggt, 0)
+                cct  := p
+                ch   := array.get(agg, 0)
+                cl   := array.get(agg, 1)
+            array.set(aggt, 0, p)
+            array.set(aggt, 1, 1)
+            array.set(agg, 0, high)
+            array.set(agg, 1, low)
+        else
+            array.set(agg, 0, math.max(array.get(agg, 0), high))
+            array.set(agg, 1, math.min(array.get(agg, 1), low))
+    [done, ct, cct, ch, cl]
 
-// MULTI-GAP FIX. The previous version tracked exactly ONE unmitigated gap
-// per timeframe/direction, sticky to whichever formed first, and only
-// adopted a new one once that single tracked slot had been filled. That
-// hid/ignored any OTHER unmitigated gap on the same TF sitting closer to
-// price — exactly the "imbalance not detected" complaint: an old, far-away,
-// still-open 1H gap kept the slot occupied while a fresh, actionable one
-// right next to price was silently never tracked at all.
-//
-// Fix: every timeframe/direction keeps an unbounded list (array) of every
-// unmitigated gap. A gap enters the list the moment a genuinely new HTF
-// candle closes with a qualifying gap, and leaves it the instant price
-// trades back into its near edge (mitigated == the "manipulation" event).
-// Any entry in the list counts for reinforcement/detection; display is
-// filtered separately by distance from price (0.25% default), not by how
-// many gaps exist.
-f_htf_gap_push(bool new_close, bool gap_now, float near_now, float far_now, array<float> near_arr, array<float> far_arr, array<int> org_arr, int cap) =>
-    if new_close and gap_now
-        array.push(near_arr, near_now)
-        array.push(far_arr, far_now)
-        array.push(org_arr, time)
-        if array.size(near_arr) > cap
-            array.shift(near_arr)
-            array.shift(far_arr)
-            array.shift(org_arr)
-    array.size(near_arr)
+// ROOT CAUSE for the cap — it used to be 50 and evicted the OLDEST gap by
+// raw count, so still-open 1H/4H gaps next to price vanished after a few
+// weeks. Plain floats/ints; a large cap costs nothing until drawn.
+htf_gap_cap = 2000
 
-// Removes every entry price has traded back into THIS bar (mitigated) and
-// reports whether that happened, plus the (last) touched edge — the
-// manipulation event that arms the state machine like any other POI.
-f_htf_gap_touch(array<float> near_arr, array<float> far_arr, array<int> org_arr, bool is_supply) =>
-    bool  touched = false
-    float touched_edge = na
+// Pushes one closed source candle into its 3-candle rolling buffer and
+// records a fair value gap when the 3 candles form one: bear when candle 1's
+// low is above candle 3's high, bull the mirror. Near edge = the edge price
+// returns to first (candle 3's high for bear, its low for bull). org = the
+// middle (impulse) candle's open time — the line's start, identical on every
+// chart TF. cre = when the gap came into existence (candle 3's close); only
+// price AFTER that can mitigate it. Candles already fed are skipped.
+f_feed(int t, int cre_t, float h, float l, array<float> hb, array<float> lb, array<int> tb, array<float> bn, array<float> bf, array<int> bo, array<int> bc, array<float> un, array<float> uf, array<int> uo, array<int> uc) =>
+    int fed = 0
+    if not na(t) and not na(h) and (array.size(tb) == 0 or t > array.get(tb, 0))
+        fed := 1
+        array.unshift(hb, h)
+        array.unshift(lb, l)
+        array.unshift(tb, t)
+        if array.size(hb) > 3
+            array.pop(hb)
+            array.pop(lb)
+            array.pop(tb)
+        if array.size(hb) == 3
+            hA  = array.get(hb, 0)
+            lA  = array.get(lb, 0)
+            hC  = array.get(hb, 2)
+            lC  = array.get(lb, 2)
+            tBm = array.get(tb, 1)
+            if lC > hA and (lC - hA) >= htf_fvg_min
+                array.push(bn, hA)
+                array.push(bf, lC)
+                array.push(bo, tBm)
+                array.push(bc, cre_t)
+                if array.size(bn) > htf_gap_cap
+                    array.shift(bn)
+                    array.shift(bf)
+                    array.shift(bo)
+                    array.shift(bc)
+            if hC < lA and (lA - hC) >= htf_fvg_min
+                array.push(un, lA)
+                array.push(uf, hC)
+                array.push(uo, tBm)
+                array.push(uc, cre_t)
+                if array.size(un) > htf_gap_cap
+                    array.shift(un)
+                    array.shift(uf)
+                    array.shift(uo)
+                    array.shift(uc)
+    fed
+
+// One source, one chart bar: feed whatever source candles closed on it.
+// Lower-tf path: only candles that have closed (the last intrabar of the
+// realtime chart bar may still be forming; it is fed when the bar confirms).
+f_src_step(bool hi, bool ag_done, int ag_t, int ag_cct, float ag_h, float ag_l, array<int> lt, array<int> lc, array<float> lh, array<float> ll, array<float> hb, array<float> lb, array<int> tb, array<float> bn, array<float> bf, array<int> bo, array<int> bc, array<float> un, array<float> uf, array<int> uo, array<int> uc) =>
+    int fed = 0
+    if hi
+        n = array.size(lt)
+        if n > 0
+            for i = 0 to n - 1
+                if i < n - 1 or barstate.isconfirmed
+                    fed += f_feed(array.get(lt, i), array.get(lc, i), array.get(lh, i), array.get(ll, i), hb, lb, tb, bn, bf, bo, bc, un, uf, uo, uc)
+    else if ag_done
+        fed += f_feed(ag_t, ag_cct, ag_h, ag_l, hb, lb, tb, bn, bf, bo, bc, un, uf, uo, uc)
+    fed
+
+// Removes every gap price has now reached (after the gap existed), at the
+// common 15m clock. Returns whether any was hit this bar, the (last) hit
+// edge, its 15m crossing time and its origin time.
+f_gap_cross(array<float> near_arr, array<float> far_arr, array<int> org_arr, array<int> cre_arr, bool is_supply) =>
+    bool  hit  = false
+    float edge = na
+    int   xt   = na
+    int   xo   = na
     int   n = array.size(near_arr)
     if n > 0
         for j = 0 to n - 1
             i = n - 1 - j
             e = array.get(near_arr, i)
-            hit = is_supply ? high >= e : low <= e
-            if hit
-                touched := true
-                touched_edge := e
-                array.remove(near_arr, i)
-                array.remove(far_arr, i)
-                array.remove(org_arr, i)
-    [touched, touched_edge]
+            if is_supply ? high >= e : low <= e
+                t_hit = f_cross_t(e, is_supply, array.get(cre_arr, i))
+                if not na(t_hit)
+                    hit  := true
+                    edge := e
+                    xt   := t_hit
+                    xo   := array.get(org_arr, i)
+                    array.remove(near_arr, i)
+                    array.remove(far_arr, i)
+                    array.remove(org_arr, i)
+                    array.remove(cre_arr, i)
+    [hit, edge, xt, xo]
 
 // Nearest-to-price active entry — used only for the single-line proximity
-// alert and its price label, not for detection/reinforcement/display (those
-// use every entry, see above/below).
+// alert and its price label.
 f_htf_gap_nearest(array<float> near_arr, array<float> far_arr, array<int> org_arr) =>
     float best     = na
     float best_far = na
@@ -421,91 +406,195 @@ f_htf_gap_nearest(array<float> near_arr, array<float> far_arr, array<int> org_ar
         best_org := array.get(org_arr, best_i)
     [best, best_far, best_org]
 
-// Any active (unmitigated) entry within merge_tol of lvl — used by
-// f_reinforced_high/low below.
-f_htf_gap_reinforced(array<float> near_arr, float lvl) =>
-    bool found = false
-    int  n = array.size(near_arr)
-    if n > 0
-        for i = 0 to n - 1
-            if math.abs(lvl - array.get(near_arr, i)) <= merge_tol
-                found := true
-    found
+// Candle buffers (last 3 closed candles, newest first) + aggregation state.
+var float[] hb60  = array.new_float(0)
+var float[] lb60  = array.new_float(0)
+var int[]   tb60  = array.new_int(0)
+var float[] hb240 = array.new_float(0)
+var float[] lb240 = array.new_float(0)
+var int[]   tb240 = array.new_int(0)
+var float[] hbD   = array.new_float(0)
+var float[] lbD   = array.new_float(0)
+var int[]   tbD   = array.new_int(0)
+var float[] hbW   = array.new_float(0)
+var float[] lbW   = array.new_float(0)
+var int[]   tbW   = array.new_int(0)
+var float[] hbM   = array.new_float(0)
+var float[] lbM   = array.new_float(0)
+var int[]   tbM   = array.new_int(0)
+var float[] ag60  = array.new_float(0)
+var int[]   agt60 = array.new_int(0)
+var float[] ag240  = array.new_float(0)
+var int[]   agt240 = array.new_int(0)
+var float[] agD   = array.new_float(0)
+var int[]   agtD  = array.new_int(0)
+var float[] agW   = array.new_float(0)
+var int[]   agtW  = array.new_int(0)
+var float[] agM   = array.new_float(0)
+var int[]   agtM  = array.new_int(0)
 
-// ROOT CAUSE — this used to be 50. A cap that low evicts by raw COUNT, not
-// by mitigation or price relevance: on 1H (thousands of candle closes over
-// just a few months) it took only weeks to cycle through 50 entries and
-// silently discard anything older, even a still-unmitigated gap sitting
-// right next to current price — the visibility rule everywhere else in this
-// file is purely price-distance (f_imb_in_rng), with no time cutoff by
-// design, so this was the one place quietly reintroducing one. Raised to a
-// bound generous enough that realistic gap-formation rates on any of the 5
-// timeframes won't hit it within a normal multi-year chart history — these
-// are plain floats/ints, not drawn objects, so a much larger array costs
-// nothing until something in it is actually close enough to price to render.
-htf_gap_cap = 2000
-
+// Gap lists per timeframe/direction: near edge, far edge, origin time,
+// creation time.
 var float[] htf_b1h_near_arr = array.new_float(0)
 var float[] htf_b1h_far_arr  = array.new_float(0)
 var int[]   htf_b1h_org_arr  = array.new_int(0)
+var int[]   htf_b1h_cre_arr  = array.new_int(0)
 var float[] htf_b4h_near_arr = array.new_float(0)
 var float[] htf_b4h_far_arr  = array.new_float(0)
 var int[]   htf_b4h_org_arr  = array.new_int(0)
+var int[]   htf_b4h_cre_arr  = array.new_int(0)
 var float[] htf_bd_near_arr  = array.new_float(0)
 var float[] htf_bd_far_arr   = array.new_float(0)
 var int[]   htf_bd_org_arr   = array.new_int(0)
+var int[]   htf_bd_cre_arr   = array.new_int(0)
 var float[] htf_bw_near_arr  = array.new_float(0)
 var float[] htf_bw_far_arr   = array.new_float(0)
 var int[]   htf_bw_org_arr   = array.new_int(0)
+var int[]   htf_bw_cre_arr   = array.new_int(0)
 var float[] htf_bm_near_arr  = array.new_float(0)
 var float[] htf_bm_far_arr   = array.new_float(0)
 var int[]   htf_bm_org_arr   = array.new_int(0)
+var int[]   htf_bm_cre_arr   = array.new_int(0)
 
 var float[] htf_u1h_near_arr = array.new_float(0)
 var float[] htf_u1h_far_arr  = array.new_float(0)
 var int[]   htf_u1h_org_arr  = array.new_int(0)
+var int[]   htf_u1h_cre_arr  = array.new_int(0)
 var float[] htf_u4h_near_arr = array.new_float(0)
 var float[] htf_u4h_far_arr  = array.new_float(0)
 var int[]   htf_u4h_org_arr  = array.new_int(0)
+var int[]   htf_u4h_cre_arr  = array.new_int(0)
 var float[] htf_ud_near_arr  = array.new_float(0)
 var float[] htf_ud_far_arr   = array.new_float(0)
 var int[]   htf_ud_org_arr   = array.new_int(0)
+var int[]   htf_ud_cre_arr   = array.new_int(0)
 var float[] htf_uw_near_arr  = array.new_float(0)
 var float[] htf_uw_far_arr   = array.new_float(0)
 var int[]   htf_uw_org_arr   = array.new_int(0)
+var int[]   htf_uw_cre_arr   = array.new_int(0)
 var float[] htf_um_near_arr  = array.new_float(0)
 var float[] htf_um_far_arr   = array.new_float(0)
 var int[]   htf_um_org_arr   = array.new_int(0)
+var int[]   htf_um_cre_arr   = array.new_int(0)
 
-// Touch-check runs BEFORE the push below, not after: a brand new gap must
-// never be checked against the very same bar's high/low that helped form
-// it. That ordering bug was silently self-mitigating most fresh gaps the
-// instant they appeared — the near edge is almost always the just-closed
-// HTF candle's own extreme, which the current low-TF bar is frequently
-// still sitting right at (especially mid-trend, exactly when a real gap is
-// most likely to matter) — so gaps kept vanishing before ever being visible
-// or usable. Existing entries are unaffected either way.
-[touch_b1h, touch_b1h_edge] = f_htf_gap_touch(htf_b1h_near_arr, htf_b1h_far_arr, htf_b1h_org_arr, true)
-f_htf_gap_push(new_close_1h, htf_bear_1h, h1_h0, h1_l2, htf_b1h_near_arr, htf_b1h_far_arr, htf_b1h_org_arr, htf_gap_cap)
-[touch_b4h, touch_b4h_edge] = f_htf_gap_touch(htf_b4h_near_arr, htf_b4h_far_arr, htf_b4h_org_arr, true)
-f_htf_gap_push(new_close_4h, htf_bear_4h, h2_h0, h2_l2, htf_b4h_near_arr, htf_b4h_far_arr, htf_b4h_org_arr, htf_gap_cap)
-[touch_bd, touch_bd_edge] = f_htf_gap_touch(htf_bd_near_arr, htf_bd_far_arr, htf_bd_org_arr, true)
-f_htf_gap_push(new_close_d, htf_bear_d, h3_h0, h3_l2, htf_bd_near_arr, htf_bd_far_arr, htf_bd_org_arr, htf_gap_cap)
-[touch_bw, touch_bw_edge] = f_htf_gap_touch(htf_bw_near_arr, htf_bw_far_arr, htf_bw_org_arr, true)
-f_htf_gap_push(new_close_w, htf_bear_w, hw_h0, hw_l2, htf_bw_near_arr, htf_bw_far_arr, htf_bw_org_arr, htf_gap_cap)
-[touch_bm, touch_bm_edge] = f_htf_gap_touch(htf_bm_near_arr, htf_bm_far_arr, htf_bm_org_arr, true)
-f_htf_gap_push(new_close_m, htf_bear_m, hm_h0, hm_l2, htf_bm_near_arr, htf_bm_far_arr, htf_bm_org_arr, htf_gap_cap)
+[a60_done,  a60_t,  a60_ct,  a60_h,  a60_l]  = f_agg_step(time("60"),  ag60,  agt60)
+[a240_done, a240_t, a240_ct, a240_h, a240_l] = f_agg_step(time("240"), ag240, agt240)
+[aD_done,   aD_t,   aD_ct,   aD_h,   aD_l]   = f_agg_step(time("D"),   agD,   agtD)
+[aW_done,   aW_t,   aW_ct,   aW_h,   aW_l]   = f_agg_step(time("W"),   agW,   agtW)
+[aM_done,   aM_t,   aM_ct,   aM_h,   aM_l]   = f_agg_step(time("M"),   agM,   agtM)
 
-[touch_u1h, touch_u1h_edge] = f_htf_gap_touch(htf_u1h_near_arr, htf_u1h_far_arr, htf_u1h_org_arr, false)
-f_htf_gap_push(new_close_1h, htf_bull_1h, h1_l0, h1_h2, htf_u1h_near_arr, htf_u1h_far_arr, htf_u1h_org_arr, htf_gap_cap)
-[touch_u4h, touch_u4h_edge] = f_htf_gap_touch(htf_u4h_near_arr, htf_u4h_far_arr, htf_u4h_org_arr, false)
-f_htf_gap_push(new_close_4h, htf_bull_4h, h2_l0, h2_h2, htf_u4h_near_arr, htf_u4h_far_arr, htf_u4h_org_arr, htf_gap_cap)
-[touch_ud, touch_ud_edge] = f_htf_gap_touch(htf_ud_near_arr, htf_ud_far_arr, htf_ud_org_arr, false)
-f_htf_gap_push(new_close_d, htf_bull_d, h3_l0, h3_h2, htf_ud_near_arr, htf_ud_far_arr, htf_ud_org_arr, htf_gap_cap)
-[touch_uw, touch_uw_edge] = f_htf_gap_touch(htf_uw_near_arr, htf_uw_far_arr, htf_uw_org_arr, false)
-f_htf_gap_push(new_close_w, htf_bull_w, hw_l0, hw_h2, htf_uw_near_arr, htf_uw_far_arr, htf_uw_org_arr, htf_gap_cap)
-[touch_um, touch_um_edge] = f_htf_gap_touch(htf_um_near_arr, htf_um_far_arr, htf_um_org_arr, false)
-f_htf_gap_push(new_close_m, htf_bull_m, hm_l0, hm_h2, htf_um_near_arr, htf_um_far_arr, htf_um_org_arr, htf_gap_cap)
+// Feed first, then mitigation: a gap created on this bar can only be
+// mitigated by price after its creation time (f_cross_t's `since`).
+fed_60  = f_src_step(hi_60,  a60_done,  a60_t,  a60_ct,  a60_h,  a60_l,  lt60,  lc60,  lh60,  ll60,  hb60,  lb60,  tb60,  htf_b1h_near_arr, htf_b1h_far_arr, htf_b1h_org_arr, htf_b1h_cre_arr, htf_u1h_near_arr, htf_u1h_far_arr, htf_u1h_org_arr, htf_u1h_cre_arr)
+fed_240 = f_src_step(hi_240, a240_done, a240_t, a240_ct, a240_h, a240_l, lt240, lc240, lh240, ll240, hb240, lb240, tb240, htf_b4h_near_arr, htf_b4h_far_arr, htf_b4h_org_arr, htf_b4h_cre_arr, htf_u4h_near_arr, htf_u4h_far_arr, htf_u4h_org_arr, htf_u4h_cre_arr)
+fed_D   = f_src_step(hi_D,   aD_done,   aD_t,   aD_ct,   aD_h,   aD_l,   ltD,   lcD,   lhD,   llD,   hbD,   lbD,   tbD,   htf_bd_near_arr,  htf_bd_far_arr,  htf_bd_org_arr,  htf_bd_cre_arr,  htf_ud_near_arr,  htf_ud_far_arr,  htf_ud_org_arr,  htf_ud_cre_arr)
+fed_W   = f_src_step(hi_W,   aW_done,   aW_t,   aW_ct,   aW_h,   aW_l,   ltW,   lcW,   lhW,   llW,   hbW,   lbW,   tbW,   htf_bw_near_arr,  htf_bw_far_arr,  htf_bw_org_arr,  htf_bw_cre_arr,  htf_uw_near_arr,  htf_uw_far_arr,  htf_uw_org_arr,  htf_uw_cre_arr)
+fed_M   = f_src_step(false,  aM_done,   aM_t,   aM_ct,   aM_h,   aM_l,   ltW,   lcW,   lhW,   llW,   hbM,   lbM,   tbM,   htf_bm_near_arr,  htf_bm_far_arr,  htf_bm_org_arr,  htf_bm_cre_arr,  htf_um_near_arr,  htf_um_far_arr,  htf_um_org_arr,  htf_um_cre_arr)
+
+[touch_b1h, touch_b1h_edge, xt_b1h, xo_b1h] = f_gap_cross(htf_b1h_near_arr, htf_b1h_far_arr, htf_b1h_org_arr, htf_b1h_cre_arr, true)
+[touch_b4h, touch_b4h_edge, xt_b4h, xo_b4h] = f_gap_cross(htf_b4h_near_arr, htf_b4h_far_arr, htf_b4h_org_arr, htf_b4h_cre_arr, true)
+[touch_bd,  touch_bd_edge,  xt_bd,  xo_bd]  = f_gap_cross(htf_bd_near_arr,  htf_bd_far_arr,  htf_bd_org_arr,  htf_bd_cre_arr,  true)
+[touch_bw,  touch_bw_edge,  xt_bw,  xo_bw]  = f_gap_cross(htf_bw_near_arr,  htf_bw_far_arr,  htf_bw_org_arr,  htf_bw_cre_arr,  true)
+[touch_bm,  touch_bm_edge,  xt_bm,  xo_bm]  = f_gap_cross(htf_bm_near_arr,  htf_bm_far_arr,  htf_bm_org_arr,  htf_bm_cre_arr,  true)
+[touch_u1h, touch_u1h_edge, xt_u1h, xo_u1h] = f_gap_cross(htf_u1h_near_arr, htf_u1h_far_arr, htf_u1h_org_arr, htf_u1h_cre_arr, false)
+[touch_u4h, touch_u4h_edge, xt_u4h, xo_u4h] = f_gap_cross(htf_u4h_near_arr, htf_u4h_far_arr, htf_u4h_org_arr, htf_u4h_cre_arr, false)
+[touch_ud,  touch_ud_edge,  xt_ud,  xo_ud]  = f_gap_cross(htf_ud_near_arr,  htf_ud_far_arr,  htf_ud_org_arr,  htf_ud_cre_arr,  false)
+[touch_uw,  touch_uw_edge,  xt_uw,  xo_uw]  = f_gap_cross(htf_uw_near_arr,  htf_uw_far_arr,  htf_uw_org_arr,  htf_uw_cre_arr,  false)
+[touch_um,  touch_um_edge,  xt_um,  xo_um]  = f_gap_cross(htf_um_near_arr,  htf_um_far_arr,  htf_um_org_arr,  htf_um_cre_arr,  false)
+
+// Swept record per timeframe/direction: the most recently mitigated gap,
+// kept frozen (origin -> crossing time) until the session it was mitigated
+// in ends. Crossing time and session come from the common 15m clock.
+var float htf_b1h_swept_px = na
+var int   htf_b1h_swept_t  = na
+var int   htf_b1h_swept_s  = na
+var int   htf_b1h_swept_o  = na
+var float htf_b4h_swept_px = na
+var int   htf_b4h_swept_t  = na
+var int   htf_b4h_swept_s  = na
+var int   htf_b4h_swept_o  = na
+var float htf_bd_swept_px  = na
+var int   htf_bd_swept_t   = na
+var int   htf_bd_swept_s   = na
+var int   htf_bd_swept_o   = na
+var float htf_bw_swept_px  = na
+var int   htf_bw_swept_t   = na
+var int   htf_bw_swept_s   = na
+var int   htf_bw_swept_o   = na
+var float htf_bm_swept_px  = na
+var int   htf_bm_swept_t   = na
+var int   htf_bm_swept_s   = na
+var int   htf_bm_swept_o   = na
+var float htf_u1h_swept_px = na
+var int   htf_u1h_swept_t  = na
+var int   htf_u1h_swept_s  = na
+var int   htf_u1h_swept_o  = na
+var float htf_u4h_swept_px = na
+var int   htf_u4h_swept_t  = na
+var int   htf_u4h_swept_s  = na
+var int   htf_u4h_swept_o  = na
+var float htf_ud_swept_px  = na
+var int   htf_ud_swept_t   = na
+var int   htf_ud_swept_s   = na
+var int   htf_ud_swept_o   = na
+var float htf_uw_swept_px  = na
+var int   htf_uw_swept_t   = na
+var int   htf_uw_swept_s   = na
+var int   htf_uw_swept_o   = na
+var float htf_um_swept_px  = na
+var int   htf_um_swept_t   = na
+var int   htf_um_swept_s   = na
+var int   htf_um_swept_o   = na
+if touch_b1h
+    htf_b1h_swept_px := touch_b1h_edge
+    htf_b1h_swept_t  := xt_b1h
+    htf_b1h_swept_s  := f_sess_key(xt_b1h)
+    htf_b1h_swept_o  := xo_b1h
+if touch_b4h
+    htf_b4h_swept_px := touch_b4h_edge
+    htf_b4h_swept_t  := xt_b4h
+    htf_b4h_swept_s  := f_sess_key(xt_b4h)
+    htf_b4h_swept_o  := xo_b4h
+if touch_bd
+    htf_bd_swept_px := touch_bd_edge
+    htf_bd_swept_t  := xt_bd
+    htf_bd_swept_s  := f_sess_key(xt_bd)
+    htf_bd_swept_o  := xo_bd
+if touch_bw
+    htf_bw_swept_px := touch_bw_edge
+    htf_bw_swept_t  := xt_bw
+    htf_bw_swept_s  := f_sess_key(xt_bw)
+    htf_bw_swept_o  := xo_bw
+if touch_bm
+    htf_bm_swept_px := touch_bm_edge
+    htf_bm_swept_t  := xt_bm
+    htf_bm_swept_s  := f_sess_key(xt_bm)
+    htf_bm_swept_o  := xo_bm
+if touch_u1h
+    htf_u1h_swept_px := touch_u1h_edge
+    htf_u1h_swept_t  := xt_u1h
+    htf_u1h_swept_s  := f_sess_key(xt_u1h)
+    htf_u1h_swept_o  := xo_u1h
+if touch_u4h
+    htf_u4h_swept_px := touch_u4h_edge
+    htf_u4h_swept_t  := xt_u4h
+    htf_u4h_swept_s  := f_sess_key(xt_u4h)
+    htf_u4h_swept_o  := xo_u4h
+if touch_ud
+    htf_ud_swept_px := touch_ud_edge
+    htf_ud_swept_t  := xt_ud
+    htf_ud_swept_s  := f_sess_key(xt_ud)
+    htf_ud_swept_o  := xo_ud
+if touch_uw
+    htf_uw_swept_px := touch_uw_edge
+    htf_uw_swept_t  := xt_uw
+    htf_uw_swept_s  := f_sess_key(xt_uw)
+    htf_uw_swept_o  := xo_uw
+if touch_um
+    htf_um_swept_px := touch_um_edge
+    htf_um_swept_t  := xt_um
+    htf_um_swept_s  := f_sess_key(xt_um)
+    htf_um_swept_o  := xo_um
 
 // Any active HTF imbalance (1H/4H/D/W/M, gated by its own use_htf_* toggle)
 // just got manipulated (price entered it) THIS bar — same-bar OR across all
@@ -575,173 +664,33 @@ in_london = is_intraday_tf and h_utc >= kz_lon_open and h_utc < kz_lon_close
 in_ny     = is_intraday_tf and h_utc >= kz_ny_open and not ny_closed
 in_kz     = in_london or in_ny
 
-// Moved up here (out of the "ASIA RANGE" section below) so session_id, right
-// below, can react to Asia open/close too — see that comment for why.
 // Handles both an overnight session (e.g. 22h-7h, wraps past midnight) and
 // a same-day session (e.g. 1h-6h) depending on which input is larger.
 in_asia = is_intraday_tf and (kz_asia_open <= kz_asia_close ? (h_utc >= kz_asia_open and h_utc < kz_asia_close) : (h_utc >= kz_asia_open or h_utc < kz_asia_close))
 
-// Increments on EVERY Asia/London/NY session boundary — open AND close — used
-// to tell "swept this session" (still show, frozen at the liquidation point)
-// from "swept in an earlier session" (fully remove) for every structural POI
-// line below.
-// Incrementing only on session OPEN was wrong: a level swept during NY kept
-// matching the live session_id all the way until London opened the next day,
-// so frozen liquidated lines stayed on the chart hours after NY had closed.
-// Counting the close as a boundary too means the moment a session ends, its
-// liquidated zones stop matching and are dropped, which is the intent.
-// ROOT CAUSE (found after PDL/swept-HTF-imbalance lines were reported still
-// showing long after being liquidated): this only ever reacted to
-// in_london/in_ny, never in_asia — a level swept during Asia (or in any of
-// the dead-zone gaps between kill zones) kept matching the SAME session_id
-// for up to ~16 hours, until London's next open finally moved it. Adding
-// in_asia fixes both Asia's own boundaries AND those dead-zone gaps for
-// free: Asia's close (08:00 default) and London's close (11:00 default)
-// already bump the counter via their own toggles, so nothing swept just
-// before either boundary can wait for the next session's OPEN anymore.
-var int session_id = 0
-if in_london != in_london[1] or in_ny != in_ny[1] or in_asia != in_asia[1]
-    session_id += 1
 
-// Swept-HTF-imbalance record: unlike PDH/PDL/session-H-L/EQH/EQL, a touched
-// HTF gap has nothing tracking it once f_htf_gap_touch removes it from its
-// array — it simply vanished from the chart with no trace at all. One slot
-// per timeframe/direction (same shape f_poi_entry expects everywhere else:
-// price, sweep time, sweep session id) captures the most recently touched
-// gap on that pair, so it gets the same "frozen for the rest of this
-// session, then gone" treatment every other swept POI type already has.
-var float htf_b1h_swept_px = na
-var int   htf_b1h_swept_t  = na
-var int   htf_b1h_swept_s  = na
-var float htf_b4h_swept_px = na
-var int   htf_b4h_swept_t  = na
-var int   htf_b4h_swept_s  = na
-var float htf_bd_swept_px  = na
-var int   htf_bd_swept_t   = na
-var int   htf_bd_swept_s   = na
-var float htf_bw_swept_px  = na
-var int   htf_bw_swept_t   = na
-var int   htf_bw_swept_s   = na
-var float htf_bm_swept_px  = na
-var int   htf_bm_swept_t   = na
-var int   htf_bm_swept_s   = na
-var float htf_u1h_swept_px = na
-var int   htf_u1h_swept_t  = na
-var int   htf_u1h_swept_s  = na
-var float htf_u4h_swept_px = na
-var int   htf_u4h_swept_t  = na
-var int   htf_u4h_swept_s  = na
-var float htf_ud_swept_px  = na
-var int   htf_ud_swept_t   = na
-var int   htf_ud_swept_s   = na
-var float htf_uw_swept_px  = na
-var int   htf_uw_swept_t   = na
-var int   htf_uw_swept_s   = na
-var float htf_um_swept_px  = na
-var int   htf_um_swept_t   = na
-var int   htf_um_swept_s   = na
-
-if touch_b1h
-    htf_b1h_swept_px := touch_b1h_edge
-    htf_b1h_swept_t  := time
-    htf_b1h_swept_s  := session_id
-if touch_b4h
-    htf_b4h_swept_px := touch_b4h_edge
-    htf_b4h_swept_t  := time
-    htf_b4h_swept_s  := session_id
-if touch_bd
-    htf_bd_swept_px := touch_bd_edge
-    htf_bd_swept_t  := time
-    htf_bd_swept_s  := session_id
-if touch_bw
-    htf_bw_swept_px := touch_bw_edge
-    htf_bw_swept_t  := time
-    htf_bw_swept_s  := session_id
-if touch_bm
-    htf_bm_swept_px := touch_bm_edge
-    htf_bm_swept_t  := time
-    htf_bm_swept_s  := session_id
-if touch_u1h
-    htf_u1h_swept_px := touch_u1h_edge
-    htf_u1h_swept_t  := time
-    htf_u1h_swept_s  := session_id
-if touch_u4h
-    htf_u4h_swept_px := touch_u4h_edge
-    htf_u4h_swept_t  := time
-    htf_u4h_swept_s  := session_id
-if touch_ud
-    htf_ud_swept_px := touch_ud_edge
-    htf_ud_swept_t  := time
-    htf_ud_swept_s  := session_id
-if touch_uw
-    htf_uw_swept_px := touch_uw_edge
-    htf_uw_swept_t  := time
-    htf_uw_swept_s  := session_id
-if touch_um
-    htf_um_swept_px := touch_um_edge
-    htf_um_swept_t  := time
-    htf_um_swept_s  := session_id
-
-// Running high/low while each kill zone session is in progress, so the
-// session can be drawn as a box (its actual traded range) instead of a
-// flat background strip. Also frozen into lon_h/lon_l and ny_h/ny_l the
-// instant each session ends (mirrors the Asia H/L pattern below exactly) —
-// the PREVIOUS session's high/low is liquidity too, the same as PDH/PDL.
+// Running high/low while each kill zone session is in progress — used only
+// to draw the session range boxes. Session highs/lows are NOT POI anymore:
+// they were built from the chart's own bars (on a 4H chart "Asia H" covered
+// 03:00-11:00 and London never existed), so they could never look the same
+// on every timeframe.
 var float lon_live_h = na
 var float lon_live_l = na
-var int   lon_live_h_bar = na
-var int   lon_live_l_bar = na
-var float lon_h       = na
-var float lon_l       = na
-var int   lon_h_bar    = na
-var int   lon_l_bar    = na
-
 if in_london
-    if na(lon_live_h) or high > lon_live_h
-        lon_live_h     := high
-        lon_live_h_bar := time
-    if na(lon_live_l) or low < lon_live_l
-        lon_live_l     := low
-        lon_live_l_bar := time
+    lon_live_h := na(lon_live_h) ? high : math.max(lon_live_h, high)
+    lon_live_l := na(lon_live_l) ? low  : math.min(lon_live_l, low)
 else if in_london[1]
-    lon_h          := lon_live_h
-    lon_l          := lon_live_l
-    lon_h_bar      := lon_live_h_bar
-    lon_l_bar      := lon_live_l_bar
-    lon_live_h     := na
-    lon_live_l     := na
-    lon_live_h_bar := na
-    lon_live_l_bar := na
+    lon_live_h := na
+    lon_live_l := na
 
-lon_closed = not in_london and in_london[1]
-
-var float ny_live_h  = na
-var float ny_live_l  = na
-var int   ny_live_h_bar = na
-var int   ny_live_l_bar = na
-var float ny_h        = na
-var float ny_l        = na
-var int   ny_h_bar     = na
-var int   ny_l_bar     = na
-
+var float ny_live_h = na
+var float ny_live_l = na
 if in_ny
-    if na(ny_live_h) or high > ny_live_h
-        ny_live_h     := high
-        ny_live_h_bar := time
-    if na(ny_live_l) or low < ny_live_l
-        ny_live_l     := low
-        ny_live_l_bar := time
+    ny_live_h := na(ny_live_h) ? high : math.max(ny_live_h, high)
+    ny_live_l := na(ny_live_l) ? low  : math.min(ny_live_l, low)
 else if in_ny[1]
-    ny_h          := ny_live_h
-    ny_l          := ny_live_l
-    ny_h_bar      := ny_live_h_bar
-    ny_l_bar      := ny_live_l_bar
-    ny_live_h     := na
-    ny_live_l     := na
-    ny_live_h_bar := na
-    ny_live_l_bar := na
-
-ny_sess_closed = not in_ny and in_ny[1]
+    ny_live_h := na
+    ny_live_l := na
 
 // =============================================================
 // DAILY + PER-SESSION TRADE COUNTERS
@@ -774,102 +723,47 @@ if in_ny and not in_ny[1]
 can_trade_entry = can_trade and ((in_london and lon_session_trades < sess_max_trades) or (in_ny and ny_session_trades < sess_max_trades))
 
 // =============================================================
-// PREVIOUS DAY HIGH / LOW
+// PREVIOUS DAY / WEEK HIGH & LOW — from the fixed D / W candle feed
 // =============================================================
+// The previous closed D (W) candle, exactly as fed above: same value, same
+// line start (the candle's open) and same moment of refresh on every chart
+// timeframe. `*_since` = when the candle closed; only price after that can
+// sweep the level.
+is_new_day  = fed_D > 0
+is_new_week = fed_W > 0
 
-is_new_day = ta.change(time("D")) != 0
+var float pdh       = na
+var float pdl       = na
+var int   pdh_bar   = na
+var int   pdl_bar   = na
+var int   pdhl_since = na
+var float pwh       = na
+var float pwl       = na
+var int   pwh_bar   = na
+var int   pwl_bar   = na
+var int   pwhl_since = na
 
-var float cur_dh     = na
-var float cur_dl     = na
-var int   cur_dh_bar = na
-var int   cur_dl_bar = na
-var float pdh        = na
-var float pdl        = na
-var int   pdh_bar     = na
-var int   pdl_bar     = na
+if is_new_day and array.size(hbD) > 0
+    pdh        := array.get(hbD, 0)
+    pdl        := array.get(lbD, 0)
+    pdh_bar    := array.get(tbD, 0)
+    pdl_bar    := array.get(tbD, 0)
+    pdhl_since := array.get(tbD, 0) + 86400000
+if is_new_week and array.size(hbW) > 0
+    pwh        := array.get(hbW, 0)
+    pwl        := array.get(lbW, 0)
+    pwh_bar    := array.get(tbW, 0)
+    pwl_bar    := array.get(tbW, 0)
+    pwhl_since := array.get(tbW, 0) + 7 * 86400000
 
-if is_new_day
-    pdh        := cur_dh
-    pdl        := cur_dl
-    pdh_bar    := cur_dh_bar
-    pdl_bar    := cur_dl_bar
-    cur_dh     := high
-    cur_dl     := low
-    cur_dh_bar := time
-    cur_dl_bar := time
-else
-    if na(cur_dh) or high > cur_dh
-        cur_dh     := high
-        cur_dh_bar := time
-    if na(cur_dl) or low < cur_dl
-        cur_dl     := low
-        cur_dl_bar := time
-
-// =============================================================
-// PREVIOUS WEEK HIGH / LOW
-// =============================================================
-
-is_new_week = ta.change(time("W")) != 0
-
-var float cur_wh     = na
-var float cur_wl     = na
-var int   cur_wh_bar = na
-var int   cur_wl_bar = na
-var float pwh        = na
-var float pwl        = na
-var int   pwh_bar     = na
-var int   pwl_bar     = na
-
-if is_new_week
-    pwh        := cur_wh
-    pwl        := cur_wl
-    pwh_bar    := cur_wh_bar
-    pwl_bar    := cur_wl_bar
-    cur_wh     := high
-    cur_wl     := low
-    cur_wh_bar := time
-    cur_wl_bar := time
-else
-    if na(cur_wh) or high > cur_wh
-        cur_wh     := high
-        cur_wh_bar := time
-    if na(cur_wl) or low < cur_wl
-        cur_wl     := low
-        cur_wl_bar := time
-
-// =============================================================
-// ASIA RANGE  (default 00:00 - 08:00 UTC+2, see kz_asia_open/close above)
-// =============================================================
-// in_asia itself is now computed earlier, alongside in_london/in_ny and
-// session_id (see the comments there) — this section starts from it.
-
-var float asia_live_h     = na
-var float asia_live_l     = na
-var int   asia_live_h_bar = na
-var int   asia_live_l_bar = na
-var float asia_h          = na
-var float asia_l          = na
-var int   asia_h_bar      = na
-var int   asia_l_bar      = na
-
+var float asia_live_h = na
+var float asia_live_l = na
 if in_asia
-    if na(asia_live_h) or high > asia_live_h
-        asia_live_h     := high
-        asia_live_h_bar := time
-    if na(asia_live_l) or low < asia_live_l
-        asia_live_l     := low
-        asia_live_l_bar := time
+    asia_live_h := na(asia_live_h) ? high : math.max(asia_live_h, high)
+    asia_live_l := na(asia_live_l) ? low  : math.min(asia_live_l, low)
 else if in_asia[1]
-    asia_h          := asia_live_h
-    asia_l          := asia_live_l
-    asia_h_bar      := asia_live_h_bar
-    asia_l_bar      := asia_live_l_bar
-    asia_live_h     := na
-    asia_live_l     := na
-    asia_live_h_bar := na
-    asia_live_l_bar := na
-
-asia_closed = not in_asia and in_asia[1]
+    asia_live_h := na
+    asia_live_l := na
 
 // =============================================================
 // SWING HIGHS / LOWS
@@ -889,35 +783,19 @@ if not na(raw_swl)
 // =============================================================
 // EQUAL HIGHS / LOWS
 // =============================================================
-// Pivots for EQH/EQL come from eql_ref_tf via request.security, NOT from
-// raw_swh/raw_swl (those stay chart-native, used only for last_swh/last_swl).
-// A pivot on a fixed reference timeframe is the same real swing point no
-// matter what timeframe the chart is displaying, so the same equal-highs
-// zone now shows identically at every zoom level — the "PDL + EQL + PWL"
-// on Daily used to just disappear on 1m because 1m's own noisy candles
-// rarely happened to form a matching pivot at all.
-//
-// ROOT CAUSE (same class already fixed for the HTF 1H/4H/D/W/M candle
-// fetch): the old version put time[sw_len] — an offset — INSIDE the
-// request.security() tuple, which is only a safe many-to-one downsample
-// when the chart's own timeframe is lower than eql_ref_tf (default "60").
-// On a chart timeframe that reaches or exceeds eql_ref_tf (e.g. viewing
-// Daily while eql_ref_tf is still 1H), the returned bar/time pairing
-// becomes unreliable — the EQH/EQL line's x1 could land far off from where
-// its own label renders (the label is anchored independently), which is
-// exactly "a floating EQH/EQL label with no visible line next to it".
-//
-// Fixed the same way: fetch only the single latest closed-or-forming bar's
-// time/high/low with ZERO offsets inside the security call, detect a
-// genuinely new eql_ref_tf bar by its OPEN TIME changing (never
-// coincidentally equal), and do the pivot-high/pivot-low confirmation
-// ourselves against a local rolling buffer of the last few closed bars —
-// the direct local equivalent of ta.pivothigh/ta.pivotlow, computed only on
-// the bar a new reference-timeframe candle closes (matching the original
-// "confirms once" semantics exactly, instead of re-confirming the same
-// pivot on every chart bar until the next reference close).
-[eqlt, eqlh, eqll] = request.security(syminfo.tickerid, eql_ref_tf, [time, high, low], lookahead = barmerge.lookahead_off)
-eql_new_close = eqlt != eqlt[1]
+// Pivots for EQH/EQL come from the fixed eql_ref_tf candles (default 1H),
+// NOT from the chart's bars, fed through exactly the same two paths as the
+// imbalance engine above (aggregate chart bars when chart TF <= ref TF, all
+// ref candles via request.security_lower_tf when the chart is higher). The
+// old single request.security fetch returned one ref candle per chart bar on
+// a 4H/D chart, so the pivots were computed on a series of candles hours
+// apart and EQH/EQL differed from the 1H/1m view.
+eql_sec = timeframe.in_seconds(eql_ref_tf)
+hi_eql  = chart_sec > eql_sec
+[lte, lce, lhe, lle] = request.security_lower_tf(syminfo.tickerid, hi_eql ? eql_ref_tf : timeframe.period, [time, time_close, high, low])
+var float[] age  = array.new_float(0)
+var int[]   agte = array.new_int(0)
+[ae_done, ae_t, ae_ct, ae_h, ae_l] = f_agg_step(time(eql_ref_tf), age, agte)
 
 var float[] eql_h_buf = array.new_float(0)
 var float[] eql_l_buf = array.new_float(0)
@@ -942,69 +820,23 @@ f_eql_pivot(array<float> vbuf, array<int> tbuf, int len, bool is_high) =>
             res_t := array.get(tbuf, c)
     [res, res_t]
 
-float eql_swh_raw = na
-int   eql_swh_bar = na
-float eql_swl_raw = na
-int   eql_swl_bar = na
-
-if eql_new_close
-    array.push(eql_h_buf, eqlh[1])
-    array.push(eql_l_buf, eqll[1])
-    array.push(eql_t_buf, eqlt[1])
-    if array.size(eql_h_buf) > eql_buf_cap
-        array.shift(eql_h_buf)
-        array.shift(eql_l_buf)
-        array.shift(eql_t_buf)
-    [wh, wht] = f_eql_pivot(eql_h_buf, eql_t_buf, sw_len, true)
-    [wl, wlt] = f_eql_pivot(eql_l_buf, eql_t_buf, sw_len, false)
-    eql_swh_raw := wh
-    eql_swh_bar := wht
-    eql_swl_raw := wl
-    eql_swl_bar := wlt
-
 var float[] swh_hist = array.new_float(0)
 var float[] swl_hist = array.new_float(0)
 
-// ROOT CAUSE — last_eqh/last_eql used to be single vars, unconditionally
-// OVERWRITTEN every time ANY new equal-high/low confirmed anywhere, with no
-// check on distance or whether the previous one had even been swept yet. A
-// real, still-live equal-high from months ago was silently replaced the
-// next time an unrelated one formed elsewhere — the identical "single
-// sticky slot" defect already found and fixed for HTF imbalances this
-// session (the multi-gap array rewrite). Same fix here: every confirmed
-// equal-high/low is PUSHED onto a live array instead of overwriting one
-// slot, and only removed when it's actually swept (price trades through
-// it) — so a months-old level currently near price still shows, exactly
-// like the HTF FVG arrays.
+// Every confirmed equal-high/low is kept in a live list (not a single slot
+// that the next unrelated one overwrites) until price actually sweeps it.
+// bar = the pivot candle's open (line start), cre = the moment it was
+// confirmed (only price after that can sweep it).
 var float[] eqh_arr     = array.new_float(0)
 var int[]   eqh_bar_arr = array.new_int(0)
+var int[]   eqh_cre_arr = array.new_int(0)
 var float[] eql_arr     = array.new_float(0)
 var int[]   eql_bar_arr = array.new_int(0)
-
-// Mirrors f_htf_gap_touch (single price array instead of near/far/org,
-// since an equal-high/low is one level, not a two-edge gap).
-f_eqh_touch(array<float> px_arr, array<int> bar_arr, bool is_high) =>
-    bool  touched     = false
-    float touched_px  = na
-    int   touched_bar = na
-    n = array.size(px_arr)
-    if n > 0
-        for j = 0 to n - 1
-            i = n - 1 - j
-            e = array.get(px_arr, i)
-            hit = is_high ? high >= e : low <= e
-            if hit
-                touched     := true
-                touched_px  := e
-                touched_bar := array.get(bar_arr, i)
-                array.remove(px_arr, i)
-                array.remove(bar_arr, i)
-    [touched, touched_px, touched_bar]
+var int[]   eql_cre_arr = array.new_int(0)
 
 // Push a newly confirmed equal-high/low, deduplicated against any existing
-// live entry within eql_tol (the same TWO swings that just matched to
-// confirm "equal" would otherwise both end up pushed separately).
-f_eqh_push(array<float> px_arr, array<int> bar_arr, float px, int bar, float tol) =>
+// live entry within eql_tol.
+f_eqh_push(array<float> px_arr, array<int> bar_arr, array<int> cre_arr, float px, int bar, int cre, float tol) =>
     bool dup = false
     n = array.size(px_arr)
     if n > 0
@@ -1014,21 +846,75 @@ f_eqh_push(array<float> px_arr, array<int> bar_arr, float px, int bar, float tol
     if not dup
         array.push(px_arr, px)
         array.push(bar_arr, bar)
+        array.push(cre_arr, cre)
     array.size(px_arr)
 
-// Any matching entry within merge_tol — mirrors f_htf_gap_reinforced.
-f_eqh_reinforced(array<float> px_arr, float lvl) =>
-    bool found = false
+// One closed reference candle: extend the pivot buffer, confirm a pivot
+// sw_len candles back if there is one, and if it matches a recent pivot
+// within eql_tol, record the equal-high/low. Returns [new EQH, new EQL].
+f_eql_feed(int t, int ct, float h, float l) =>
+    bool nh = false
+    bool nl = false
+    if not na(t) and not na(h) and (array.size(eql_t_buf) == 0 or t > array.get(eql_t_buf, array.size(eql_t_buf) - 1))
+        array.push(eql_h_buf, h)
+        array.push(eql_l_buf, l)
+        array.push(eql_t_buf, t)
+        if array.size(eql_h_buf) > eql_buf_cap
+            array.shift(eql_h_buf)
+            array.shift(eql_l_buf)
+            array.shift(eql_t_buf)
+        [wh, wht] = f_eql_pivot(eql_h_buf, eql_t_buf, sw_len, true)
+        [wl, wlt] = f_eql_pivot(eql_l_buf, eql_t_buf, sw_len, false)
+        if use_eql and not na(wh)
+            sz = array.size(swh_hist)
+            if sz > 0
+                for i = 0 to sz - 1
+                    if math.abs(wh - array.get(swh_hist, i)) <= eql_tol
+                        nh := true
+                        f_eqh_push(eqh_arr, eqh_bar_arr, eqh_cre_arr, wh, wht, ct, eql_tol)
+                        break
+            if array.size(swh_hist) >= eql_lookback
+                array.shift(swh_hist)
+            array.push(swh_hist, wh)
+        if use_eql and not na(wl)
+            sz = array.size(swl_hist)
+            if sz > 0
+                for i = 0 to sz - 1
+                    if math.abs(wl - array.get(swl_hist, i)) <= eql_tol
+                        nl := true
+                        f_eqh_push(eql_arr, eql_bar_arr, eql_cre_arr, wl, wlt, ct, eql_tol)
+                        break
+            if array.size(swl_hist) >= eql_lookback
+                array.shift(swl_hist)
+            array.push(swl_hist, wl)
+    [nh, nl]
+
+// Removes every equal-high/low price has now reached (after it was
+// confirmed), at the common 15m clock. Returns [hit, level, origin, time].
+f_eqh_cross(array<float> px_arr, array<int> bar_arr, array<int> cre_arr, bool is_high) =>
+    bool  touched     = false
+    float touched_px  = na
+    int   touched_bar = na
+    int   touched_xt  = na
     n = array.size(px_arr)
     if n > 0
-        for i = 0 to n - 1
-            if math.abs(lvl - array.get(px_arr, i)) <= merge_tol
-                found := true
-    found
+        for j = 0 to n - 1
+            i = n - 1 - j
+            e = array.get(px_arr, i)
+            if is_high ? high >= e : low <= e
+                t_hit = f_cross_t(e, is_high, array.get(cre_arr, i))
+                if not na(t_hit)
+                    touched     := true
+                    touched_px  := e
+                    touched_bar := array.get(bar_arr, i)
+                    touched_xt  := t_hit
+                    array.remove(px_arr, i)
+                    array.remove(bar_arr, i)
+                    array.remove(cre_arr, i)
+    [touched, touched_px, touched_bar, touched_xt]
 
-// Nearest-to-price live entry — only for the single-line proximity alert,
-// same simplification already used for the HTF gap arrays (f_htf_gap_nearest):
-// detection/reinforcement/display use every entry, alerts stay one-per-side.
+
+// Nearest-to-price live entry — only for the single-line proximity alert.
 f_eqh_nearest(array<float> px_arr, array<int> bar_arr) =>
     float best     = na
     int   best_bar = na
@@ -1041,42 +927,25 @@ f_eqh_nearest(array<float> px_arr, array<int> bar_arr) =>
                 best_bar := array.get(bar_arr, i)
     [best, best_bar]
 
-// Touch-check runs BEFORE the push below, every bar unconditionally (not
-// just on eql_new_close bars, since price can cross a previously-confirmed
-// level on any later bar) — same ordering fix as the HTF gap tracker, so a
-// freshly confirmed level is never checked against its own confirmation bar.
-[touch_eqh, touch_eqh_px, touch_eqh_bar] = f_eqh_touch(eqh_arr, eqh_bar_arr, true)
-[touch_eql, touch_eql_px, touch_eql_bar] = f_eqh_touch(eql_arr, eql_bar_arr, false)
-
 eqh_new = false
 eql_new = false
+if hi_eql
+    ne = array.size(lte)
+    if ne > 0
+        for i = 0 to ne - 1
+            if i < ne - 1 or barstate.isconfirmed
+                [nh_i, nl_i] = f_eql_feed(array.get(lte, i), array.get(lce, i), array.get(lhe, i), array.get(lle, i))
+                eqh_new := eqh_new or nh_i
+                eql_new := eql_new or nl_i
+else if ae_done
+    [nh_a, nl_a] = f_eql_feed(ae_t, ae_ct, ae_h, ae_l)
+    eqh_new := nh_a
+    eql_new := nl_a
 
-// f_eql_pivot confirms the pivot sw_len bars after it printed on
-// eql_ref_tf, so eql_swh_bar/eql_swl_bar (from the local buffer above) is
-// the actual bar it formed on.
-if use_eql and not na(eql_swh_raw)
-    sz = array.size(swh_hist)
-    if sz > 0
-        for i = 0 to sz - 1
-            if math.abs(eql_swh_raw - array.get(swh_hist, i)) <= eql_tol
-                eqh_new := true
-                f_eqh_push(eqh_arr, eqh_bar_arr, eql_swh_raw, eql_swh_bar, eql_tol)
-                break
-    if array.size(swh_hist) >= eql_lookback
-        array.shift(swh_hist)
-    array.push(swh_hist, eql_swh_raw)
-
-if use_eql and not na(eql_swl_raw)
-    sz = array.size(swl_hist)
-    if sz > 0
-        for i = 0 to sz - 1
-            if math.abs(eql_swl_raw - array.get(swl_hist, i)) <= eql_tol
-                eql_new := true
-                f_eqh_push(eql_arr, eql_bar_arr, eql_swl_raw, eql_swl_bar, eql_tol)
-                break
-    if array.size(swl_hist) >= eql_lookback
-        array.shift(swl_hist)
-    array.push(swl_hist, eql_swl_raw)
+// Feed first, then sweep check (a level confirmed this bar can only be swept
+// by price after its confirmation time).
+[touch_eqh, touch_eqh_px, touch_eqh_bar, touch_eqh_xt] = f_eqh_cross(eqh_arr, eqh_bar_arr, eqh_cre_arr, true)
+[touch_eql, touch_eql_px, touch_eql_bar, touch_eql_xt] = f_eqh_cross(eql_arr, eql_bar_arr, eql_cre_arr, false)
 
 
 // =============================================================
@@ -1258,16 +1127,11 @@ var bool pdh_swept    = false
 var bool pdl_swept    = false
 var bool pwh_swept    = false
 var bool pwl_swept    = false
-var bool asia_h_swept = false
-var bool asia_l_swept = false
-var bool lon_h_swept  = false
-var bool lon_l_swept  = false
-var bool ny_h_swept   = false
-var bool ny_l_swept   = false
 
-// Liquidation time + the session it happened in. A level swept THIS session
-// stays visible, frozen at the point it was hit (not extending to "now");
-// once the session changes, it's gone — see f_poi_entry below.
+// Liquidation time (15m clock) + the session key it happened in. A level
+// swept in the CURRENT session stays visible, frozen at the point it was hit;
+// once the session changes, it's gone — see f_poi_entry below. Both come
+// from the common clock, so they're identical on every chart timeframe.
 var int pdh_swept_t = na
 var int pdh_swept_s = na
 var int pdl_swept_t = na
@@ -1276,24 +1140,14 @@ var int pwh_swept_t = na
 var int pwh_swept_s = na
 var int pwl_swept_t = na
 var int pwl_swept_s = na
-var int asia_h_swept_t = na
-var int asia_h_swept_s = na
-var int asia_l_swept_t = na
-var int asia_l_swept_s = na
-var int lon_h_swept_t = na
-var int lon_h_swept_s = na
-var int lon_l_swept_t = na
-var int lon_l_swept_s = na
-var int ny_h_swept_t = na
-var int ny_h_swept_s = na
-var int ny_l_swept_t = na
-var int ny_l_swept_s = na
 var float eqh_swept_px = na
-var int   eqh_swept_t = na
-var int   eqh_swept_s = na
+var int   eqh_swept_t  = na
+var int   eqh_swept_s  = na
+var int   eqh_swept_o  = na
 var float eql_swept_px = na
-var int   eql_swept_t = na
-var int   eql_swept_s = na
+var int   eql_swept_t  = na
+var int   eql_swept_s  = na
+var int   eql_swept_o  = na
 
 if is_new_day
     pdh_swept := false
@@ -1301,81 +1155,48 @@ if is_new_day
 if is_new_week
     pwh_swept := false
     pwl_swept := false
-if asia_closed
-    asia_h_swept := false
-    asia_l_swept := false
-if lon_closed
-    lon_h_swept := false
-    lon_l_swept := false
-if ny_sess_closed
-    ny_h_swept := false
-    ny_l_swept := false
 
-pdh_liq    = not na(pdh) and not pdh_swept and high >= pdh
-pdl_liq    = not na(pdl) and not pdl_swept and low <= pdl
-pwh_liq    = not na(pwh) and not pwh_swept and high >= pwh
-pwl_liq    = not na(pwl) and not pwl_swept and low <= pwl
-asiah_liq  = not na(asia_h) and not asia_h_swept and high >= asia_h
-asial_liq  = not na(asia_l) and not asia_l_swept and low <= asia_l
-lonh_liq   = not na(lon_h) and not lon_h_swept and high >= lon_h
-lonl_liq   = not na(lon_l) and not lon_l_swept and low <= lon_l
-nyh_liq    = not na(ny_h) and not ny_h_swept and high >= ny_h
-nyl_liq    = not na(ny_l) and not ny_l_swept and low <= ny_l
-// Sweep detection is now the touch flags computed earlier, up in the
-// EQUAL HIGHS/LOWS section (touch_eqh/touch_eql) — "was any still-live
-// entry in eqh_arr/eql_arr just crossed this bar", instead of comparing
-// against a single last_eqh/last_eql value.
+// Crossing time (na = not swept this bar). Only price after the level's
+// candle closed counts (pdhl_since / pwhl_since).
+pdh_xt = pdh_swept or na(pdh) ? na : f_cross_t(pdh, true,  pdhl_since)
+pdl_xt = pdl_swept or na(pdl) ? na : f_cross_t(pdl, false, pdhl_since)
+pwh_xt = pwh_swept or na(pwh) ? na : f_cross_t(pwh, true,  pwhl_since)
+pwl_xt = pwl_swept or na(pwl) ? na : f_cross_t(pwl, false, pwhl_since)
+
+pdh_liq    = not na(pdh_xt)
+pdl_liq    = not na(pdl_xt)
+pwh_liq    = not na(pwh_xt)
+pwl_liq    = not na(pwl_xt)
+// Equal highs/lows: any still-live entry swept this bar (f_eqh_cross above).
 eqh_liq    = touch_eqh
 eql_liq    = touch_eql
 
 if pdh_liq
-    pdh_swept := true
-    pdh_swept_t := time
-    pdh_swept_s := session_id
+    pdh_swept   := true
+    pdh_swept_t := pdh_xt
+    pdh_swept_s := f_sess_key(pdh_xt)
 if pdl_liq
-    pdl_swept := true
-    pdl_swept_t := time
-    pdl_swept_s := session_id
+    pdl_swept   := true
+    pdl_swept_t := pdl_xt
+    pdl_swept_s := f_sess_key(pdl_xt)
 if pwh_liq
-    pwh_swept := true
-    pwh_swept_t := time
-    pwh_swept_s := session_id
+    pwh_swept   := true
+    pwh_swept_t := pwh_xt
+    pwh_swept_s := f_sess_key(pwh_xt)
 if pwl_liq
-    pwl_swept := true
-    pwl_swept_t := time
-    pwl_swept_s := session_id
-if asiah_liq
-    asia_h_swept := true
-    asia_h_swept_t := time
-    asia_h_swept_s := session_id
-if asial_liq
-    asia_l_swept := true
-    asia_l_swept_t := time
-    asia_l_swept_s := session_id
-if lonh_liq
-    lon_h_swept := true
-    lon_h_swept_t := time
-    lon_h_swept_s := session_id
-if lonl_liq
-    lon_l_swept := true
-    lon_l_swept_t := time
-    lon_l_swept_s := session_id
-if nyh_liq
-    ny_h_swept := true
-    ny_h_swept_t := time
-    ny_h_swept_s := session_id
-if nyl_liq
-    ny_l_swept := true
-    ny_l_swept_t := time
-    ny_l_swept_s := session_id
+    pwl_swept   := true
+    pwl_swept_t := pwl_xt
+    pwl_swept_s := f_sess_key(pwl_xt)
 if eqh_liq
     eqh_swept_px := touch_eqh_px
-    eqh_swept_t := time
-    eqh_swept_s := session_id
+    eqh_swept_t  := touch_eqh_xt
+    eqh_swept_s  := f_sess_key(touch_eqh_xt)
+    eqh_swept_o  := touch_eqh_bar
 if eql_liq
     eql_swept_px := touch_eql_px
-    eql_swept_t := time
-    eql_swept_s := session_id
+    eql_swept_t  := touch_eql_xt
+    eql_swept_s  := f_sess_key(touch_eql_xt)
+    eql_swept_o  := touch_eql_bar
 
 
 // =============================================================
@@ -1513,49 +1334,13 @@ var label ce_lbl = na
 // price first trades through the level, edge-triggered by its own *_swept
 // flag — the same "if not sweepPDH and high > prevHigh" the two working
 // PDH/PDL strategies use.
-// London/NY H-L are session extremes, not structural highs/lows the way
-// PDH/PDL, PWH/PWL, and Asia H/L are — every session has SOME high and SOME
-// low, but that alone doesn't make it a real liquidity pool the way it does
-// for a daily/weekly range or the pre-market Asian range. Per the user's
-// call: a London/NY H-L only counts as tradeable liquidity — able to arm
-// the sweep -> CE -> entry cycle — when it's REINFORCED, i.e. it lands
-// within merge_tol of a confirmed EQH/EQL or an active HTF FVG zone
-// (1H/4H/D/W/M). Reused merge_tol rather than a new input since this is the
-// exact same "close enough to be the same real level" tolerance the merge
-// system already applies everywhere else. Unreinforced, the level still
-// shows on the chart as a swept/frozen context line (f_poi_entry doesn't
-// care about this at all) — it just can't fire a trade on its own.
-f_reinforced_high(float lvl) =>
-    not na(lvl) and (
-         f_eqh_reinforced(eqh_arr, lvl) or
-         f_htf_gap_reinforced(htf_b1h_near_arr, lvl) or
-         f_htf_gap_reinforced(htf_b4h_near_arr, lvl) or
-         f_htf_gap_reinforced(htf_bd_near_arr,  lvl) or
-         f_htf_gap_reinforced(htf_bw_near_arr,  lvl) or
-         f_htf_gap_reinforced(htf_bm_near_arr,  lvl))
-
-f_reinforced_low(float lvl) =>
-    not na(lvl) and (
-         f_eqh_reinforced(eql_arr, lvl) or
-         f_htf_gap_reinforced(htf_u1h_near_arr, lvl) or
-         f_htf_gap_reinforced(htf_u4h_near_arr, lvl) or
-         f_htf_gap_reinforced(htf_ud_near_arr,  lvl) or
-         f_htf_gap_reinforced(htf_uw_near_arr,  lvl) or
-         f_htf_gap_reinforced(htf_um_near_arr,  lvl))
-
 hs_pdh  = use_pdhl and pdh_liq
 hs_pwh  = use_pwhl and pwh_liq
-hs_asia = use_asia and asiah_liq
-hs_lon  = use_lon_hl and lonh_liq and f_reinforced_high(lon_h)
-hs_ny   = use_ny_hl and nyh_liq and f_reinforced_high(ny_h)
 hs_eqh  = use_eql  and eqh_liq
 hs_imb  = use_htf_imb_entry and touch_bear_htf
 
 ls_pdl  = use_pdhl and pdl_liq
 ls_pwl  = use_pwhl and pwl_liq
-ls_asia = use_asia and asial_liq
-ls_lon  = use_lon_hl and lonl_liq and f_reinforced_low(lon_l)
-ls_ny   = use_ny_hl and nyl_liq and f_reinforced_low(ny_l)
 ls_eql  = use_eql  and eql_liq
 ls_imb  = use_htf_imb_entry and touch_bull_htf
 
@@ -1593,8 +1378,8 @@ is_exec_tf = timeframe.period == "1"
 // fires, the cycle is abandoned (see the reset block further down).
 in_any_sess = in_asia or in_london or in_ny
 
-any_hs = (hs_pdh or hs_pwh or hs_asia or hs_lon or hs_ny or hs_eqh or hs_imb) and htf_ok_bear and can_trade and is_exec_tf and in_any_sess
-any_ls = (ls_pdl or ls_pwl or ls_asia or ls_lon or ls_ny or ls_eql or ls_imb)  and htf_ok_bull and can_trade and is_exec_tf and in_any_sess
+any_hs = (hs_pdh or hs_pwh or hs_eqh or hs_imb) and htf_ok_bear and can_trade and is_exec_tf and in_any_sess
+any_ls = (ls_pdl or ls_pwl or ls_eql or ls_imb)  and htf_ok_bull and can_trade and is_exec_tf and in_any_sess
 
 // An imbalance manipulation in the OPPOSITE direction of the cycle currently
 // being tracked takes priority: forget the old POI (whatever sweep armed it)
@@ -1641,7 +1426,7 @@ if (state == 0 and any_hs) or (state == 2 and hs_imb_gated)
     fvg_top_line := tmp_fvg_l1
     fvg_bot_line := tmp_fvg_l2
     fvg_lbl := tmp_fvg_lb
-    active_sweep_px := hs_pdh ? pdh : hs_pwh ? pwh : hs_asia ? asia_h : hs_lon ? lon_h : hs_ny ? ny_h : hs_eqh ? touch_eqh_px : touch_bear_htf_edge
+    active_sweep_px := hs_pdh ? pdh : hs_pwh ? pwh : hs_eqh ? touch_eqh_px : touch_bear_htf_edge
     // Phase 1: zone liquidated (its own line turns green with a check via
     // f_poi_entry), then show the level price must break through to confirm
     // a bearish structure shift.
@@ -1673,7 +1458,7 @@ if (state == 0 and any_ls) or (state == 1 and ls_imb_gated)
     fvg_top_line := tmp_fvg_l1
     fvg_bot_line := tmp_fvg_l2
     fvg_lbl := tmp_fvg_lb
-    active_sweep_px := ls_pdl ? pdl : ls_pwl ? pwl : ls_asia ? asia_l : ls_lon ? lon_l : ls_ny ? ny_l : ls_eql ? touch_eql_px : touch_bull_htf_edge
+    active_sweep_px := ls_pdl ? pdl : ls_pwl ? pwl : ls_eql ? touch_eql_px : touch_bull_htf_edge
     line.delete(mss_ref_line)
     label.delete(mss_ref_lbl)
     label.delete(mss_ref_org)
@@ -2091,11 +1876,11 @@ asia_lbl_txt = show_session_labels ? asia_box_txt : ""
 lon_lbl_txt  = show_session_labels ? lon_box_txt  : ""
 ny_lbl_txt   = show_session_labels ? ny_box_txt   : ""
 
-if show_asia_box
+if show_asia_box and chart_sec <= 3600
     f_session_box(in_asia,   in_asia[1],   asia_live_h, asia_live_l, color.new(asia_box_col, 40), color.new(asia_box_col, 90), asia_lbl_txt, asia_boxes)
-if show_lon_box
+if show_lon_box and chart_sec <= 3600
     f_session_box(in_london, in_london[1], lon_live_h,  lon_live_l,  color.new(lon_box_col,  40), color.new(lon_box_col,  90), lon_lbl_txt,  lon_boxes)
-if show_ny_box
+if show_ny_box and chart_sec <= 3600
     f_session_box(in_ny,     in_ny[1],     ny_live_h,   ny_live_l,   color.new(ny_box_col,   30), color.new(ny_box_col,   90), ny_lbl_txt,   ny_boxes)
 
 // =============================================================
@@ -2119,18 +1904,6 @@ if use_sweep_alert and pwh_liq
     alert("POI Liquidado: PWH (Previous Week High) @ " + str.tostring(pwh, "#.#####"), alert.freq_once_per_bar)
 if use_sweep_alert and pwl_liq
     alert("POI Liquidado: PWL (Previous Week Low) @ " + str.tostring(pwl, "#.#####"), alert.freq_once_per_bar)
-if use_sweep_alert and asiah_liq
-    alert("POI Liquidado: Asia High @ " + str.tostring(asia_h, "#.#####"), alert.freq_once_per_bar)
-if use_sweep_alert and asial_liq
-    alert("POI Liquidado: Asia Low @ " + str.tostring(asia_l, "#.#####"), alert.freq_once_per_bar)
-if use_sweep_alert and lonh_liq
-    alert("POI Liquidado: London High @ " + str.tostring(lon_h, "#.#####"), alert.freq_once_per_bar)
-if use_sweep_alert and lonl_liq
-    alert("POI Liquidado: London Low @ " + str.tostring(lon_l, "#.#####"), alert.freq_once_per_bar)
-if use_sweep_alert and nyh_liq
-    alert("POI Liquidado: NY High @ " + str.tostring(ny_h, "#.#####"), alert.freq_once_per_bar)
-if use_sweep_alert and nyl_liq
-    alert("POI Liquidado: NY Low @ " + str.tostring(ny_l, "#.#####"), alert.freq_once_per_bar)
 if use_sweep_alert and eqh_liq
     alert("POI Liquidado: Equal Highs @ " + str.tostring(touch_eqh_px, "#.#####"), alert.freq_once_per_bar)
 if use_sweep_alert and eql_liq
@@ -2158,12 +1931,6 @@ var bool pdh_armed   = true
 var bool pdl_armed   = true
 var bool pwh_armed   = true
 var bool pwl_armed   = true
-var bool asiah_armed = true
-var bool asial_armed = true
-var bool lonh_armed  = true
-var bool lonl_armed  = true
-var bool nyh_armed   = true
-var bool nyl_armed   = true
 var bool eqh_armed   = true
 var bool eql_armed   = true
 
@@ -2173,15 +1940,6 @@ if is_new_day
 if is_new_week
     pwh_armed   := true
     pwl_armed   := true
-if asia_closed
-    asiah_armed := true
-    asial_armed := true
-if lon_closed
-    lonh_armed := true
-    lonl_armed := true
-if ny_sess_closed
-    nyh_armed := true
-    nyl_armed := true
 if eqh_new
     eqh_armed   := true
 if eql_new
@@ -2191,12 +1949,6 @@ pdh_cond   = use_near_alert and use_pdhl and not pdh_swept    and f_near(pdh)
 pdl_cond   = use_near_alert and use_pdhl and not pdl_swept    and f_near(pdl)
 pwh_cond   = use_near_alert and use_pwhl and not pwh_swept    and f_near(pwh)
 pwl_cond   = use_near_alert and use_pwhl and not pwl_swept    and f_near(pwl)
-asiah_cond = use_near_alert and use_asia and not asia_h_swept and f_near(asia_h)
-asial_cond = use_near_alert and use_asia and not asia_l_swept and f_near(asia_l)
-lonh_cond  = use_near_alert and use_lon_hl and not lon_h_swept and f_near(lon_h)
-lonl_cond  = use_near_alert and use_lon_hl and not lon_l_swept and f_near(lon_l)
-nyh_cond   = use_near_alert and use_ny_hl and not ny_h_swept and f_near(ny_h)
-nyl_cond   = use_near_alert and use_ny_hl and not ny_l_swept and f_near(ny_l)
 [eqh_nearest_px, eqh_nearest_bar] = f_eqh_nearest(eqh_arr, eqh_bar_arr)
 [eql_nearest_px, eql_nearest_bar] = f_eqh_nearest(eql_arr, eql_bar_arr)
 eqh_cond   = use_near_alert and use_eql  and f_near(eqh_nearest_px)
@@ -2206,12 +1958,6 @@ pdh_near_alert   = pdh_armed   and pdh_cond
 pdl_near_alert   = pdl_armed   and pdl_cond
 pwh_near_alert   = pwh_armed   and pwh_cond
 pwl_near_alert   = pwl_armed   and pwl_cond
-asiah_near_alert = asiah_armed and asiah_cond
-asial_near_alert = asial_armed and asial_cond
-lonh_near_alert  = lonh_armed  and lonh_cond
-lonl_near_alert  = lonl_armed  and lonl_cond
-nyh_near_alert   = nyh_armed   and nyh_cond
-nyl_near_alert   = nyl_armed   and nyl_cond
 eqh_near_alert   = eqh_armed   and eqh_cond
 eql_near_alert   = eql_armed   and eql_cond
 
@@ -2223,18 +1969,6 @@ if pwh_near_alert
     pwh_armed   := false
 if pwl_near_alert
     pwl_armed   := false
-if asiah_near_alert
-    asiah_armed := false
-if asial_near_alert
-    asial_armed := false
-if lonh_near_alert
-    lonh_armed := false
-if lonl_near_alert
-    lonl_armed := false
-if nyh_near_alert
-    nyh_armed := false
-if nyl_near_alert
-    nyl_armed := false
 if eqh_near_alert
     eqh_armed   := false
 if eql_near_alert
@@ -2248,18 +1982,6 @@ if f_far(pwh)
     pwh_armed   := true
 if f_far(pwl)
     pwl_armed   := true
-if f_far(asia_h)
-    asiah_armed := true
-if f_far(asia_l)
-    asial_armed := true
-if f_far(lon_h)
-    lonh_armed := true
-if f_far(lon_l)
-    lonl_armed := true
-if f_far(ny_h)
-    nyh_armed := true
-if f_far(ny_l)
-    nyl_armed := true
 if f_far(eqh_nearest_px)
     eqh_armed   := true
 if f_far(eql_nearest_px)
@@ -2273,18 +1995,6 @@ if pwh_near_alert
     alert("Price approaching PWH (Previous Week High) - " + str.tostring(pwh, "#.#####"), alert.freq_once_per_bar)
 if pwl_near_alert
     alert("Price approaching PWL (Previous Week Low) - " + str.tostring(pwl, "#.#####"), alert.freq_once_per_bar)
-if asiah_near_alert
-    alert("Price approaching Asia Range High - " + str.tostring(asia_h, "#.#####"), alert.freq_once_per_bar)
-if asial_near_alert
-    alert("Price approaching Asia Range Low - " + str.tostring(asia_l, "#.#####"), alert.freq_once_per_bar)
-if lonh_near_alert
-    alert("Price approaching Previous London High - " + str.tostring(lon_h, "#.#####"), alert.freq_once_per_bar)
-if lonl_near_alert
-    alert("Price approaching Previous London Low - " + str.tostring(lon_l, "#.#####"), alert.freq_once_per_bar)
-if nyh_near_alert
-    alert("Price approaching Previous NY High - " + str.tostring(ny_h, "#.#####"), alert.freq_once_per_bar)
-if nyl_near_alert
-    alert("Price approaching Previous NY Low - " + str.tostring(ny_l, "#.#####"), alert.freq_once_per_bar)
 if eqh_near_alert
     alert("Price approaching Equal Highs liquidity pool - " + str.tostring(eqh_nearest_px, "#.#####"), alert.freq_once_per_bar)
 if eql_near_alert
@@ -2399,80 +2109,6 @@ if fire_bm
 if fire_um
     alert("Price approaching MN FVG Bull - " + str.tostring(htf_um_px, "#.#####"), alert.freq_once_per_bar)
 
-// Generic chart-native imbalances: many can be concurrently active (unlike
-// the dedicated HTF zones, which track one bear + one bull gap per TF), so
-// they're kept as a running list of [price, origin bar] pairs. Mitigation
-// (not distance) is the only removal criterion — a gap that's temporarily
-// out of range still exists and reappears in the merge render once price
-// comes back within imb_dist, instead of being forgotten.
-var float[] bear_fvg_px    = array.new_float(0)
-var int[]   bear_fvg_org   = array.new_int(0)
-var bool[]  bear_fvg_armed = array.new_bool(0)
-var float[] bull_fvg_px    = array.new_float(0)
-var int[]   bull_fvg_org   = array.new_int(0)
-var bool[]  bull_fvg_armed = array.new_bool(0)
-
-if show_fvg_vis and fvg_tf_ok
-    // Use fully completed bars [3] and [1] (never the still-forming bar [0])
-    // so the gap size is final and doesn't flicker as the live candle forms.
-    bear_vis_gap = low[3] - high[1]
-    if bear_vis_gap >= fvg_min_gap
-        array.push(bear_fvg_px,    high[1])
-        array.push(bear_fvg_org,   time[1])
-        array.push(bear_fvg_armed, true)
-        if array.size(bear_fvg_px) > 20
-            array.shift(bear_fvg_px)
-            array.shift(bear_fvg_org)
-            array.shift(bear_fvg_armed)
-
-    bull_vis_gap = low[1] - high[3]
-    if bull_vis_gap >= fvg_min_gap
-        array.push(bull_fvg_px,    low[1])
-        array.push(bull_fvg_org,   time[1])
-        array.push(bull_fvg_armed, true)
-        if array.size(bull_fvg_px) > 20
-            array.shift(bull_fvg_px)
-            array.shift(bull_fvg_org)
-            array.shift(bull_fvg_armed)
-
-    n_bear_fvg = array.size(bear_fvg_px)
-    if n_bear_fvg > 0
-        for j = 0 to n_bear_fvg - 1
-            i = n_bear_fvg - 1 - j
-            if high >= array.get(bear_fvg_px, i)
-                array.remove(bear_fvg_px,    i)
-                array.remove(bear_fvg_org,   i)
-                array.remove(bear_fvg_armed, i)
-
-    n_bull_fvg = array.size(bull_fvg_px)
-    if n_bull_fvg > 0
-        for j = 0 to n_bull_fvg - 1
-            i = n_bull_fvg - 1 - j
-            if low <= array.get(bull_fvg_px, i)
-                array.remove(bull_fvg_px,    i)
-                array.remove(bull_fvg_org,   i)
-                array.remove(bull_fvg_armed, i)
-
-    // Proximity alerts for each still-active generic imbalance
-    if use_near_alert
-        n_bear_al = array.size(bear_fvg_px)
-        if n_bear_al > 0
-            for k = 0 to n_bear_al - 1
-                bpx = array.get(bear_fvg_px, k)
-                if f_near(bpx) and array.get(bear_fvg_armed, k)
-                    alert("Price approaching " + chart_tf_lbl + " FVG Bear - " + str.tostring(bpx, "#.#####"), alert.freq_once_per_bar)
-                    array.set(bear_fvg_armed, k, false)
-                if f_far(bpx)
-                    array.set(bear_fvg_armed, k, true)
-        n_bull_al = array.size(bull_fvg_px)
-        if n_bull_al > 0
-            for k = 0 to n_bull_al - 1
-                bpx = array.get(bull_fvg_px, k)
-                if f_near(bpx) and array.get(bull_fvg_armed, k)
-                    alert("Price approaching " + chart_tf_lbl + " FVG Bull - " + str.tostring(bpx, "#.#####"), alert.freq_once_per_bar)
-                    array.set(bull_fvg_armed, k, false)
-                if f_far(bpx)
-                    array.set(bull_fvg_armed, k, true)
 
 
 // Delete all managed drawings from previous bar
@@ -2497,11 +2133,11 @@ array.clear(managed_poi_labels)
 // stops right at the liquidating candle (extend=none, x2 = the liquidation
 // time) instead of continuing to extend across the candles that follow while
 // the trade plays out, which is what was overlapping the CE line and price
-// action in the screenshot. Still shown only if it was hit THIS session
-// (same session_id) — if it was hit in an earlier session, it's fully removed.
+// action in the screenshot. Still shown only if it was hit in the CURRENT
+// session (clock-based key, cur_sess_key) — once that session ends it's gone.
 f_poi_entry(float lvl, bool swept, int sw_t, int sw_s, string nm) =>
     is_active = swept and lvl == active_sweep_px and state != 0
-    same_sess = swept and not na(sw_s) and sw_s == session_id
+    same_sess = swept and not na(sw_s) and sw_s == cur_sess_key
     show      = (poi_in_rng(lvl) and not swept) or same_sess
     nm2       = is_active ? nm + " ✓" : nm
     end_t     = same_sess and not na(sw_t) ? sw_t : time
@@ -2519,7 +2155,7 @@ imb_line_faded = color.new(imb_line_col, imb_line_transp)
 imb_text_solid = color.new(imb_line_col, 0)
 active_col      = color.new(color.lime, 10)
 
-if show_levels or show_fvg_vis
+if show_levels
     poi_px  = array.new_float(0)
     poi_nm  = array.new_string(0)
     poi_cl  = array.new<color>(0)   // line color
@@ -2576,82 +2212,6 @@ if show_levels or show_fvg_vis
             array.push(poi_ext, not frz_pwl)
             array.push(poi_end, end_pwl)
             array.push(poi_hi, false)
-    if show_levels and use_asia
-        [show_ah, nm_ah, act_ah, frz_ah, end_ah] = f_poi_entry(asia_h, asia_h_swept, asia_h_swept_t, asia_h_swept_s, "Asia H")
-        // Session H-L: delete the line the instant it's swept, don't keep
-        // the frozen "ghost" f_poi_entry gives every other POI type — an
-        // already-liquidated session extreme isn't a level worth referencing
-        // anymore. PDH/PDL/PWH/PWL/EQH/EQL are untouched (f_poi_entry itself
-        // isn't changed), only these 6 session-H-L push sites override it.
-        if show_ah and not asia_h_swept
-            array.push(poi_px, asia_h)
-            array.push(poi_nm, nm_ah)
-            array.push(poi_cl, act_ah ? active_col : poi_line_solid)
-            array.push(poi_tx, act_ah ? active_col : poi_line_solid)
-            array.push(poi_pr, 30)
-            array.push(poi_bar, nz(asia_h_bar, time))
-            array.push(poi_ext, not frz_ah)
-            array.push(poi_end, end_ah)
-            array.push(poi_hi, true)
-        [show_al, nm_al, act_al, frz_al, end_al] = f_poi_entry(asia_l, asia_l_swept, asia_l_swept_t, asia_l_swept_s, "Asia L")
-        if show_al and not asia_l_swept
-            array.push(poi_px, asia_l)
-            array.push(poi_nm, nm_al)
-            array.push(poi_cl, act_al ? active_col : poi_line_solid)
-            array.push(poi_tx, act_al ? active_col : poi_line_solid)
-            array.push(poi_pr, 31)
-            array.push(poi_bar, nz(asia_l_bar, time))
-            array.push(poi_ext, not frz_al)
-            array.push(poi_end, end_al)
-            array.push(poi_hi, false)
-    if show_levels and use_lon_hl
-        [show_lh, nm_lh, act_lh, frz_lh, end_lh] = f_poi_entry(lon_h, lon_h_swept, lon_h_swept_t, lon_h_swept_s, "London H")
-        // Same delete-on-sweep override as Asia above. The reinforcement
-        // check below (f_reinforced_high) still applies while unswept.
-        if show_lh and not lon_h_swept and f_reinforced_high(lon_h)
-            array.push(poi_px, lon_h)
-            array.push(poi_nm, nm_lh)
-            array.push(poi_cl, act_lh ? active_col : poi_line_solid)
-            array.push(poi_tx, act_lh ? active_col : poi_line_solid)
-            array.push(poi_pr, 32)
-            array.push(poi_bar, nz(lon_h_bar, time))
-            array.push(poi_ext, not frz_lh)
-            array.push(poi_end, end_lh)
-            array.push(poi_hi, true)
-        [show_ll, nm_ll, act_ll, frz_ll, end_ll] = f_poi_entry(lon_l, lon_l_swept, lon_l_swept_t, lon_l_swept_s, "London L")
-        if show_ll and not lon_l_swept and f_reinforced_low(lon_l)
-            array.push(poi_px, lon_l)
-            array.push(poi_nm, nm_ll)
-            array.push(poi_cl, act_ll ? active_col : poi_line_solid)
-            array.push(poi_tx, act_ll ? active_col : poi_line_solid)
-            array.push(poi_pr, 33)
-            array.push(poi_bar, nz(lon_l_bar, time))
-            array.push(poi_ext, not frz_ll)
-            array.push(poi_end, end_ll)
-            array.push(poi_hi, false)
-    if show_levels and use_ny_hl
-        [show_nh, nm_nh, act_nh, frz_nh, end_nh] = f_poi_entry(ny_h, ny_h_swept, ny_h_swept_t, ny_h_swept_s, "NY H")
-        if show_nh and not ny_h_swept and f_reinforced_high(ny_h)
-            array.push(poi_px, ny_h)
-            array.push(poi_nm, nm_nh)
-            array.push(poi_cl, act_nh ? active_col : poi_line_solid)
-            array.push(poi_tx, act_nh ? active_col : poi_line_solid)
-            array.push(poi_pr, 34)
-            array.push(poi_bar, nz(ny_h_bar, time))
-            array.push(poi_ext, not frz_nh)
-            array.push(poi_end, end_nh)
-            array.push(poi_hi, true)
-        [show_nl, nm_nl, act_nl, frz_nl, end_nl] = f_poi_entry(ny_l, ny_l_swept, ny_l_swept_t, ny_l_swept_s, "NY L")
-        if show_nl and not ny_l_swept and f_reinforced_low(ny_l)
-            array.push(poi_px, ny_l)
-            array.push(poi_nm, nm_nl)
-            array.push(poi_cl, act_nl ? active_col : poi_line_solid)
-            array.push(poi_tx, act_nl ? active_col : poi_line_solid)
-            array.push(poi_pr, 35)
-            array.push(poi_bar, nz(ny_l_bar, time))
-            array.push(poi_ext, not frz_nl)
-            array.push(poi_end, end_nl)
-            array.push(poi_hi, false)
     if show_levels and use_eql
         // Every still-live (unswept) equal-high/low within visibility
         // distance shows — no single-slot overwrite, mirrors the HTF FVG
@@ -2694,7 +2254,7 @@ if show_levels or show_fvg_vis
             array.push(poi_cl, act_eqh_sw ? active_col : poi_line_solid)
             array.push(poi_tx, act_eqh_sw ? active_col : poi_line_solid)
             array.push(poi_pr, 40)
-            array.push(poi_bar, nz(eqh_swept_t, time))
+            array.push(poi_bar, nz(eqh_swept_o, nz(eqh_swept_t, time)))
             array.push(poi_ext, not frz_eqh_sw)
             array.push(poi_end, end_eqh_sw)
             array.push(poi_hi, true)
@@ -2705,7 +2265,7 @@ if show_levels or show_fvg_vis
             array.push(poi_cl, act_eql_sw ? active_col : poi_line_solid)
             array.push(poi_tx, act_eql_sw ? active_col : poi_line_solid)
             array.push(poi_pr, 41)
-            array.push(poi_bar, nz(eql_swept_t, time))
+            array.push(poi_bar, nz(eql_swept_o, nz(eql_swept_t, time)))
             array.push(poi_ext, not frz_eql_sw)
             array.push(poi_end, end_eql_sw)
             array.push(poi_hi, false)
@@ -2752,7 +2312,7 @@ if show_levels or show_fvg_vis
             array.push(poi_cl, act_b1h_sw ? active_col : imb_line_faded)
             array.push(poi_tx, act_b1h_sw ? active_col : imb_text_solid)
             array.push(poi_pr, 58)
-            array.push(poi_bar, nz(htf_b1h_swept_t, time))
+            array.push(poi_bar, nz(htf_b1h_swept_o, nz(htf_b1h_swept_t, time)))
             array.push(poi_ext, not frz_b1h_sw)
             array.push(poi_end, end_b1h_sw)
             array.push(poi_hi, true)
@@ -2763,7 +2323,7 @@ if show_levels or show_fvg_vis
             array.push(poi_cl, act_u1h_sw ? active_col : imb_line_faded)
             array.push(poi_tx, act_u1h_sw ? active_col : imb_text_solid)
             array.push(poi_pr, 59)
-            array.push(poi_bar, nz(htf_u1h_swept_t, time))
+            array.push(poi_bar, nz(htf_u1h_swept_o, nz(htf_u1h_swept_t, time)))
             array.push(poi_ext, not frz_u1h_sw)
             array.push(poi_end, end_u1h_sw)
             array.push(poi_hi, false)
@@ -2803,7 +2363,7 @@ if show_levels or show_fvg_vis
             array.push(poi_cl, act_b4h_sw ? active_col : imb_line_faded)
             array.push(poi_tx, act_b4h_sw ? active_col : imb_text_solid)
             array.push(poi_pr, 56)
-            array.push(poi_bar, nz(htf_b4h_swept_t, time))
+            array.push(poi_bar, nz(htf_b4h_swept_o, nz(htf_b4h_swept_t, time)))
             array.push(poi_ext, not frz_b4h_sw)
             array.push(poi_end, end_b4h_sw)
             array.push(poi_hi, true)
@@ -2814,7 +2374,7 @@ if show_levels or show_fvg_vis
             array.push(poi_cl, act_u4h_sw ? active_col : imb_line_faded)
             array.push(poi_tx, act_u4h_sw ? active_col : imb_text_solid)
             array.push(poi_pr, 57)
-            array.push(poi_bar, nz(htf_u4h_swept_t, time))
+            array.push(poi_bar, nz(htf_u4h_swept_o, nz(htf_u4h_swept_t, time)))
             array.push(poi_ext, not frz_u4h_sw)
             array.push(poi_end, end_u4h_sw)
             array.push(poi_hi, false)
@@ -2854,7 +2414,7 @@ if show_levels or show_fvg_vis
             array.push(poi_cl, act_bd_sw ? active_col : imb_line_faded)
             array.push(poi_tx, act_bd_sw ? active_col : imb_text_solid)
             array.push(poi_pr, 54)
-            array.push(poi_bar, nz(htf_bd_swept_t, time))
+            array.push(poi_bar, nz(htf_bd_swept_o, nz(htf_bd_swept_t, time)))
             array.push(poi_ext, not frz_bd_sw)
             array.push(poi_end, end_bd_sw)
             array.push(poi_hi, true)
@@ -2865,7 +2425,7 @@ if show_levels or show_fvg_vis
             array.push(poi_cl, act_ud_sw ? active_col : imb_line_faded)
             array.push(poi_tx, act_ud_sw ? active_col : imb_text_solid)
             array.push(poi_pr, 55)
-            array.push(poi_bar, nz(htf_ud_swept_t, time))
+            array.push(poi_bar, nz(htf_ud_swept_o, nz(htf_ud_swept_t, time)))
             array.push(poi_ext, not frz_ud_sw)
             array.push(poi_end, end_ud_sw)
             array.push(poi_hi, false)
@@ -2905,7 +2465,7 @@ if show_levels or show_fvg_vis
             array.push(poi_cl, act_bw_sw ? active_col : imb_line_faded)
             array.push(poi_tx, act_bw_sw ? active_col : imb_text_solid)
             array.push(poi_pr, 52)
-            array.push(poi_bar, nz(htf_bw_swept_t, time))
+            array.push(poi_bar, nz(htf_bw_swept_o, nz(htf_bw_swept_t, time)))
             array.push(poi_ext, not frz_bw_sw)
             array.push(poi_end, end_bw_sw)
             array.push(poi_hi, true)
@@ -2916,7 +2476,7 @@ if show_levels or show_fvg_vis
             array.push(poi_cl, act_uw_sw ? active_col : imb_line_faded)
             array.push(poi_tx, act_uw_sw ? active_col : imb_text_solid)
             array.push(poi_pr, 53)
-            array.push(poi_bar, nz(htf_uw_swept_t, time))
+            array.push(poi_bar, nz(htf_uw_swept_o, nz(htf_uw_swept_t, time)))
             array.push(poi_ext, not frz_uw_sw)
             array.push(poi_end, end_uw_sw)
             array.push(poi_hi, false)
@@ -2956,7 +2516,7 @@ if show_levels or show_fvg_vis
             array.push(poi_cl, act_bm_sw ? active_col : imb_line_faded)
             array.push(poi_tx, act_bm_sw ? active_col : imb_text_solid)
             array.push(poi_pr, 50)
-            array.push(poi_bar, nz(htf_bm_swept_t, time))
+            array.push(poi_bar, nz(htf_bm_swept_o, nz(htf_bm_swept_t, time)))
             array.push(poi_ext, not frz_bm_sw)
             array.push(poi_end, end_bm_sw)
             array.push(poi_hi, true)
@@ -2967,50 +2527,11 @@ if show_levels or show_fvg_vis
             array.push(poi_cl, act_um_sw ? active_col : imb_line_faded)
             array.push(poi_tx, act_um_sw ? active_col : imb_text_solid)
             array.push(poi_pr, 51)
-            array.push(poi_bar, nz(htf_um_swept_t, time))
+            array.push(poi_bar, nz(htf_um_swept_o, nz(htf_um_swept_t, time)))
             array.push(poi_ext, not frz_um_sw)
             array.push(poi_end, end_um_sw)
             array.push(poi_hi, false)
 
-    // --- Generic chart-native imbalances (whatever timeframe the chart is on) ---
-    // "Chart " prefix: f_tf_label(timeframe.period) returns e.g. "1H" for a
-    // 60-minute chart — textually IDENTICAL to the dedicated HTF-1H
-    // detector's own "1H FVG Bear/Bull" label whenever the chart happens to
-    // be viewed at 1H, even though the two are separate detectors with
-    // different thresholds (fvg_min_gap here vs. htf_fvg_min there) and
-    // different candle alignment. That collision read as "an imbalance that
-    // doesn't really exist" — a real gap under this looser, chart-native
-    // definition, mislabeled as if it were the stricter dedicated one. The
-    // prefix makes it unambiguous which detector produced a given zone.
-    if show_fvg_vis
-        n_bear_push = array.size(bear_fvg_px)
-        if n_bear_push > 0
-            for k = 0 to n_bear_push - 1
-                bpx = array.get(bear_fvg_px, k)
-                if f_imb_in_rng(bpx)
-                    array.push(poi_px, bpx)
-                    array.push(poi_nm, "Chart " + chart_tf_lbl + " FVG Bear")
-                    array.push(poi_cl, imb_line_faded)
-                    array.push(poi_tx, imb_text_solid)
-                    array.push(poi_pr, 60)
-                    array.push(poi_bar, array.get(bear_fvg_org, k))
-                    array.push(poi_ext, true)
-                    array.push(poi_end, time)
-                    array.push(poi_hi, true)
-        n_bull_push = array.size(bull_fvg_px)
-        if n_bull_push > 0
-            for k = 0 to n_bull_push - 1
-                bpx = array.get(bull_fvg_px, k)
-                if f_imb_in_rng(bpx)
-                    array.push(poi_px, bpx)
-                    array.push(poi_nm, "Chart " + chart_tf_lbl + " FVG Bull")
-                    array.push(poi_cl, imb_line_faded)
-                    array.push(poi_tx, imb_text_solid)
-                    array.push(poi_pr, 61)
-                    array.push(poi_bar, array.get(bull_fvg_org, k))
-                    array.push(poi_ext, true)
-                    array.push(poi_end, time)
-                    array.push(poi_hi, false)
 
     n_poi = array.size(poi_px)
     if n_poi > 0
@@ -3330,12 +2851,6 @@ alertcondition(pdh_near_alert,   title = "Price near PDH",     message = "Price 
 alertcondition(pdl_near_alert,   title = "Price near PDL",     message = "Price approaching PDL (Previous Day Low)")
 alertcondition(pwh_near_alert,   title = "Price near PWH",     message = "Price approaching PWH (Previous Week High)")
 alertcondition(pwl_near_alert,   title = "Price near PWL",     message = "Price approaching PWL (Previous Week Low)")
-alertcondition(asiah_near_alert, title = "Price near Asia H",  message = "Price approaching Asia Range High")
-alertcondition(asial_near_alert, title = "Price near Asia L",  message = "Price approaching Asia Range Low")
-alertcondition(lonh_near_alert,  title = "Price near London H", message = "Price approaching Previous London High")
-alertcondition(lonl_near_alert,  title = "Price near London L", message = "Price approaching Previous London Low")
-alertcondition(nyh_near_alert,   title = "Price near NY H",     message = "Price approaching Previous NY High")
-alertcondition(nyl_near_alert,   title = "Price near NY L",     message = "Price approaching Previous NY Low")
 alertcondition(eqh_near_alert,   title = "Price near EQH",     message = "Price approaching Equal Highs liquidity pool")
 alertcondition(eql_near_alert,   title = "Price near EQL",     message = "Price approaching Equal Lows liquidity pool")
 
@@ -3346,11 +2861,5 @@ alertcondition(pdh_liq,   title = "POI Liquidado: PDH",      message = "POI Liqu
 alertcondition(pdl_liq,   title = "POI Liquidado: PDL",      message = "POI Liquidado: PDL (Previous Day Low)")
 alertcondition(pwh_liq,   title = "POI Liquidado: PWH",      message = "POI Liquidado: PWH (Previous Week High)")
 alertcondition(pwl_liq,   title = "POI Liquidado: PWL",      message = "POI Liquidado: PWL (Previous Week Low)")
-alertcondition(asiah_liq, title = "POI Liquidado: Asia H",   message = "POI Liquidado: Asia High")
-alertcondition(asial_liq, title = "POI Liquidado: Asia L",   message = "POI Liquidado: Asia Low")
-alertcondition(lonh_liq,  title = "POI Liquidado: London H", message = "POI Liquidado: Previous London High")
-alertcondition(lonl_liq,  title = "POI Liquidado: London L", message = "POI Liquidado: Previous London Low")
-alertcondition(nyh_liq,   title = "POI Liquidado: NY H",     message = "POI Liquidado: Previous NY High")
-alertcondition(nyl_liq,   title = "POI Liquidado: NY L",     message = "POI Liquidado: Previous NY Low")
 alertcondition(eqh_liq,   title = "POI Liquidado: EQH",      message = "POI Liquidado: Equal Highs")
 alertcondition(eql_liq,   title = "POI Liquidado: EQL",      message = "POI Liquidado: Equal Lows")

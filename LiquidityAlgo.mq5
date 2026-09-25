@@ -17,7 +17,7 @@
 //|                                                                    |
 //|  The TRADING LOGIC below mirrors the final, validated Pine        |
 //|  version bar-for-bar:                                             |
-//|    1. A liquidity level (PDH/PDL, PWH/PWL, Asia/London/NY H-L,    |
+//|    1. A liquidity level (PDH/PDL, PWH/PWL,                        |
 //|       EQH/EQL) is crossed for the first time this period -> the   |
 //|       sweep arms (state 1 = bearish setup, state 2 = bullish).    |
 //|    2. The CE (structure) reference seeds at the TRUE wick extreme |
@@ -63,9 +63,6 @@ input int    ServerUtcOffsetHours = 0;
 input group "=== Liquidity Levels ==="
 input bool   UsePDHL       = true;
 input bool   UsePWHL       = true;
-input bool   UseAsiaHL     = true;
-input bool   UseLondonHL   = true;
-input bool   UseNYHL       = true;
 input bool   UseEQL        = true;
 input double SweepBuffer   = 0.0002;   // SL padding beyond the sweep wick
 
@@ -131,21 +128,12 @@ bool     prevInLondon = false;
 bool     prevInNy = false;
 
 // Structural levels + their "already swept this period" flags, mirroring
-// pdh_swept / asia_h_swept / etc. in the Pine version.
+// pdh_swept / pwh_swept / eqh_swept in the Pine version.
 double   pdh = 0, pdl = 0;           bool pdhSwept = false, pdlSwept = false;
 double   pwh = 0, pwl = 0;           bool pwhSwept = false, pwlSwept = false;
-double   asiaH = 0, asiaL = 0;       bool asiaHSwept = false, asiaLSwept = false;
-double   lonH = 0, lonL = 0;         bool lonHSwept = false, lonLSwept = false;
-double   nyH = 0, nyL = 0;           bool nyHSwept = false, nyLSwept = false;
 double   lastEqh = 0, lastEql = 0;   bool eqhSwept = false, eqlSwept = false;
 bool     haveEqh = false, haveEql = false;
 
-// Live running high/low while each session is in progress (frozen into
-// asiaH/asiaL etc. the instant the session ends — same pattern as the
-// lon_live_h/lon_h split in the Pine version).
-double   asiaLiveH = 0, asiaLiveL = 0; bool asiaLiveActive = false;
-double   lonLiveH = 0, lonLiveL = 0;   bool lonLiveActive = false;
-double   nyLiveH = 0, nyLiveL = 0;     bool nyLiveActive = false;
 
 // Equal-highs/lows pivot history (price only; that's all Pine's swh_hist/
 // swl_hist tracked too).
@@ -198,7 +186,7 @@ bool InAsia(datetime t)
   }
 
 //======================================================================
-// STRUCTURAL LEVELS: PDH/PDL, PWH/PWL, Asia/London/NY H-L, EQH/EQL
+// STRUCTURAL LEVELS: PDH/PDL, PWH/PWL, EQH/EQL
 //======================================================================
 
 void UpdatePdhPdl()
@@ -232,48 +220,6 @@ void UpdatePwhPwl()
      }
   }
 
-// Asia/London/NY running high-low, frozen at session close — called once
-// per NEW M1 bar with that bar's own OHLC.
-void UpdateSessionHL(const M1Bar &bar)
-  {
-   bool inA = InAsia(bar.t), inL = InLondon(bar.t), inN = InNy(bar.t);
-
-   if(inA)
-     {
-      if(!asiaLiveActive) { asiaLiveH = bar.h; asiaLiveL = bar.l; asiaLiveActive = true; }
-      else { asiaLiveH = MathMax(asiaLiveH, bar.h); asiaLiveL = MathMin(asiaLiveL, bar.l); }
-     }
-   else if(asiaLiveActive)
-     {
-      asiaH = asiaLiveH; asiaL = asiaLiveL;
-      asiaHSwept = false; asiaLSwept = false;
-      asiaLiveActive = false;
-     }
-
-   if(inL)
-     {
-      if(!lonLiveActive) { lonLiveH = bar.h; lonLiveL = bar.l; lonLiveActive = true; }
-      else { lonLiveH = MathMax(lonLiveH, bar.h); lonLiveL = MathMin(lonLiveL, bar.l); }
-     }
-   else if(lonLiveActive)
-     {
-      lonH = lonLiveH; lonL = lonLiveL;
-      lonHSwept = false; lonLSwept = false;
-      lonLiveActive = false;
-     }
-
-   if(inN)
-     {
-      if(!nyLiveActive) { nyLiveH = bar.h; nyLiveL = bar.l; nyLiveActive = true; }
-      else { nyLiveH = MathMax(nyLiveH, bar.h); nyLiveL = MathMin(nyLiveL, bar.l); }
-     }
-   else if(nyLiveActive)
-     {
-      nyH = nyLiveH; nyL = nyLiveL;
-      nyHSwept = false; nyLSwept = false;
-      nyLiveActive = false;
-     }
-  }
 
 // Equal highs/lows: simple pivot-high/pivot-low check on EqlRefTF, grouped
 // by EqlTolerance, mirroring the Pine version's swh_hist/swl_hist logic.
@@ -457,30 +403,11 @@ void UpdateAttemptFromLastDeal()
 // SWEEP DETECTION — first bar price crosses a level this period.
 //======================================================================
 
-// London/NY H-L are session extremes, not structural highs/lows the way
-// PDH/PDL, PWH/PWL, and Asia H/L are — every session has SOME high and SOME
-// low, but that alone doesn't make it a real liquidity pool. Per the user's
-// call (Pine version): a London/NY H-L only counts as tradeable liquidity —
-// able to arm the sweep -> CE -> entry cycle — when it's REINFORCED, i.e. it
-// lands within EqlTolerance of a confirmed EQH/EQL. (The Pine version also
-// checks the dedicated HTF 1H/4H/D/W/M FVG zones; those were never ported
-// here since they were visual-only in Pine, so EQH/EQL is the one
-// reinforcement signal available on this side.) The level's Swept flag
-// still updates on ANY cross regardless of reinforcement — that only
-// matters for whether it's allowed to ARM the state machine, not whether
-// it's marked as already-crossed for this period.
-bool ReinforcedHigh(double lvl) { return haveEqh && MathAbs(lvl - lastEqh) <= EqlTolerance; }
-bool ReinforcedLow(double lvl)  { return haveEql && MathAbs(lvl - lastEql) <= EqlTolerance; }
 
 bool AnyHighSweep(const M1Bar &bar, double &leveOut)
   {
    if(UsePDHL && pdh>0 && !pdhSwept && bar.h >= pdh) { pdhSwept=true; leveOut=pdh; return true; }
    if(UsePWHL && pwh>0 && !pwhSwept && bar.h >= pwh) { pwhSwept=true; leveOut=pwh; return true; }
-   if(UseAsiaHL && asiaH>0 && !asiaHSwept && bar.h >= asiaH) { asiaHSwept=true; leveOut=asiaH; return true; }
-   if(UseLondonHL && lonH>0 && !lonHSwept && bar.h >= lonH)
-     { lonHSwept=true; if(ReinforcedHigh(lonH)) { leveOut=lonH; return true; } }
-   if(UseNYHL && nyH>0 && !nyHSwept && bar.h >= nyH)
-     { nyHSwept=true; if(ReinforcedHigh(nyH)) { leveOut=nyH; return true; } }
    if(UseEQL && haveEqh && !eqhSwept && bar.h >= lastEqh) { eqhSwept=true; leveOut=lastEqh; return true; }
    return false;
   }
@@ -488,11 +415,6 @@ bool AnyLowSweep(const M1Bar &bar, double &leveOut)
   {
    if(UsePDHL && pdl>0 && !pdlSwept && bar.l <= pdl) { pdlSwept=true; leveOut=pdl; return true; }
    if(UsePWHL && pwl>0 && !pwlSwept && bar.l <= pwl) { pwlSwept=true; leveOut=pwl; return true; }
-   if(UseAsiaHL && asiaL>0 && !asiaLSwept && bar.l <= asiaL) { asiaLSwept=true; leveOut=asiaL; return true; }
-   if(UseLondonHL && lonL>0 && !lonLSwept && bar.l <= lonL)
-     { lonLSwept=true; if(ReinforcedLow(lonL)) { leveOut=lonL; return true; } }
-   if(UseNYHL && nyL>0 && !nyLSwept && bar.l <= nyL)
-     { nyLSwept=true; if(ReinforcedLow(nyL)) { leveOut=nyL; return true; } }
    if(UseEQL && haveEql && !eqlSwept && bar.l <= lastEql) { eqlSwept=true; leveOut=lastEql; return true; }
    return false;
   }
@@ -519,7 +441,6 @@ void ProcessNewM1Bar(const M1Bar &bar)
 
    UpdatePdhPdl();
    UpdatePwhPwl();
-   UpdateSessionHL(bar);
    UpdateEqlOnNewRefBar();
    UpdateAttemptFromLastDeal();
 
