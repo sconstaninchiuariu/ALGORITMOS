@@ -305,10 +305,16 @@ f_agg_step(int p, array<float> agg, array<int> aggt) =>
             array.set(agg, 1, math.min(array.get(agg, 1), low))
     [done, ct, cct, ch, cl]
 
-// ROOT CAUSE for the cap — it used to be 50 and evicted the OLDEST gap by
-// raw count, so still-open 1H/4H gaps next to price vanished after a few
-// weeks. Plain floats/ints; a large cap costs nothing until drawn.
-htf_gap_cap = 2000
+// RE10110 fix: a 2000-deep cap meant the outer/is-supply recompute (O(n log
+// n), run whenever an array changes and inside the render loop) could still
+// be asked to sort/scan 2000 elements x10 arrays every time a candle closed.
+// 2000 unmitigated gaps per side was never realistic; these caps are sized
+// comfortably above any plausible unmitigated stack depth per timeframe.
+htf_gap_cap_1h = 200
+htf_gap_cap_4h = 200
+htf_gap_cap_d  = 60
+htf_gap_cap_w  = 60
+htf_gap_cap_m  = 24
 
 // Pushes one closed source candle into its 3-candle rolling buffer and
 // records a fair value gap when the 3 candles form one: bear when candle 1's
@@ -317,7 +323,7 @@ htf_gap_cap = 2000
 // middle (impulse) candle's open time — the line's start, identical on every
 // chart TF. cre = when the gap came into existence (candle 3's close); only
 // price AFTER that can mitigate it. Candles already fed are skipped.
-f_feed(int t, int cre_t, float h, float l, array<float> hb, array<float> lb, array<int> tb, array<float> bn, array<float> bf, array<int> bo, array<int> bc, array<float> un, array<float> uf, array<int> uo, array<int> uc) =>
+f_feed(int t, int cre_t, float h, float l, array<float> hb, array<float> lb, array<int> tb, array<float> bn, array<float> bf, array<int> bo, array<int> bc, array<float> un, array<float> uf, array<int> uo, array<int> uc, int cap) =>
     int fed = 0
     if not na(t) and not na(h) and (array.size(tb) == 0 or t > array.get(tb, 0))
         fed := 1
@@ -339,7 +345,7 @@ f_feed(int t, int cre_t, float h, float l, array<float> hb, array<float> lb, arr
                 array.push(bf, lC)
                 array.push(bo, tBm)
                 array.push(bc, cre_t)
-                if array.size(bn) > htf_gap_cap
+                if array.size(bn) > cap
                     array.shift(bn)
                     array.shift(bf)
                     array.shift(bo)
@@ -349,7 +355,7 @@ f_feed(int t, int cre_t, float h, float l, array<float> hb, array<float> lb, arr
                 array.push(uf, hC)
                 array.push(uo, tBm)
                 array.push(uc, cre_t)
-                if array.size(un) > htf_gap_cap
+                if array.size(un) > cap
                     array.shift(un)
                     array.shift(uf)
                     array.shift(uo)
@@ -359,38 +365,55 @@ f_feed(int t, int cre_t, float h, float l, array<float> hb, array<float> lb, arr
 // One source, one chart bar: feed whatever source candles closed on it.
 // Lower-tf path: only candles that have closed (the last intrabar of the
 // realtime chart bar may still be forming; it is fed when the bar confirms).
-f_src_step(bool hi, bool ag_done, int ag_t, int ag_cct, float ag_h, float ag_l, array<int> lt, array<int> lc, array<float> lh, array<float> ll, array<float> hb, array<float> lb, array<int> tb, array<float> bn, array<float> bf, array<int> bo, array<int> bc, array<float> un, array<float> uf, array<int> uo, array<int> uc) =>
+f_src_step(bool hi, bool ag_done, int ag_t, int ag_cct, float ag_h, float ag_l, array<int> lt, array<int> lc, array<float> lh, array<float> ll, array<float> hb, array<float> lb, array<int> tb, array<float> bn, array<float> bf, array<int> bo, array<int> bc, array<float> un, array<float> uf, array<int> uo, array<int> uc, int cap) =>
     int fed = 0
     if hi
         n = array.size(lt)
         if n > 0
             for i = 0 to n - 1
                 if i < n - 1 or barstate.isconfirmed
-                    fed += f_feed(array.get(lt, i), array.get(lc, i), array.get(lh, i), array.get(ll, i), hb, lb, tb, bn, bf, bo, bc, un, uf, uo, uc)
+                    fed += f_feed(array.get(lt, i), array.get(lc, i), array.get(lh, i), array.get(ll, i), hb, lb, tb, bn, bf, bo, bc, un, uf, uo, uc, cap)
     else if ag_done
-        fed += f_feed(ag_t, ag_cct, ag_h, ag_l, hb, lb, tb, bn, bf, bo, bc, un, uf, uo, uc)
+        fed += f_feed(ag_t, ag_cct, ag_h, ag_l, hb, lb, tb, bn, bf, bo, bc, un, uf, uo, uc, cap)
     fed
 
 // Stacked gaps: several same-TF, same-direction gaps from one leg (ranges
 // touching within merge_tol, or formed within leg_ms of each other) are one
 // stack, and only its OUTERMOST gap — the last one price would liquidate —
-// is a POI. True when no other gap in the array is farther from price than
-// gap i and linked to it.
-f_gap_is_outer(array<float> near_arr, array<float> far_arr, array<int> org_arr, int i, bool is_supply, int leg_ms) =>
-    e = array.get(near_arr, i)
-    f = array.get(far_arr, i)
-    o = array.get(org_arr, i)
-    bool outer = true
-    int  n = array.size(near_arr)
-    for j = 0 to n - 1
-        if j != i
-            ej = array.get(near_arr, j)
-            if is_supply ? ej > e : ej < e
-                linked = (is_supply ? ej <= f + merge_tol : ej >= f - merge_tol) or math.abs(array.get(org_arr, j) - o) <= leg_ms
-                if linked
-                    outer := false
-                    break
-    outer
+// is a POI.
+//
+// RE10110 fix: the old version checked "is gap i outer" one at a time with
+// a full O(n) scan per call, and both f_gap_cross (per touch) and every
+// render loop (per element, unconditionally, every bar) called it inside
+// their own loop — an O(n^2) cost paid on every bar for all 10 gap arrays.
+// This computes every gap's outer flag in ONE O(n log n) pass (sort
+// farthest-from-price-first, then walk inward chaining linked gaps into the
+// current stack), so a caller that needs the whole array's flags pays
+// n log n once instead of n^2.
+f_recompute_outer(array<float> near_arr, array<float> far_arr, array<int> org_arr, bool is_supply, int leg_ms) =>
+    n = array.size(near_arr)
+    result = array.new_bool(n, true)
+    if n > 0
+        idx = array.sort_indices(near_arr, is_supply ? order.descending : order.ascending)
+        float cur_near = na
+        float cur_far  = na
+        int   cur_org  = na
+        bool  have_cur = false
+        for k = 0 to n - 1
+            i = array.get(idx, k)
+            e = array.get(near_arr, i)
+            f = array.get(far_arr, i)
+            o = array.get(org_arr, i)
+            bool outer = true
+            if have_cur
+                linked = (is_supply ? cur_near <= f + merge_tol : cur_near >= f - merge_tol) or math.abs(cur_org - o) <= leg_ms
+                outer := not linked
+            array.set(result, i, outer)
+            cur_near := e
+            cur_far  := f
+            cur_org  := o
+            have_cur := true
+    result
 
 // Removes every gap price has now reached (after the gap existed), at the
 // common 15m clock. Inner gaps of a stack are removed silently; only an
@@ -403,6 +426,7 @@ f_gap_cross(array<float> near_arr, array<float> far_arr, array<int> org_arr, arr
     int   xo   = na
     int   n = array.size(near_arr)
     if n > 0
+        outer_flags = f_recompute_outer(near_arr, far_arr, org_arr, is_supply, leg_ms)
         hits = array.new_int(0)
         tms  = array.new_int(0)
         for i = 0 to n - 1
@@ -417,7 +441,7 @@ f_gap_cross(array<float> near_arr, array<float> far_arr, array<int> org_arr, arr
             for k = 0 to nh - 1
                 i = array.get(hits, k)
                 e = array.get(near_arr, i)
-                if f_gap_is_outer(near_arr, far_arr, org_arr, i, is_supply, leg_ms)
+                if array.get(outer_flags, i)
                     if not hit or (is_supply ? e > edge : e < edge)
                         hit  := true
                         edge := e
@@ -529,11 +553,11 @@ var int[]   htf_um_cre_arr   = array.new_int(0)
 
 // Feed first, then mitigation: a gap created on this bar can only be
 // mitigated by price after its creation time (f_cross_t's `since`).
-fed_60  = f_src_step(hi_60,  a60_done,  a60_t,  a60_ct,  a60_h,  a60_l,  lt60,  lc60,  lh60,  ll60,  hb60,  lb60,  tb60,  htf_b1h_near_arr, htf_b1h_far_arr, htf_b1h_org_arr, htf_b1h_cre_arr, htf_u1h_near_arr, htf_u1h_far_arr, htf_u1h_org_arr, htf_u1h_cre_arr)
-fed_240 = f_src_step(hi_240, a240_done, a240_t, a240_ct, a240_h, a240_l, lt240, lc240, lh240, ll240, hb240, lb240, tb240, htf_b4h_near_arr, htf_b4h_far_arr, htf_b4h_org_arr, htf_b4h_cre_arr, htf_u4h_near_arr, htf_u4h_far_arr, htf_u4h_org_arr, htf_u4h_cre_arr)
-fed_D   = f_src_step(hi_D,   aD_done,   aD_t,   aD_ct,   aD_h,   aD_l,   ltD,   lcD,   lhD,   llD,   hbD,   lbD,   tbD,   htf_bd_near_arr,  htf_bd_far_arr,  htf_bd_org_arr,  htf_bd_cre_arr,  htf_ud_near_arr,  htf_ud_far_arr,  htf_ud_org_arr,  htf_ud_cre_arr)
-fed_W   = f_src_step(hi_W,   aW_done,   aW_t,   aW_ct,   aW_h,   aW_l,   ltW,   lcW,   lhW,   llW,   hbW,   lbW,   tbW,   htf_bw_near_arr,  htf_bw_far_arr,  htf_bw_org_arr,  htf_bw_cre_arr,  htf_uw_near_arr,  htf_uw_far_arr,  htf_uw_org_arr,  htf_uw_cre_arr)
-fed_M   = f_src_step(false,  aM_done,   aM_t,   aM_ct,   aM_h,   aM_l,   ltW,   lcW,   lhW,   llW,   hbM,   lbM,   tbM,   htf_bm_near_arr,  htf_bm_far_arr,  htf_bm_org_arr,  htf_bm_cre_arr,  htf_um_near_arr,  htf_um_far_arr,  htf_um_org_arr,  htf_um_cre_arr)
+fed_60  = f_src_step(hi_60,  a60_done,  a60_t,  a60_ct,  a60_h,  a60_l,  lt60,  lc60,  lh60,  ll60,  hb60,  lb60,  tb60,  htf_b1h_near_arr, htf_b1h_far_arr, htf_b1h_org_arr, htf_b1h_cre_arr, htf_u1h_near_arr, htf_u1h_far_arr, htf_u1h_org_arr, htf_u1h_cre_arr, htf_gap_cap_1h)
+fed_240 = f_src_step(hi_240, a240_done, a240_t, a240_ct, a240_h, a240_l, lt240, lc240, lh240, ll240, hb240, lb240, tb240, htf_b4h_near_arr, htf_b4h_far_arr, htf_b4h_org_arr, htf_b4h_cre_arr, htf_u4h_near_arr, htf_u4h_far_arr, htf_u4h_org_arr, htf_u4h_cre_arr, htf_gap_cap_4h)
+fed_D   = f_src_step(hi_D,   aD_done,   aD_t,   aD_ct,   aD_h,   aD_l,   ltD,   lcD,   lhD,   llD,   hbD,   lbD,   tbD,   htf_bd_near_arr,  htf_bd_far_arr,  htf_bd_org_arr,  htf_bd_cre_arr,  htf_ud_near_arr,  htf_ud_far_arr,  htf_ud_org_arr,  htf_ud_cre_arr,  htf_gap_cap_d)
+fed_W   = f_src_step(hi_W,   aW_done,   aW_t,   aW_ct,   aW_h,   aW_l,   ltW,   lcW,   lhW,   llW,   hbW,   lbW,   tbW,   htf_bw_near_arr,  htf_bw_far_arr,  htf_bw_org_arr,  htf_bw_cre_arr,  htf_uw_near_arr,  htf_uw_far_arr,  htf_uw_org_arr,  htf_uw_cre_arr,  htf_gap_cap_w)
+fed_M   = f_src_step(false,  aM_done,   aM_t,   aM_ct,   aM_h,   aM_l,   ltW,   lcW,   lhW,   llW,   hbM,   lbM,   tbM,   htf_bm_near_arr,  htf_bm_far_arr,  htf_bm_org_arr,  htf_bm_cre_arr,  htf_um_near_arr,  htf_um_far_arr,  htf_um_org_arr,  htf_um_cre_arr,  htf_gap_cap_m)
 
 [touch_b1h, touch_b1h_edge, xt_b1h, xo_b1h] = f_gap_cross(htf_b1h_near_arr, htf_b1h_far_arr, htf_b1h_org_arr, htf_b1h_cre_arr, true, 3 * 3600000)
 [touch_b4h, touch_b4h_edge, xt_b4h, xo_b4h] = f_gap_cross(htf_b4h_near_arr, htf_b4h_far_arr, htf_b4h_org_arr, htf_b4h_cre_arr, true, 3 * 14400000)
@@ -2323,9 +2347,10 @@ if show_levels
     if show_levels and use_htf_1h
         n_b1h = array.size(htf_b1h_near_arr)
         if n_b1h > 0
+            b1h_outer = f_recompute_outer(htf_b1h_near_arr, htf_b1h_far_arr, htf_b1h_org_arr, true, 3 * 3600000)
             for i = 0 to n_b1h - 1
                 px = array.get(htf_b1h_near_arr, i)
-                if f_imb_in_rng(px) and f_gap_is_outer(htf_b1h_near_arr, htf_b1h_far_arr, htf_b1h_org_arr, i, true, 3 * 3600000)
+                if f_imb_in_rng(px) and array.get(b1h_outer, i)
                     array.push(poi_px, px)
                     array.push(poi_nm, "1H FVG Bear")
                     array.push(poi_cl, imb_line_faded)
@@ -2337,9 +2362,10 @@ if show_levels
                     array.push(poi_hi, true)
         n_u1h = array.size(htf_u1h_near_arr)
         if n_u1h > 0
+            u1h_outer = f_recompute_outer(htf_u1h_near_arr, htf_u1h_far_arr, htf_u1h_org_arr, false, 3 * 3600000)
             for i = 0 to n_u1h - 1
                 px = array.get(htf_u1h_near_arr, i)
-                if f_imb_in_rng(px) and f_gap_is_outer(htf_u1h_near_arr, htf_u1h_far_arr, htf_u1h_org_arr, i, false, 3 * 3600000)
+                if f_imb_in_rng(px) and array.get(u1h_outer, i)
                     array.push(poi_px, px)
                     array.push(poi_nm, "1H FVG Bull")
                     array.push(poi_cl, imb_line_faded)
@@ -2377,9 +2403,10 @@ if show_levels
     if show_levels and use_htf_4h
         n_b4h = array.size(htf_b4h_near_arr)
         if n_b4h > 0
+            b4h_outer = f_recompute_outer(htf_b4h_near_arr, htf_b4h_far_arr, htf_b4h_org_arr, true, 3 * 14400000)
             for i = 0 to n_b4h - 1
                 px = array.get(htf_b4h_near_arr, i)
-                if f_imb_in_rng(px) and f_gap_is_outer(htf_b4h_near_arr, htf_b4h_far_arr, htf_b4h_org_arr, i, true, 3 * 14400000)
+                if f_imb_in_rng(px) and array.get(b4h_outer, i)
                     array.push(poi_px, px)
                     array.push(poi_nm, "4H FVG Bear")
                     array.push(poi_cl, imb_line_faded)
@@ -2391,9 +2418,10 @@ if show_levels
                     array.push(poi_hi, true)
         n_u4h = array.size(htf_u4h_near_arr)
         if n_u4h > 0
+            u4h_outer = f_recompute_outer(htf_u4h_near_arr, htf_u4h_far_arr, htf_u4h_org_arr, false, 3 * 14400000)
             for i = 0 to n_u4h - 1
                 px = array.get(htf_u4h_near_arr, i)
-                if f_imb_in_rng(px) and f_gap_is_outer(htf_u4h_near_arr, htf_u4h_far_arr, htf_u4h_org_arr, i, false, 3 * 14400000)
+                if f_imb_in_rng(px) and array.get(u4h_outer, i)
                     array.push(poi_px, px)
                     array.push(poi_nm, "4H FVG Bull")
                     array.push(poi_cl, imb_line_faded)
@@ -2428,9 +2456,10 @@ if show_levels
     if show_levels and use_htf_d
         n_bd = array.size(htf_bd_near_arr)
         if n_bd > 0
+            bd_outer = f_recompute_outer(htf_bd_near_arr, htf_bd_far_arr, htf_bd_org_arr, true, 4 * 86400000)
             for i = 0 to n_bd - 1
                 px = array.get(htf_bd_near_arr, i)
-                if f_imb_in_rng(px) and f_gap_is_outer(htf_bd_near_arr, htf_bd_far_arr, htf_bd_org_arr, i, true, 4 * 86400000)
+                if f_imb_in_rng(px) and array.get(bd_outer, i)
                     array.push(poi_px, px)
                     array.push(poi_nm, "D FVG Bear")
                     array.push(poi_cl, imb_line_faded)
@@ -2442,9 +2471,10 @@ if show_levels
                     array.push(poi_hi, true)
         n_ud = array.size(htf_ud_near_arr)
         if n_ud > 0
+            ud_outer = f_recompute_outer(htf_ud_near_arr, htf_ud_far_arr, htf_ud_org_arr, false, 4 * 86400000)
             for i = 0 to n_ud - 1
                 px = array.get(htf_ud_near_arr, i)
-                if f_imb_in_rng(px) and f_gap_is_outer(htf_ud_near_arr, htf_ud_far_arr, htf_ud_org_arr, i, false, 4 * 86400000)
+                if f_imb_in_rng(px) and array.get(ud_outer, i)
                     array.push(poi_px, px)
                     array.push(poi_nm, "D FVG Bull")
                     array.push(poi_cl, imb_line_faded)
@@ -2479,9 +2509,10 @@ if show_levels
     if show_levels and use_htf_w
         n_bw = array.size(htf_bw_near_arr)
         if n_bw > 0
+            bw_outer = f_recompute_outer(htf_bw_near_arr, htf_bw_far_arr, htf_bw_org_arr, true, 3 * 604800000)
             for i = 0 to n_bw - 1
                 px = array.get(htf_bw_near_arr, i)
-                if f_imb_in_rng(px) and f_gap_is_outer(htf_bw_near_arr, htf_bw_far_arr, htf_bw_org_arr, i, true, 3 * 604800000)
+                if f_imb_in_rng(px) and array.get(bw_outer, i)
                     array.push(poi_px, px)
                     array.push(poi_nm, "W FVG Bear")
                     array.push(poi_cl, imb_line_faded)
@@ -2493,9 +2524,10 @@ if show_levels
                     array.push(poi_hi, true)
         n_uw = array.size(htf_uw_near_arr)
         if n_uw > 0
+            uw_outer = f_recompute_outer(htf_uw_near_arr, htf_uw_far_arr, htf_uw_org_arr, false, 3 * 604800000)
             for i = 0 to n_uw - 1
                 px = array.get(htf_uw_near_arr, i)
-                if f_imb_in_rng(px) and f_gap_is_outer(htf_uw_near_arr, htf_uw_far_arr, htf_uw_org_arr, i, false, 3 * 604800000)
+                if f_imb_in_rng(px) and array.get(uw_outer, i)
                     array.push(poi_px, px)
                     array.push(poi_nm, "W FVG Bull")
                     array.push(poi_cl, imb_line_faded)
@@ -2530,9 +2562,10 @@ if show_levels
     if show_levels and use_htf_m
         n_bm = array.size(htf_bm_near_arr)
         if n_bm > 0
+            bm_outer = f_recompute_outer(htf_bm_near_arr, htf_bm_far_arr, htf_bm_org_arr, true, 3 * 2678400000)
             for i = 0 to n_bm - 1
                 px = array.get(htf_bm_near_arr, i)
-                if f_imb_in_rng(px) and f_gap_is_outer(htf_bm_near_arr, htf_bm_far_arr, htf_bm_org_arr, i, true, 3 * 2678400000)
+                if f_imb_in_rng(px) and array.get(bm_outer, i)
                     array.push(poi_px, px)
                     array.push(poi_nm, "MN FVG Bear")
                     array.push(poi_cl, imb_line_faded)
@@ -2544,9 +2577,10 @@ if show_levels
                     array.push(poi_hi, true)
         n_um = array.size(htf_um_near_arr)
         if n_um > 0
+            um_outer = f_recompute_outer(htf_um_near_arr, htf_um_far_arr, htf_um_org_arr, false, 3 * 2678400000)
             for i = 0 to n_um - 1
                 px = array.get(htf_um_near_arr, i)
-                if f_imb_in_rng(px) and f_gap_is_outer(htf_um_near_arr, htf_um_far_arr, htf_um_org_arr, i, false, 3 * 2678400000)
+                if f_imb_in_rng(px) and array.get(um_outer, i)
                     array.push(poi_px, px)
                     array.push(poi_nm, "MN FVG Bull")
                     array.push(poi_cl, imb_line_faded)
